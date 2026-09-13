@@ -1,0 +1,238 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    a { color: #4f86d1; }
+    a:hover { color: #6ea0e6; }
+    ::-webkit-scrollbar { width: 9px; }
+    ::-webkit-scrollbar-thumb { background: oklch(0.4 0.006 258); border-radius: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+  </style>
+</helmet>
+
+<div style="width:380px;height:880px;background:oklch(0.21 0.006 258);color:oklch(0.92 0.004 258);font-family:'Segoe UI',system-ui,-apple-system,'Helvetica Neue',Arial,sans-serif;display:flex;flex-direction:column;border:1px solid oklch(0.32 0.006 258);border-radius:6px;overflow:hidden;font-size:13px;">
+
+  <!-- Header: current manifest + reader -->
+  <div style="padding:14px 16px 10px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid oklch(0.3 0.006 258);flex-shrink:0;">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+      <div style="display:flex;align-items:center;gap:9px;min-width:0;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <path d="M3 6.5a1.5 1.5 0 011.5-1.5h4l1.5 2h9a1.5 1.5 0 011.5 1.5v9A1.5 1.5 0 0119 19H4.5A1.5 1.5 0 013 17.5v-11z" stroke="oklch(0.68 0.01 258)" stroke-width="1.6" stroke-linejoin="round"/>
+        </svg>
+        <div style="min-width:0;">
+          <div style="font-size:13.5px;font-weight:600;color:oklch(0.95 0.004 258);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">LUIS_FIGO</div>
+          <div style="font-size:11px;color:oklch(0.6 0.008 258);">reader: mostafa</div>
+        </div>
+      </div>
+      <button style="flex-shrink:0;display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:5px;border:1px solid oklch(0.4 0.008 258);background:transparent;color:oklch(0.82 0.006 258);font-size:11.5px;font-weight:500;cursor:pointer;">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="color:oklch(0.68 0.01 258);">
+          <path d="M4 7h13M17 7l-3-3M17 7l-3 3M20 17H7M7 17l3-3M7 17l3 3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        Change
+      </button>
+    </div>
+    <div style="font-size:11.5px;color:oklch(0.58 0.008 258);">40 cases loaded — select one below to begin.</div>
+  </div>
+
+  <!-- Tabs -->
+  <div style="display:flex;padding:0 16px;border-bottom:1px solid oklch(0.3 0.006 258);flex-shrink:0;">
+    <div style="padding:10px 4px;margin-right:22px;font-size:13px;font-weight:600;color:oklch(0.96 0.004 258);border-bottom:2px solid {{accent}};">Cases</div>
+    <div style="padding:10px 4px;font-size:13px;font-weight:500;color:oklch(0.52 0.008 258);border-bottom:2px solid transparent;">Annotation</div>
+  </div>
+
+  <!-- Cases content -->
+  <div style="padding:14px 16px 14px;flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;">
+
+    <!-- Progress -->
+    <div style="display:flex;flex-direction:column;gap:6px;flex-shrink:0;">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;font-size:11.5px;color:oklch(0.62 0.008 258);">
+        <span>Progress</span>
+        <span style="color:oklch(0.87 0.005 258);font-weight:600;font-size:12px;">12 of 40 complete</span>
+      </div>
+      <div style="height:5px;border-radius:3px;background:oklch(0.3 0.006 258);overflow:hidden;">
+        <div style="height:100%;width:30%;background:{{accent}};border-radius:3px;"></div>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div style="display:flex;flex-wrap:wrap;gap:6px;flex-shrink:0;">
+      <span style="padding:5px 11px;border-radius:999px;font-size:11.5px;font-weight:600;background:{{accent}};color:oklch(0.99 0 0);border:1px solid {{accent}};">All</span>
+      <span style="padding:5px 11px;border-radius:999px;font-size:11.5px;font-weight:600;background:transparent;color:oklch(0.68 0.008 258);border:1px solid oklch(0.4 0.008 258);">Unfinished</span>
+      <span style="padding:5px 11px;border-radius:999px;font-size:11.5px;font-weight:600;background:transparent;color:oklch(0.68 0.008 258);border:1px solid oklch(0.4 0.008 258);">Finished</span>
+      <span style="padding:5px 11px;border-radius:999px;font-size:11.5px;font-weight:600;background:transparent;color:oklch(0.74 0.15 30);border:1px solid oklch(0.5 0.13 25);">Attention</span>
+    </div>
+
+    <!-- Search -->
+    <div style="position:relative;flex-shrink:0;">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="position:absolute;left:10px;top:50%;transform:translateY(-50%);pointer-events:none;">
+        <circle cx="10.5" cy="10.5" r="6.5" stroke="oklch(0.55 0.008 258)" stroke-width="2"/>
+        <path d="M20 20l-4.35-4.35" stroke="oklch(0.55 0.008 258)" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <input type="text" placeholder="Jump to a case, for example 1 or sub-00001" style="width:100%;padding:8px 10px 8px 32px;border-radius:5px;border:1px solid oklch(0.38 0.008 258);background:oklch(0.24 0.006 258);color:oklch(0.88 0.004 258);font-size:12px;font-family:inherit;outline:none;">
+    </div>
+
+    <!-- Case list -->
+    <div style="flex:1;min-height:0;overflow-y:auto;border-radius:6px;border:1px solid oklch(0.3 0.006 258);background:oklch(0.235 0.006 258);">
+
+      <!-- sub-00000 : finished -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <circle cx="12" cy="12" r="9" stroke="oklch(0.72 0.15 150)" stroke-width="2"/>
+          <path d="M8 12.5l2.5 2.5L16 9.5" stroke="oklch(0.72 0.15 150)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00000</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.72 0.15 150 / 0.16);color:oklch(0.78 0.15 150);flex-shrink:0;">Finished</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00001 : in progress, SELECTED / current case -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px 9px 9px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;border-left:3px solid {{accent}};background:color-mix(in srgb, {{accent}} 14%, oklch(0.235 0.006 258));">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <circle cx="12" cy="12" r="9" stroke="oklch(0.78 0.14 80)" stroke-width="2"/>
+          <path d="M12 7v5l3.5 2" stroke="oklch(0.78 0.14 80)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span style="flex:1;font-size:13px;font-weight:600;color:oklch(0.97 0.003 258);">sub-00001</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.78 0.14 80 / 0.18);color:oklch(0.82 0.14 80);flex-shrink:0;">In progress</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.9 0.004 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00002 : attention -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <path d="M12 4.5l9 15.5H3l9-15.5z" stroke="oklch(0.66 0.19 25)" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M12 10v4" stroke="oklch(0.66 0.19 25)" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="12" cy="17" r="0.9" fill="oklch(0.66 0.19 25)"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00002</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.66 0.19 25 / 0.18);color:oklch(0.74 0.19 30);flex-shrink:0;">Attention</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00003 : new -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <circle cx="12" cy="12" r="9" stroke="oklch(0.5 0.008 258)" stroke-width="2" stroke-dasharray="2 3"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00003</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.5 0.008 258 / 0.18);color:oklch(0.66 0.008 258);flex-shrink:0;">New</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00005 : new -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;background:oklch(0.245 0.006 258);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <circle cx="12" cy="12" r="9" stroke="oklch(0.5 0.008 258)" stroke-width="2" stroke-dasharray="2 3"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00005</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.5 0.008 258 / 0.18);color:oklch(0.66 0.008 258);flex-shrink:0;">New</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00006 : finished -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <circle cx="12" cy="12" r="9" stroke="oklch(0.72 0.15 150)" stroke-width="2"/>
+          <path d="M8 12.5l2.5 2.5L16 9.5" stroke="oklch(0.72 0.15 150)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00006</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.72 0.15 150 / 0.16);color:oklch(0.78 0.15 150);flex-shrink:0;">Finished</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00007 : in progress -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;background:oklch(0.245 0.006 258);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <circle cx="12" cy="12" r="9" stroke="oklch(0.78 0.14 80)" stroke-width="2"/>
+          <path d="M12 7v5l3.5 2" stroke="oklch(0.78 0.14 80)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00007</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.78 0.14 80 / 0.18);color:oklch(0.82 0.14 80);flex-shrink:0;">In progress</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00008 : new -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <circle cx="12" cy="12" r="9" stroke="oklch(0.5 0.008 258)" stroke-width="2" stroke-dasharray="2 3"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00008</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.5 0.008 258 / 0.18);color:oklch(0.66 0.008 258);flex-shrink:0;">New</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00009 : attention -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;background:oklch(0.245 0.006 258);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <path d="M12 4.5l9 15.5H3l9-15.5z" stroke="oklch(0.66 0.19 25)" stroke-width="2" stroke-linejoin="round"/>
+          <path d="M12 10v4" stroke="oklch(0.66 0.19 25)" stroke-width="2" stroke-linecap="round"/>
+          <circle cx="12" cy="17" r="0.9" fill="oklch(0.66 0.19 25)"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00009</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.66 0.19 25 / 0.18);color:oklch(0.74 0.19 30);flex-shrink:0;">Attention</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00010 : finished -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-bottom:1px solid oklch(0.29 0.006 258);cursor:pointer;">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <circle cx="12" cy="12" r="9" stroke="oklch(0.72 0.15 150)" stroke-width="2"/>
+          <path d="M8 12.5l2.5 2.5L16 9.5" stroke="oklch(0.72 0.15 150)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00010</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.72 0.15 150 / 0.16);color:oklch(0.78 0.15 150);flex-shrink:0;">Finished</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+      <!-- sub-00011 : new -->
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer;background:oklch(0.245 0.006 258);">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+          <circle cx="12" cy="12" r="9" stroke="oklch(0.5 0.008 258)" stroke-width="2" stroke-dasharray="2 3"/>
+        </svg>
+        <span style="flex:1;font-size:13px;color:oklch(0.88 0.004 258);">sub-00011</span>
+        <span style="font-size:10px;font-weight:700;letter-spacing:0.3px;padding:2px 6px;border-radius:4px;background:oklch(0.5 0.008 258 / 0.18);color:oklch(0.66 0.008 258);flex-shrink:0;">New</span>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;opacity:0.35;">
+          <path d="M9 6l6 6-6 6" stroke="oklch(0.7 0.006 258)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+
+    </div>
+  </div>
+</div>
+</x-dc>
+<script data-dc-script data-props='{"accent":{"editor":"color","default":"#4f86d1","options":["#4f86d1","#5b8def","#3f9e6e","#8b7cf0"]}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? "#4f86d1" };
+  }
+}
+</script>
+</body>
+</html>
