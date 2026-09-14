@@ -1714,7 +1714,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # Lets an Alt-drag disarm the Segment Editor for the drag's duration,
         # so adjusting the contrast can never also paint.
         self.view_tools.alt_drag.editor_provider = lambda: self.segment_editor_widget
-        annotation_layout.addWidget(self.view_tools.widget)
+        # No on-screen contrast panel: ReviewViewTools no longer builds one
+        # (Alt + left-drag in a slice view is the only way to adjust
+        # window/level now, see AltDragWindowLevel), so there is nothing of
+        # its to add to the layout here.
         history_row = qt.QHBoxLayout()
         self.undo_button = qt.QPushButton("Undo")
         self.undo_button.connect("clicked()", self.on_undo)
