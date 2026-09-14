@@ -30,6 +30,12 @@ The following controls address the pilot list:
 2. **Undo.** `Ctrl+Z` undoes a Segment Editor change on the correction page,
    or the latest myoma-box/FIGO/Ddx annotation change on the annotation page.
    `Ctrl+Y` redoes it. The Segment Editor also has its native undo history.
+   Every default key above can be changed: the **Keyboard shortcuts…** button
+   in the module header opens a panel listing all rebindable actions (Undo,
+   Redo, Add myoma box, Redraw box, Delete box, Continue to FIGO typing, Save
+   draft). Click a field, press the new key combination, and **Save** —
+   bindings are remembered per Slicer user and the toolbar buttons update to
+   show whatever is currently bound.
 3. **Cervix label.** On the correction page, select the fixed **cervix**
    segment in the Segment Editor table and paint or erase it.
 4. **Cesarean scar niche label.** Use the fixed **cesarean scar niche**

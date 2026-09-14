@@ -138,6 +138,26 @@ CASE_FILTERS = (
     ("Attention", "attention"),
 )
 DEFAULT_CASE_FILTER = "all"
+
+# The reviewer-configurable keyboard shortcut panel. Each row is
+# (action id, label shown in the shortcut dialog, factory-default key
+# sequence, the widget method the shortcut activates, the attribute name of
+# a toolbar button to keep labelled with its current binding, and that
+# button's base text without the binding). Bindings are stored per-user in
+# QSettings under "MyomaReviewLite/Shortcuts/<action id>" so the defaults
+# below only apply the first time a reviewer opens the module.
+SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] = (
+    ("undo", "Undo", "Ctrl+Z", "on_undo", "undo_button", "Undo"),
+    ("redo", "Redo", "Ctrl+Y", "on_redo", "redo_button", "Redo"),
+    ("redo_alt", "Redo (alternate)", "Ctrl+Shift+Z", "on_redo", None, None),
+    ("add_box", "Add myoma box", "", "on_add_box", "add_button", "Add myoma box"),
+    ("redraw_box", "Redraw box", "", "on_redraw_box", "redraw_button", "Redraw"),
+    ("delete_box", "Delete box", "", "on_delete_box", "delete_button", "Delete"),
+    ("continue_to_figo", "Continue to FIGO typing", "", "on_continue_to_figo",
+     "continue_to_figo_button", "Done boxing → continue to FIGO typing"),
+    ("save_draft", "Save draft", "", "on_save_draft", "save_draft_button", "Save Draft"),
+)
+SHORTCUT_SETTINGS_PREFIX = "MyomaReviewLite/Shortcuts/"
 CASE_STATUS_TITLES = {
     QueueStatus.NEW: "New",
     QueueStatus.IN_PROGRESS: "In progress",
@@ -1102,6 +1122,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.annotation_undo: list[dict[str, Any]] = []
         self.annotation_redo: list[dict[str, Any]] = []
         self.shortcuts: list[Any] = []
+        self.shortcut_bindings: dict[str, Any] = {}
         self.view_tools: Any = None
         self.correction_tools: Any = None
         self.shift_crosshair_toggle: Any = None
@@ -1112,11 +1133,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if not SLICER_AVAILABLE:
             return
         self._build_ui()
-        for key, callback in (("Ctrl+Z", self.on_undo), ("Ctrl+Y", self.on_redo), ("Ctrl+Shift+Z", self.on_redo)):
-            shortcut = qt.QShortcut(qt.QKeySequence(key), slicer.util.mainWindow())
-            shortcut.connect("activated()", callback)
-            shortcut.enabled = False
-            self.shortcuts.append(shortcut)
+        self._install_shortcuts()
         self.roi_overlay = LiteRoiLabelOverlay(self)
         self.draw_tool = LiteRectangleDrawTool(self)
         self.click_selector = LiteRoiClickSelector(self)
@@ -1132,6 +1149,111 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         launch_path = os.environ.get("MYOMA_REVIEW_LITE_CASE", "").strip()
         if launch_path:
             qt.QTimer.singleShot(0, lambda path=launch_path: self.open_case(path))
+
+    def _shortcut_setting_key(self, action_id: str) -> str:
+        return f"{SHORTCUT_SETTINGS_PREFIX}{action_id}"
+
+    def _shortcut_key_sequence(self, settings: Any, action_id: str, default_key: str) -> str:
+        stored = settings.value(self._shortcut_setting_key(action_id), default_key)
+        return str(stored) if stored is not None else ""
+
+    def _install_shortcuts(self) -> None:
+        # Bindings are per-reviewer: each one is read from QSettings (falling
+        # back to the factory default the first time) so the panel opened via
+        # "Keyboard shortcuts..." can rebind them without a restart.
+        settings = qt.QSettings()
+        for action_id, _label, default_key, method_name, *_ in SHORTCUT_ACTIONS:
+            key_text = self._shortcut_key_sequence(settings, action_id, default_key)
+            shortcut = qt.QShortcut(qt.QKeySequence(key_text), slicer.util.mainWindow())
+            shortcut.connect("activated()", getattr(self, method_name))
+            shortcut.enabled = False
+            self.shortcuts.append(shortcut)
+            self.shortcut_bindings[action_id] = shortcut
+        self._refresh_shortcut_button_labels()
+
+    def _refresh_shortcut_button_labels(self) -> None:
+        # Keeps each toolbar button's label showing its *current* binding
+        # (which may differ from the factory default once a reviewer has
+        # rebound it), rather than a stale hint baked in at build time.
+        for action_id, _label, _default_key, _method_name, button_attr, base_text in SHORTCUT_ACTIONS:
+            if button_attr is None:
+                continue
+            button = getattr(self, button_attr, None)
+            if button is None:
+                continue
+            shortcut = self.shortcut_bindings.get(action_id)
+            key_text = shortcut.key().toString() if shortcut is not None else ""
+            button.text = f"{base_text} ({key_text})" if key_text else base_text
+
+    def on_configure_shortcuts(self) -> None:
+        """Open the shortcut panel so a reviewer can rebind any action."""
+        settings = qt.QSettings()
+        dialog = qt.QDialog(slicer.util.mainWindow())
+        dialog.setWindowTitle("Keyboard shortcuts")
+        layout = qt.QVBoxLayout(dialog)
+        form = qt.QFormLayout()
+        layout.addLayout(form)
+        editors: dict[str, Any] = {}
+        for action_id, label, _default_key, _method_name, *_ in SHORTCUT_ACTIONS:
+            editor = qt.QKeySequenceEdit()
+            shortcut = self.shortcut_bindings.get(action_id)
+            if shortcut is not None:
+                editor.setKeySequence(shortcut.key())
+            editors[action_id] = editor
+            row = qt.QHBoxLayout()
+            row.addWidget(editor, 1)
+            clear_button = qt.QToolButton()
+            clear_button.text = "Clear"
+            clear_button.connect("clicked()", lambda _checked=False, e=editor: e.clear())
+            row.addWidget(clear_button)
+            form.addRow(label, row)
+        hint = qt.QLabel(
+            "Click a field and press the new key combination. Leave a field "
+            "empty to disable that shortcut."
+        )
+        hint.wordWrap = True
+        layout.addWidget(hint)
+        restore_button = qt.QPushButton("Restore factory defaults")
+
+        def _restore_defaults() -> None:
+            for action_id, _label, default_key, _method_name, *_ in SHORTCUT_ACTIONS:
+                editors[action_id].setKeySequence(qt.QKeySequence(default_key))
+
+        restore_button.connect("clicked()", _restore_defaults)
+        layout.addWidget(restore_button)
+        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Save | qt.QDialogButtonBox.Cancel)
+        buttons.connect("accepted()", dialog.accept)
+        buttons.connect("rejected()", dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() != qt.QDialog.Accepted:
+            return
+
+        new_key_text = {
+            action_id: editor.keySequence().toString() for action_id, editor in editors.items()
+        }
+        seen: dict[str, str] = {}
+        conflicts: list[str] = []
+        labels = {action_id: label for action_id, label, *_ in SHORTCUT_ACTIONS}
+        for action_id, key_text in new_key_text.items():
+            if not key_text:
+                continue
+            if key_text in seen:
+                conflicts.append(f"{labels[seen[key_text]]} and {labels[action_id]} both use \"{key_text}\"")
+            else:
+                seen[key_text] = action_id
+        if conflicts:
+            qt.QMessageBox.warning(
+                slicer.util.mainWindow(),
+                "Shortcut conflict",
+                "These shortcuts were not saved because they collide:\n" + "\n".join(conflicts),
+            )
+            return
+
+        for action_id, key_text in new_key_text.items():
+            settings.setValue(self._shortcut_setting_key(action_id), key_text)
+            self.shortcut_bindings[action_id].setKey(qt.QKeySequence(key_text))
+        self._refresh_shortcut_button_labels()
 
     def _enable_synced_crosshair(self) -> None:
         # A small "+" that follows the mouse in whichever slice view is
@@ -1294,6 +1416,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.manifest_button = qt.QPushButton("Open case manifest")
         self.manifest_button.connect("clicked()", self.choose_manifest)
         header.addWidget(self.manifest_button)
+        self.shortcuts_button = qt.QPushButton("Keyboard shortcuts…")
+        self.shortcuts_button.connect("clicked()", self.on_configure_shortcuts)
+        header.addWidget(self.shortcuts_button)
         self.case_header = qt.QLabel("No case open")
         header.addWidget(self.case_header, 1)
         self.layout.addLayout(header)
@@ -1356,9 +1481,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.view_tools.alt_drag.editor_provider = lambda: self.segment_editor_widget
         annotation_layout.addWidget(self.view_tools.widget)
         history_row = qt.QHBoxLayout()
-        self.undo_button = qt.QPushButton("Undo (Ctrl+Z)")
+        self.undo_button = qt.QPushButton("Undo")
         self.undo_button.connect("clicked()", self.on_undo)
-        self.redo_button = qt.QPushButton("Redo (Ctrl+Y)")
+        self.redo_button = qt.QPushButton("Redo")
         self.redo_button.connect("clicked()", self.on_redo)
         history_row.addWidget(self.undo_button)
         history_row.addWidget(self.redo_button)
