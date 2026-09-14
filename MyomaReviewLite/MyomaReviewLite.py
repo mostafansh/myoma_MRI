@@ -15,7 +15,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 _MODULE_DIRECTORY = Path(__file__).resolve().parent
 if str(_MODULE_DIRECTORY) not in sys.path:
@@ -115,12 +115,9 @@ FIXED_SEGMENT_NAMES = {segment_id: CORRECTION_LABEL_NAMES[value] for value, segm
 # intersection honours SliceIntersectionThickness, whose integer floor of 1 px is
 # the thinnest line a Slicer 2-D view can draw.
 ROI_OUTLINE_THICKNESS_PX = 1
-# The box being drawn or edited is drawn bolder rather than thicker-by-a-jump,
-# so the reader can tell it from the others without losing the T2 underneath.
-# 1 px is a hardware GL line while anything wider is shader-drawn, so on some
-# Windows displays 2 reads only slightly bolder than 1; raise this to 3 if the
-# difference is not obvious on the reading workstation.
-ROI_ACTIVE_OUTLINE_THICKNESS_PX = 2
+# Kept equal to ROI_OUTLINE_THICKNESS_PX by request: every box, including the
+# one currently being drawn or edited, draws at the thinnest possible line.
+ROI_ACTIVE_OUTLINE_THICKNESS_PX = 1
 ROI_OUTLINE_COLOR = (1.0, 0.85, 0.15)
 # Interaction handles stay hidden until a box is clicked, and are drawn smaller
 # than the 3.0 % default so they cover less of the T2 underneath.
@@ -158,6 +155,33 @@ SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] 
     ("save_draft", "Save draft", "", "on_save_draft", "save_draft_button", "Save Draft"),
 )
 SHORTCUT_SETTINGS_PREFIX = "MyomaReviewLite/Shortcuts/"
+# Mouse-button bindings, layered on the same action list as
+# SHORTCUT_ACTIONS above. Values are raw Qt::MouseButton bit values (not
+# looked up via `qt.Qt.*`, so this module keeps importing cleanly outside
+# Slicer too). On Windows, Qt only distinguishes two "extra" buttons
+# (the back/forward side buttons); anything past that is almost always
+# remapped to a keystroke by the mouse's own driver software rather than
+# reported as a real mouse button, so it already works as a keyboard
+# shortcut above instead. "(none)" (0) is not a real button and marks an
+# action as unbound.
+MOUSE_BUTTON_LABELS: dict[int, str] = {
+    0x0004: "Middle click",
+    0x0008: "Side button 1 (Back)",
+    0x0010: "Side button 2 (Forward)",
+    0x0040: "Extra button 3",
+    0x0080: "Extra button 4",
+    0x0100: "Extra button 5",
+    0x0200: "Extra button 6",
+}
+# Left/Right clicks a reviewer must always keep for normal editing.
+MOUSE_BUTTON_RESERVED = (0x0001, 0x0002)
+MOUSE_BUTTON_SETTINGS_PREFIX = "MyomaReviewLite/MouseShortcuts/"
+
+
+def _mouse_button_label(value: int) -> str:
+    if not value:
+        return "(none)"
+    return MOUSE_BUTTON_LABELS.get(value, f"Button (0x{value:X})")
 CASE_STATUS_TITLES = {
     QueueStatus.NEW: "New",
     QueueStatus.IN_PROGRESS: "In progress",
@@ -981,6 +1005,9 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
             end = (int(position[0]), int(position[1]))
             if max(abs(end[0] - self.start_xy[0]), abs(end[1] - self.start_xy[1])) < 5:
                 self.cancel()
+                # draw_tool.active just dropped to false with no draft box to
+                # follow it, so restore the other boxes and the normal cursor.
+                self.widget._apply_roi_selection()
                 return
             geometry = self.widget.rectangle_geometry(view_name, self.start_xy, end)
             update_id = self.update_lesion_id
@@ -1021,6 +1048,75 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
                 self.crosshair_node.SetCrosshairMode(slicer.vtkMRMLCrosshairNode.ShowSmallBasic)
             elif event_type == qt.QEvent.KeyRelease and event.key() == qt.Qt.Key_Shift and not event.isAutoRepeat():
                 self.crosshair_node.SetCrosshairMode(slicer.vtkMRMLCrosshairNode.NoCrosshair)
+            return False
+
+
+    class LiteMouseButtonDispatcher(qt.QObject):
+        """Fires a bound action when one of its bound mouse buttons is pressed.
+
+        Installed application-wide (like LiteShiftCrosshairToggle) so a side
+        button works no matter which slice view or control has focus. Only
+        buttons a reviewer has explicitly bound are intercepted; unbound
+        buttons -- and Left/Right, which are never bindable -- always pass
+        through untouched.
+        """
+
+        def __init__(self, widget: "MyomaReviewLiteWidget") -> None:
+            super().__init__()
+            self.widget = widget
+            # Qt::MouseButton value -> method name on ``widget``.
+            self.bindings: dict[int, str] = {}
+            self.enabled = False
+            self.installed = False
+
+        def install(self) -> None:
+            if self.installed:
+                return
+            slicer.app.installEventFilter(self)
+            self.installed = True
+
+        def uninstall(self) -> None:
+            if not self.installed:
+                return
+            slicer.app.removeEventFilter(self)
+            self.installed = False
+
+        def eventFilter(self, obj: Any, event: Any) -> bool:
+            if not self.enabled or event.type() != qt.QEvent.MouseButtonPress:
+                return False
+            method_name = self.bindings.get(int(event.button()))
+            if method_name is None:
+                return False
+            method = getattr(self.widget, method_name, None)
+            if method is None:
+                return False
+            try:
+                method()
+            except Exception:
+                traceback.print_exc()
+            # Consumed: every bindable button does nothing else in this module,
+            # so nothing downstream needs to see the press too.
+            return True
+
+
+    class LiteMouseButtonCapture(qt.QObject):
+        """One-shot app-wide filter that reports the next mouse button pressed.
+
+        Used by the shortcuts dialog's "Set mouse button..." control: armed on
+        click, it removes itself and reports the very next button pressed
+        anywhere in the application, mirroring how QKeySequenceEdit captures a
+        key combination.
+        """
+
+        def __init__(self, on_captured: Callable[[int], None]) -> None:
+            super().__init__()
+            self.on_captured = on_captured
+
+        def eventFilter(self, obj: Any, event: Any) -> bool:
+            if event.type() == qt.QEvent.MouseButtonPress:
+                slicer.app.removeEventFilter(self)
+                self.on_captured(int(event.button()))
+                return True
             return False
 
 
@@ -1123,10 +1219,18 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.annotation_redo: list[dict[str, Any]] = []
         self.shortcuts: list[Any] = []
         self.shortcut_bindings: dict[str, Any] = {}
+        self.mouse_button_bindings: dict[str, int] = {}
+        self.mouse_button_dispatcher: Any = None
         self.view_tools: Any = None
         self.correction_tools: Any = None
         self.shift_crosshair_toggle: Any = None
         self._case_filter = DEFAULT_CASE_FILTER
+        # Placing/redrawing a box swaps the slice-view cursor for a small
+        # yellow dot and hides every other myoma box so the reader gets an
+        # uncluttered view of the anatomy underneath; see _apply_roi_selection
+        # and _has_unresolved_roi.
+        self._place_box_cursor: Any = None
+        self._box_cursor_applied = False
 
     def setup(self) -> None:
         super().setup()
@@ -1134,6 +1238,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             return
         self._build_ui()
         self._install_shortcuts()
+        self._install_mouse_bindings()
         self.roi_overlay = LiteRoiLabelOverlay(self)
         self.draw_tool = LiteRectangleDrawTool(self)
         self.click_selector = LiteRoiClickSelector(self)
@@ -1171,6 +1276,30 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.shortcut_bindings[action_id] = shortcut
         self._refresh_shortcut_button_labels()
 
+    def _mouse_button_setting_key(self, action_id: str) -> str:
+        return f"{MOUSE_BUTTON_SETTINGS_PREFIX}{action_id}"
+
+    def _mouse_button_value(self, settings: Any, action_id: str) -> int:
+        # No factory default here (unlike the keyboard bindings): not every
+        # mouse has a spare button, so a reviewer opts in explicitly instead
+        # of inheriting a binding that might not exist on their hardware.
+        stored = settings.value(self._mouse_button_setting_key(action_id), 0)
+        try:
+            return int(stored)
+        except (TypeError, ValueError):
+            return 0
+
+    def _install_mouse_bindings(self) -> None:
+        settings = qt.QSettings()
+        self.mouse_button_dispatcher = LiteMouseButtonDispatcher(self)
+        for action_id, _label, _default_key, method_name, *_ in SHORTCUT_ACTIONS:
+            value = self._mouse_button_value(settings, action_id)
+            self.mouse_button_bindings[action_id] = value
+            if value:
+                self.mouse_button_dispatcher.bindings[value] = method_name
+        self.mouse_button_dispatcher.install()
+        self._refresh_shortcut_button_labels()
+
     def _refresh_shortcut_button_labels(self) -> None:
         # Keeps each toolbar button's label showing its *current* binding
         # (which may differ from the factory default once a reviewer has
@@ -1182,23 +1311,70 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             if button is None:
                 continue
             shortcut = self.shortcut_bindings.get(action_id)
-            key_text = shortcut.key().toString() if shortcut is not None else ""
-            button.text = f"{base_text} ({key_text})" if key_text else base_text
+            key_text = shortcut.key.toString() if shortcut is not None else ""
+            mouse_value = self.mouse_button_bindings.get(action_id, 0)
+            mouse_text = _mouse_button_label(mouse_value) if mouse_value else ""
+            hint = ", ".join(text for text in (key_text, mouse_text) if text)
+            button.text = f"{base_text} ({hint})" if hint else base_text
 
     def on_configure_shortcuts(self) -> None:
-        """Open the shortcut panel so a reviewer can rebind any action."""
+        """Open the shortcut panel so a reviewer can rebind any action, by key or by mouse button."""
         settings = qt.QSettings()
         dialog = qt.QDialog(slicer.util.mainWindow())
-        dialog.setWindowTitle("Keyboard shortcuts")
+        dialog.setWindowTitle("Shortcuts")
         layout = qt.QVBoxLayout(dialog)
         form = qt.QFormLayout()
         layout.addLayout(form)
         editors: dict[str, Any] = {}
+        mouse_buttons: dict[str, int] = dict(self.mouse_button_bindings)
+        mouse_labels: dict[str, Any] = {}
+        # Holds the in-progress capture filter between the click that arms it
+        # and the button press it is waiting for; nothing else keeps it
+        # referenced, and an unfinished capture is torn down below once the
+        # dialog closes either way.
+        capture_state: dict[str, Any] = {"active": None}
+
+        def _mouse_button_text(action_id: str) -> str:
+            return _mouse_button_label(mouse_buttons.get(action_id, 0))
+
+        def _set_mouse_button(action_id: str, value: int) -> None:
+            mouse_buttons[action_id] = value
+            mouse_labels[action_id].text = _mouse_button_text(action_id)
+
+        def _start_capture(action_id: str, capture_button: Any) -> None:
+            if capture_state["active"] is not None:
+                return  # Only one capture armed at a time.
+            original_text = capture_button.text
+            capture_button.text = "Press a mouse button..."
+            capture_button.enabled = False
+
+            def _finish(value: int) -> None:
+                capture_state["active"] = None
+                capture_button.text = original_text
+                capture_button.enabled = True
+                if value in MOUSE_BUTTON_RESERVED:
+                    qt.QMessageBox.warning(
+                        dialog,
+                        "Reserved button",
+                        "The left and right mouse buttons can't be reassigned; "
+                        "they are needed for normal editing.",
+                    )
+                    return
+                _set_mouse_button(action_id, value)
+
+            capture = LiteMouseButtonCapture(_finish)
+            capture_state["active"] = capture
+            # Installed after (and so, per Qt's filter order, checked before)
+            # the persistent LiteMouseButtonDispatcher, so a button that is
+            # already bound to some other action fires this capture instead
+            # of that action while the dialog is waiting for a press.
+            slicer.app.installEventFilter(capture)
+
         for action_id, label, _default_key, _method_name, *_ in SHORTCUT_ACTIONS:
             editor = qt.QKeySequenceEdit()
             shortcut = self.shortcut_bindings.get(action_id)
             if shortcut is not None:
-                editor.setKeySequence(shortcut.key())
+                editor.setKeySequence(shortcut.key)
             editors[action_id] = editor
             row = qt.QHBoxLayout()
             row.addWidget(editor, 1)
@@ -1206,10 +1382,36 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             clear_button.text = "Clear"
             clear_button.connect("clicked()", lambda _checked=False, e=editor: e.clear())
             row.addWidget(clear_button)
+
+            mouse_label = qt.QLabel(_mouse_button_text(action_id))
+            mouse_label.minimumWidth = 110
+            mouse_labels[action_id] = mouse_label
+            row.addWidget(mouse_label)
+            capture_button = qt.QToolButton()
+            capture_button.text = "Set mouse button..."
+            capture_button.connect(
+                "clicked()",
+                lambda _checked=False, a=action_id, b=capture_button: _start_capture(a, b),
+            )
+            row.addWidget(capture_button)
+            mouse_clear_button = qt.QToolButton()
+            mouse_clear_button.text = "Clear"
+            mouse_clear_button.connect(
+                "clicked()", lambda _checked=False, a=action_id: _set_mouse_button(a, 0)
+            )
+            row.addWidget(mouse_clear_button)
+
             form.addRow(label, row)
         hint = qt.QLabel(
-            "Click a field and press the new key combination. Leave a field "
-            "empty to disable that shortcut."
+            "Click a field and press the new key combination, or click \"Set "
+            "mouse button...\" and press a mouse button, to rebind an action. "
+            "Leave a field (or a mouse binding) at empty / \"(none)\" to "
+            "disable it. Left and right click always stay reserved for "
+            "editing. A mouse's extra buttons beyond its two side buttons "
+            "are usually remapped to a keystroke by the mouse's own driver "
+            "software instead of sending a real click -- if \"Set mouse "
+            "button...\" never catches one, try binding it as a keyboard "
+            "shortcut above instead."
         )
         hint.wordWrap = True
         layout.addWidget(hint)
@@ -1218,6 +1420,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         def _restore_defaults() -> None:
             for action_id, _label, default_key, _method_name, *_ in SHORTCUT_ACTIONS:
                 editors[action_id].setKeySequence(qt.QKeySequence(default_key))
+                _set_mouse_button(action_id, 0)
 
         restore_button.connect("clicked()", _restore_defaults)
         layout.addWidget(restore_button)
@@ -1226,15 +1429,27 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         buttons.connect("rejected()", dialog.reject)
         layout.addWidget(buttons)
 
-        if dialog.exec_() != qt.QDialog.Accepted:
+        accepted = dialog.exec_() == qt.QDialog.Accepted
+        if capture_state["active"] is not None:
+            # The dialog closed (Save, Cancel, or Esc) mid-capture; the next
+            # button press must not still be waiting for this dialog.
+            try:
+                slicer.app.removeEventFilter(capture_state["active"])
+            except Exception:
+                pass
+            capture_state["active"] = None
+        if not accepted:
             return
 
         new_key_text = {
             action_id: editor.keySequence().toString() for action_id, editor in editors.items()
         }
+        labels = {action_id: label for action_id, label, *_ in SHORTCUT_ACTIONS}
+        method_by_action = {
+            action_id: method_name for action_id, _label, _default_key, method_name, *_ in SHORTCUT_ACTIONS
+        }
         seen: dict[str, str] = {}
         conflicts: list[str] = []
-        labels = {action_id: label for action_id, label, *_ in SHORTCUT_ACTIONS}
         for action_id, key_text in new_key_text.items():
             if not key_text:
                 continue
@@ -1242,6 +1457,17 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 conflicts.append(f"{labels[seen[key_text]]} and {labels[action_id]} both use \"{key_text}\"")
             else:
                 seen[key_text] = action_id
+        seen_mouse: dict[int, str] = {}
+        for action_id, value in mouse_buttons.items():
+            if not value:
+                continue
+            if value in seen_mouse:
+                conflicts.append(
+                    f"{labels[seen_mouse[value]]} and {labels[action_id]} both use "
+                    f"{_mouse_button_label(value)}"
+                )
+            else:
+                seen_mouse[value] = action_id
         if conflicts:
             qt.QMessageBox.warning(
                 slicer.util.mainWindow(),
@@ -1253,6 +1479,15 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         for action_id, key_text in new_key_text.items():
             settings.setValue(self._shortcut_setting_key(action_id), key_text)
             self.shortcut_bindings[action_id].setKey(qt.QKeySequence(key_text))
+        for action_id, value in mouse_buttons.items():
+            settings.setValue(self._mouse_button_setting_key(action_id), value)
+        self.mouse_button_bindings = mouse_buttons
+        if self.mouse_button_dispatcher is not None:
+            self.mouse_button_dispatcher.bindings = {
+                value: method_by_action[action_id]
+                for action_id, value in mouse_buttons.items()
+                if value
+            }
         self._refresh_shortcut_button_labels()
 
     def _enable_synced_crosshair(self) -> None:
@@ -1638,6 +1873,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def enter(self) -> None:
         for shortcut in self.shortcuts:
             shortcut.enabled = True
+        if self.mouse_button_dispatcher is not None:
+            self.mouse_button_dispatcher.enabled = True
         if self.view_tools is not None:
             self.view_tools.refresh()
         if self.click_selector is not None:
@@ -1648,12 +1885,18 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def exit(self) -> None:
         for shortcut in self.shortcuts:
             shortcut.enabled = False
+        if self.mouse_button_dispatcher is not None:
+            self.mouse_button_dispatcher.enabled = False
         if self.segment_editor_widget is not None:
             self.segment_editor_widget.setActiveEffectByName("")
         if self.draw_tool is not None:
             self.draw_tool.cancel()
         if self.roi_nodes:
             self.set_active_roi(None)
+        # set_active_roi(None) no-ops when nothing was selected, which would
+        # otherwise leave a cancelled drag's cursor/hidden boxes stuck; make
+        # the reset explicit and unconditional here instead.
+        self._apply_roi_selection()
         if self.click_selector is not None:
             self.click_selector.unbind_views()
 
@@ -1679,6 +1922,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.cancel_roi_edit()
             if self.draw_tool is not None:
                 self.draw_tool.cancel()
+            # draw_tool.cancel() above can itself flip _has_unresolved_roi()
+            # from true to false (an aborted drag with no draft box yet), so
+            # the cursor/hidden-boxes reset has to run again here.
+            self._apply_roi_selection()
             return
         # Give the drag its own undo entry, or this keystroke would throw it
         # away and revert whatever the reader did before it instead.
@@ -2045,6 +2292,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.set_active_roi(None)
         if self.draw_tool is not None:
             self.draw_tool.start()
+            # Hide every other box and swap in the placement cursor now that
+            # draw_tool.active is true, i.e. _has_unresolved_roi() flipped.
+            self._apply_roi_selection()
 
     def on_redraw_box(self) -> None:
         if self._has_unresolved_roi():
@@ -2054,6 +2304,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.set_active_roi(None)
         if lesion_id and self.draw_tool is not None:
             self.draw_tool.start(lesion_id)
+            self._apply_roi_selection()
 
     def on_delete_box(self) -> None:
         lesion_id = self._selected_lesion_id()
@@ -2301,6 +2552,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.segment_editor_widget = None
         if self.draw_tool is not None:
             self.draw_tool.cancel()
+        # The case's own boxes are about to be torn down below, but the
+        # cursor belongs to the slice views, which persist across cases, so
+        # it needs an explicit reset here too.
+        self._update_box_edit_cursor(False)
         if self.click_selector is not None:
             self.click_selector.unbind_views()
         if self.roi_overlay is not None:
@@ -2692,19 +2947,65 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         both shows and arms them, and ``SetLocked`` does not disable them. A box
         that must not move therefore gets no handles at all. This has to run
         again after a page change, because the page decides that.
+
+        While a box is being placed or redrawn (``_has_unresolved_roi``), every
+        *other* box is hidden outright regardless of selection, for a clear,
+        uncluttered view while the reader judges the new box's extent; see
+        _update_box_edit_cursor for the matching cursor swap.
         """
 
         draggable = self._roi_handles_draggable()
+        hide_all = self._has_unresolved_roi()
         for identifier, node in self.roi_nodes.items():
             selected = identifier == self.active_roi_id
             armed = selected and draggable
             node.SetLocked(not armed)
             self._style_roi_display(node, handles=armed, outline=False)
-            node.SetDisplayVisibility(bool(selected and self.roi_boxes_visible))
+            node.SetDisplayVisibility(bool(selected and self.roi_boxes_visible and not hide_all))
             outline = self.roi_outline_nodes.get(identifier)
             if outline is not None:
                 self._style_outline_display(outline, bold=selected)
-                outline.SetDisplayVisibility(bool(self.roi_boxes_visible))
+                outline.SetDisplayVisibility(bool(self.roi_boxes_visible and not hide_all))
+        # The cursor is the corner-drag affordance, so it only holds for the
+        # initial drag; once the square is set and handle fine-tuning takes
+        # over (roi_draft_node exists, draw_tool is no longer active) the
+        # normal cursor comes back even though the other boxes stay hidden.
+        self._update_box_edit_cursor(bool(self.draw_tool is not None and self.draw_tool.active))
+
+    def _box_placement_cursor(self) -> Any:
+        """A small filled yellow dot: shown while placing or redrawing a box."""
+        if self._place_box_cursor is None:
+            diameter = 8
+            pixmap = qt.QPixmap(diameter, diameter)
+            pixmap.fill(qt.Qt.transparent)
+            painter = qt.QPainter(pixmap)
+            try:
+                painter.setRenderHint(qt.QPainter.Antialiasing, True)
+                painter.setPen(qt.QPen(qt.QColor(140, 105, 0), 1))
+                painter.setBrush(qt.QBrush(qt.QColor(255, 213, 0)))
+                painter.drawEllipse(1, 1, diameter - 2, diameter - 2)
+            finally:
+                painter.end()
+            self._place_box_cursor = qt.QCursor(pixmap, diameter // 2, diameter // 2)
+        return self._place_box_cursor
+
+    def _update_box_edit_cursor(self, active: bool) -> None:
+        """Swap the slice-view cursor for the yellow dot while placing/redrawing.
+
+        A plain ``view.setCursor(...)`` does not stick: the slice view's own
+        interactor style (crosshair/pan/zoom navigation) reasserts its own
+        cursor on practically every mouse event, so the widget-level cursor
+        gets overwritten within a frame. ``QApplication`` override cursors sit
+        above that and win regardless, which is the same mechanism Slicer's
+        own placement tools use for their cursors. The stack must be pushed
+        and popped in matching pairs, hence the ``_box_cursor_applied`` guard.
+        """
+        if active and not self._box_cursor_applied:
+            slicer.app.setOverrideCursor(self._box_placement_cursor())
+            self._box_cursor_applied = True
+        elif not active and self._box_cursor_applied:
+            slicer.app.restoreOverrideCursor()
+            self._box_cursor_applied = False
 
     def set_active_roi(self, lesion_id: str | None) -> None:
         """Reveal the handles of one myoma box and hide every other box's.
@@ -2894,6 +3195,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.roi_draft_node = node
         self._sync_draft_outline()
         self._start_live_outline_sync(node, self._sync_draft_outline)
+        # roi_draft_node just went from None to set, i.e. _has_unresolved_roi()
+        # flipped true: hide the other boxes.
+        self._apply_roi_selection()
         if hasattr(self, "save_roi_button"):
             self.save_roi_button.enabled = True
             self.cancel_roi_button.enabled = True
@@ -2954,6 +3258,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.save_roi_button.enabled = False
             self.cancel_roi_button.enabled = False
         self.roi_transaction.cancel()
+        # roi_draft_node just cleared, i.e. _has_unresolved_roi() may have
+        # flipped false: restore the other boxes and the cursor.
+        self._apply_roi_selection()
 
     def rebuild_roi_nodes(self) -> None:
         self.cancel_roi_edit()
@@ -3039,6 +3346,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             for shortcut in self.shortcuts:
                 shortcut.deleteLater()
             self.shortcuts = []
+            if self.mouse_button_dispatcher is not None:
+                self.mouse_button_dispatcher.uninstall()
+                self.mouse_button_dispatcher = None
             if self.shift_crosshair_toggle is not None:
                 self.shift_crosshair_toggle.uninstall()
                 self.shift_crosshair_toggle = None
