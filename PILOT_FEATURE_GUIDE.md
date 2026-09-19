@@ -23,10 +23,12 @@ The following controls address the pilot list:
 
 1. **Myoma Ddx.** Select a myoma, enter the reader's differential diagnosis
    in **Myoma Ddx**, and choose **Save FIGO and Ddx**. It is saved per lesion
-   and remains available after geometry edits and AI reveal. Saving jumps to
-   the next myoma in the list automatically, so the reader can page straight
-   through all of them; saving the last myoma instead asks whether to reveal
-   AI now.
+   and remains available after geometry edits and AI reveal. FIGO typing
+   opens on the first myoma (M01), not the last one drawn. Choosing a myoma in
+   **Selected lesion** shows its box and centers the three T2 views on it.
+   Saving jumps to the next myoma in the list automatically, so the reader can
+   page straight through all of them; saving the last myoma instead asks
+   whether to reveal AI now.
 2. **Undo.** `Ctrl+Z` undoes a Segment Editor change on the correction page,
    or the latest myoma-box/FIGO/Ddx annotation change on the annotation page.
    `Ctrl+Y` redoes it. The Segment Editor also has its native undo history.

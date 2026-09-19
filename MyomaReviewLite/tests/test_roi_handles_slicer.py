@@ -27,6 +27,7 @@ from MyomaReviewLite import (  # noqa: E402
     ROI_ACTIVE_OUTLINE_THICKNESS_PX,
     ROI_HANDLE_SCALE_PERCENT,
     ROI_OUTLINE_THICKNESS_PX,
+    VIEW_NAMES,
     LiteRectangleDrawTool,
     LiteRoiClickSelector,
     LiteRoiLabelOverlay,
@@ -147,6 +148,78 @@ def test_selecting_a_row_does_not_reveal_handles() -> None:
         assert widget.active_roi_id is None, "only a click in a view may reveal handles"
         for lesion_id in (first, second):
             assert not widget.roi_nodes[lesion_id].GetDisplayNode().GetHandlesInteractive()
+    finally:
+        widget.cleanup()
+
+
+def _views_pass_through(point: tuple[float, float, float]) -> bool:
+    """Whether all three T2 slice planes currently cut through ``point``."""
+
+    manager = slicer.app.layoutManager()
+    for view_name in VIEW_NAMES.values():
+        matrix = manager.sliceWidget(view_name).mrmlSliceNode().GetSliceToRAS()
+        normal = [matrix.GetElement(row, 2) for row in range(3)]
+        origin = [matrix.GetElement(row, 3) for row in range(3)]
+        offset = sum(n * (p - o) for n, p, o in zip(normal, point, origin))
+        if abs(offset) > 1e-3:
+            return False
+    return True
+
+
+def test_figo_typing_opens_on_the_first_myoma_and_shows_its_box() -> None:
+    widget, first, second = _build_case("sub-00019")
+    try:
+        widget.logic.activate_layout()
+        # The reader drew M02 last, so it is the selected row when boxing ends.
+        widget.lesion_list.setCurrentRow(widget.figo_lesion_combo.findData(second))
+        assert widget._selected_lesion_id() == second
+
+        widget.on_continue_to_figo()
+        assert widget.blind_stack.currentIndex == 1, "FIGO typing did not open"
+        assert widget.figo_lesion_combo.currentData == first, "FIGO typing did not start at M01"
+        assert widget._selected_lesion_id() == first
+        assert widget.active_roi_id == first, "the first myoma's box was not shown"
+        assert widget.roi_nodes[first].GetDisplayVisibility()
+        assert not widget.roi_nodes[second].GetDisplayVisibility()
+        assert _views_pass_through(BIG_BOX_CENTER), "the views were not brought to the first box"
+    finally:
+        widget.cleanup()
+
+
+def test_choosing_a_myoma_in_figo_typing_shows_that_box() -> None:
+    widget, first, second = _build_case("sub-00020")
+    try:
+        widget.logic.activate_layout()
+        widget.on_continue_to_figo()
+        assert widget.active_roi_id == first
+
+        widget.figo_lesion_combo.setCurrentIndex(widget.figo_lesion_combo.findData(second))
+        assert widget.active_roi_id == second, "the chosen myoma's box was not shown"
+        assert widget.roi_nodes[second].GetDisplayVisibility()
+        assert not widget.roi_nodes[first].GetDisplayVisibility(), "the previous box stayed shown"
+        assert _views_pass_through(SMALL_BOX_INSIDE), "the views were not brought to the chosen box"
+
+        # Clicking a box in a view selects it but must not re-centre the views.
+        widget.on_view_clicked("MyomaLiteAxial", BIG_BOX_INSIDE)
+        assert widget.active_roi_id == first
+        assert widget.figo_lesion_combo.currentData == first
+        assert _views_pass_through(SMALL_BOX_INSIDE), "clicking a box moved the views"
+    finally:
+        widget.cleanup()
+
+
+def test_saving_figo_advances_to_and_shows_the_next_myoma() -> None:
+    widget, first, second = _build_case("sub-00021")
+    try:
+        widget.logic.activate_layout()
+        widget.on_continue_to_figo()
+        assert widget.figo_lesion_combo.currentData == first
+
+        widget.on_apply_figo()
+        assert widget.logic.state.lesions[first].figo is not None
+        assert widget.figo_lesion_combo.currentData == second, "saving did not advance"
+        assert widget.active_roi_id == second, "the next myoma's box was not shown"
+        assert _views_pass_through(SMALL_BOX_INSIDE)
     finally:
         widget.cleanup()
 
@@ -492,6 +565,9 @@ TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
     test_selecting_a_row_does_not_reveal_handles,
+    test_figo_typing_opens_on_the_first_myoma_and_shows_its_box,
+    test_choosing_a_myoma_in_figo_typing_shows_that_box,
+    test_saving_figo_advances_to_and_shows_the_next_myoma,
     test_dragging_a_revealed_box_is_saved_and_undoable,
     test_a_second_drag_of_the_same_box_is_not_lost,
     test_undo_straight_after_a_drag_restores_that_drag,

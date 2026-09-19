@@ -2263,6 +2263,38 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.lesion_list.setCurrentRow(index)
         self.lesion_list.blockSignals(False)
         self._load_selected_annotation()
+        # Picking a myoma while typing FIGO shows its box. A box picked by
+        # clicking it in a view is already revealed (on_view_clicked reveals
+        # first, then syncs this combo), so the views stay put in that case.
+        # In the boxing stage the combo is only synced, never chosen by hand,
+        # so nothing is revealed there.
+        if self.blind_stack.currentIndex == 1:
+            lesion_id = self._selected_lesion_id()
+            self._reveal_lesion(lesion_id, navigate=lesion_id != self.active_roi_id)
+
+    def _reveal_lesion(self, lesion_id: str | None, navigate: bool = True) -> None:
+        """Show one myoma's box: reveal it, and optionally bring it on screen.
+
+        A box is only visible on the slices it crosses, so with ``navigate``
+        the three T2 views are centred on the box; otherwise choosing a myoma
+        from the FIGO list could leave its box off the current slice.
+        """
+
+        if not lesion_id or lesion_id not in self.roi_nodes:
+            return
+        self.set_active_roi(lesion_id)
+        if not navigate:
+            return
+        node = self.roi_nodes[lesion_id]
+        if node.GetScene() is not slicer.mrmlScene:
+            return
+        center = [0.0, 0.0, 0.0]
+        node.GetCenterWorld(center)
+        manager = slicer.app.layoutManager()
+        for view_name in VIEW_NAMES.values():
+            view = manager.sliceWidget(view_name)
+            if view is not None:
+                view.mrmlSliceNode().JumpSliceByCentering(*center)
 
     def _load_selected_annotation(self) -> None:
         if not hasattr(self, "ddx_edit"):
@@ -2339,7 +2371,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._show_error("Add at least one myoma box, or confirm zero myomas, before continuing.")
             return
         self._boxing_stage_done = True
+        # FIGO typing pages through the myomas in order, so it opens on the
+        # first one rather than on whichever box was drawn or picked last.
+        if self.lesion_list.count:
+            self.lesion_list.setCurrentRow(0)
         self.refresh_ui()
+        if state.lesions:
+            self._reveal_lesion(self._selected_lesion_id())
 
     def on_back_to_boxing(self) -> None:
         if self._has_unresolved_roi():
@@ -2410,6 +2448,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             if 0 <= position < len(ordered_ids) - 1:
                 self.lesion_list.setCurrentRow(position + 1)
             self.refresh_ui()
+            if 0 <= position < len(ordered_ids) - 1:
+                self._reveal_lesion(ordered_ids[position + 1])
             if position == len(ordered_ids) - 1:
                 self._offer_ai_reveal_after_last_figo()
         except Exception as exc:
