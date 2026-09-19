@@ -24,9 +24,12 @@ The following controls address the pilot list:
 1. **Myoma Ddx.** Select a myoma, enter the reader's differential diagnosis
    in **Myoma Ddx**, and choose **Save FIGO and Ddx**. It is saved per lesion
    and remains available after geometry edits and AI reveal. FIGO typing
-   opens on the first myoma (M01), not the last one drawn. Choosing a myoma in
-   **Selected lesion** shows its box and centers the three T2 views on it;
-   picking a myoma in the boxing-stage list does the same.
+   opens on the first myoma (M01), not the last one drawn. Before AI reveal,
+   FIGO typing shows only the myoma chosen in **Selected lesion**, as a thin
+   outline with no handles and no label on any other myoma, and centers the
+   three T2 views on it. Clicking in a view does not select a box there, and
+   **← Back to myoma boxes** brings every box back. In the boxing-stage list,
+   picking a myoma selects its box (with handles) and centers the views too.
    Saving jumps to the next myoma in the list automatically, so the reader can
    page straight through all of them; saving the last myoma instead asks
    whether to reveal AI now.
@@ -71,8 +74,8 @@ The following controls address the pilot list:
 10. **Add a new myoma.** Choose **Add myoma box**, drag a rectangle in any
     T2 view, adjust the 3-D handles if needed, and press **Save ROI**. You can
     also use **Paint / add myoma** after AI reveal for a mask-only correction.
-11. **Edit an existing myoma.** On the annotation page, click the box in any
-    T2 view to reveal its handles, then drag them to move or resize it; the new
+11. **Edit an existing myoma.** While boxing, or on the annotation page after
+    AI reveal, click the box in any T2 view to reveal its handles, then drag them to move or resize it; the new
     box is saved to the draft as soon as you click elsewhere, change page, save,
     or reveal AI, and `Ctrl+Z` undoes it. You can also
     select its row and choose **Redraw** to draw the box again from scratch, or

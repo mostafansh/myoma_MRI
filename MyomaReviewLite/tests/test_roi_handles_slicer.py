@@ -33,7 +33,7 @@ from MyomaReviewLite import (  # noqa: E402
     LiteRoiLabelOverlay,
     MyomaReviewLiteWidget,
 )
-from MyomaReviewLiteLib import BoxGeometry, CaseStorage, ReviewState  # noqa: E402
+from MyomaReviewLiteLib import BoxGeometry, CaseStorage, ReviewPhase, ReviewState  # noqa: E402
 
 assert Path(bundled_module.__file__).resolve().parent == MODULE_ROOT
 
@@ -188,7 +188,25 @@ def _views_pass_through(point: tuple[float, float, float]) -> bool:
     return True
 
 
-def test_figo_typing_opens_on_the_first_myoma_and_shows_its_box() -> None:
+def _assert_only_shown(widget: MyomaReviewLiteWidget, lesion_id: str) -> None:
+    """``lesion_id`` is the one box drawn: a thin outline, no handles, no label for the rest."""
+
+    for identifier, node in widget.roi_nodes.items():
+        assert not node.GetDisplayNode().GetHandlesInteractive(), f"{identifier} has handles"
+        assert node.GetLocked(), f"{identifier} could be dragged"
+        assert not node.GetDisplayVisibility(), f"{identifier} markups box is drawn"
+        outline = widget.roi_outline_nodes[identifier]
+        assert bool(outline.GetDisplayVisibility()) == (identifier == lesion_id), (
+            f"{identifier} outline visibility is wrong while only {lesion_id} should show"
+        )
+        assert (
+            outline.GetDisplayNode().GetSliceIntersectionThickness() == ROI_OUTLINE_THICKNESS_PX
+        ), f"{identifier} is not a thin line"
+    assert widget.active_roi_id is None, "a box was left in hand during FIGO typing"
+    assert widget.roi_overlay.only_id == lesion_id, "the other myomas are still labelled"
+
+
+def test_figo_typing_opens_on_the_first_myoma_and_shows_only_its_box() -> None:
     widget, first, second = _build_case("sub-00019")
     try:
         widget.logic.activate_layout()
@@ -200,37 +218,33 @@ def test_figo_typing_opens_on_the_first_myoma_and_shows_its_box() -> None:
         assert widget.blind_stack.currentIndex == 1, "FIGO typing did not open"
         assert widget.figo_lesion_combo.currentData == first, "FIGO typing did not start at M01"
         assert widget._selected_lesion_id() == first
-        assert widget.active_roi_id == first, "the first myoma's box was not shown"
-        assert widget.roi_nodes[first].GetDisplayVisibility()
-        assert not widget.roi_nodes[second].GetDisplayVisibility()
+        _assert_only_shown(widget, first)
         assert _views_pass_through(BIG_BOX_CENTER), "the views were not brought to the first box"
     finally:
         widget.cleanup()
 
 
-def test_choosing_a_myoma_in_figo_typing_shows_that_box() -> None:
+def test_choosing_a_myoma_in_figo_typing_shows_only_that_box() -> None:
     widget, first, second = _build_case("sub-00020")
     try:
         widget.logic.activate_layout()
         widget.on_continue_to_figo()
-        assert widget.active_roi_id == first
+        _assert_only_shown(widget, first)
 
         widget.figo_lesion_combo.setCurrentIndex(widget.figo_lesion_combo.findData(second))
-        assert widget.active_roi_id == second, "the chosen myoma's box was not shown"
-        assert widget.roi_nodes[second].GetDisplayVisibility()
-        assert not widget.roi_nodes[first].GetDisplayVisibility(), "the previous box stayed shown"
+        _assert_only_shown(widget, second)
         assert _views_pass_through(SMALL_BOX_INSIDE), "the views were not brought to the chosen box"
 
-        # Clicking a box in a view selects it but must not re-centre the views.
+        # A click in a view must not pick a box the reader cannot see.
         widget.on_view_clicked("MyomaLiteAxial", BIG_BOX_INSIDE)
-        assert widget.active_roi_id == first
-        assert widget.figo_lesion_combo.currentData == first
-        assert _views_pass_through(SMALL_BOX_INSIDE), "clicking a box moved the views"
+        assert widget.figo_lesion_combo.currentData == second
+        _assert_only_shown(widget, second)
+        assert _views_pass_through(SMALL_BOX_INSIDE), "clicking moved the views"
     finally:
         widget.cleanup()
 
 
-def test_saving_figo_advances_to_and_shows_the_next_myoma() -> None:
+def test_saving_figo_advances_to_and_shows_only_the_next_myoma() -> None:
     widget, first, second = _build_case("sub-00021")
     try:
         widget.logic.activate_layout()
@@ -240,8 +254,64 @@ def test_saving_figo_advances_to_and_shows_the_next_myoma() -> None:
         widget.on_apply_figo()
         assert widget.logic.state.lesions[first].figo is not None
         assert widget.figo_lesion_combo.currentData == second, "saving did not advance"
-        assert widget.active_roi_id == second, "the next myoma's box was not shown"
+        _assert_only_shown(widget, second)
         assert _views_pass_through(SMALL_BOX_INSIDE)
+    finally:
+        widget.cleanup()
+
+
+def test_continuing_to_figo_puts_a_box_in_hand_down_and_keeps_its_drag() -> None:
+    widget, _first, second = _build_case("sub-00023")
+    try:
+        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
+        assert widget.active_roi_id == second
+        widget.roi_nodes[second].SetCenterWorld(6.0, 5.0, 5.0)
+
+        widget.on_continue_to_figo()
+        assert widget.active_roi_id is None, "the box stayed in hand with its handles"
+        assert not widget.roi_nodes[second].GetDisplayNode().GetHandlesInteractive()
+        assert abs(widget.logic.state.lesions[second].center_ras[0] - 6.0) < 1e-3, (
+            "the drag made before continuing was lost"
+        )
+    finally:
+        widget.cleanup()
+
+
+def test_going_back_to_boxing_shows_every_box_again() -> None:
+    widget, first, second = _build_case("sub-00024")
+    try:
+        widget.on_continue_to_figo()
+        _assert_only_shown(widget, first)
+
+        widget.on_back_to_boxing()
+        assert widget.blind_stack.currentIndex == 0
+        assert widget.roi_overlay.only_id is None, "the labels stayed limited to one myoma"
+        for lesion_id in (first, second):
+            assert widget.roi_outline_nodes[lesion_id].GetDisplayVisibility(), (
+                f"{lesion_id} stayed hidden after leaving FIGO typing"
+            )
+    finally:
+        widget.cleanup()
+
+
+def test_after_reveal_the_annotation_page_keeps_click_to_edit() -> None:
+    # Only the blinded FIGO stage shows a single box. Once AI is revealed the
+    # annotation page is where a box is still adjusted, by clicking it.
+    widget, first, second = _build_case("sub-00025")
+    try:
+        widget.on_continue_to_figo()
+        for lesion_id in (first, second):
+            widget.logic.state.set_figo(lesion_id, {"kind": "standard", "type": 0})
+        widget.logic.state.reveal()
+        assert widget.logic.state.phase == ReviewPhase.AI_REVEALED.value
+        widget.refresh_ui()
+        assert not widget._figo_focus_active()
+        assert widget.roi_overlay.only_id is None
+
+        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
+        assert widget.active_roi_id == second, "a box can no longer be picked after reveal"
+        assert widget.roi_nodes[second].GetDisplayNode().GetHandlesInteractive()
+        assert widget.roi_outline_nodes[first].GetDisplayVisibility()
     finally:
         widget.cleanup()
 
@@ -588,9 +658,12 @@ TESTS = (
     test_clicking_a_box_reveals_only_that_box,
     test_selecting_a_row_selects_that_box,
     test_selecting_a_row_while_drawing_leaves_the_drawing_alone,
-    test_figo_typing_opens_on_the_first_myoma_and_shows_its_box,
-    test_choosing_a_myoma_in_figo_typing_shows_that_box,
-    test_saving_figo_advances_to_and_shows_the_next_myoma,
+    test_figo_typing_opens_on_the_first_myoma_and_shows_only_its_box,
+    test_choosing_a_myoma_in_figo_typing_shows_only_that_box,
+    test_saving_figo_advances_to_and_shows_only_the_next_myoma,
+    test_continuing_to_figo_puts_a_box_in_hand_down_and_keeps_its_drag,
+    test_going_back_to_boxing_shows_every_box_again,
+    test_after_reveal_the_annotation_page_keeps_click_to_edit,
     test_dragging_a_revealed_box_is_saved_and_undoable,
     test_a_second_drag_of_the_same_box_is_not_lost,
     test_undo_straight_after_a_drag_restores_that_drag,

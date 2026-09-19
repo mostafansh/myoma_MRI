@@ -724,9 +724,18 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
             self.entries: dict[int, dict[str, Any]] = {}
             self.views: dict[str, dict[str, Any]] = {}
             self.enabled = True
+            # When set, only this myoma is labelled (the FIGO stage shows one
+            # box at a time); None labels every box.
+            self.only_id: str | None = None
 
         def set_enabled(self, enabled: bool) -> None:
             self.enabled = bool(enabled)
+            self.refresh()
+
+        def set_only(self, public_id: str | None) -> None:
+            if public_id == self.only_id:
+                return
+            self.only_id = public_id
             self.refresh()
 
         def bind_views(self) -> None:
@@ -820,6 +829,11 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
             for row, entry in enumerate(sorted(self.entries.values(), key=lambda item: item["public_id"])):
                 actor = entry["actors"].get(view_name)
                 node = entry["node"]
+                if self.only_id is not None:
+                    if entry["public_id"] != self.only_id:
+                        actor.SetVisibility(False)
+                        continue
+                    row = 0
                 bounds = [0.0] * 6
                 try:
                     node.GetRASBounds(bounds)
@@ -1145,6 +1159,9 @@ else:
             pass
 
         def set_enabled(self, enabled: bool) -> None:
+            pass
+
+        def set_only(self, public_id: str | None) -> None:
             pass
 
 
@@ -2284,11 +2301,17 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         A box is only visible on the slices it crosses, so with ``navigate``
         the three T2 views are centred on the box; otherwise choosing a myoma
         from the FIGO list could leave its box off the current slice.
+
+        While typing FIGO the list selection already is the shown box (see
+        ``_figo_focus_active``), so it is redrawn instead of being put in hand.
         """
 
         if not lesion_id or lesion_id not in self.roi_nodes:
             return
-        self.set_active_roi(lesion_id)
+        if self._figo_focus_active():
+            self._apply_roi_selection()
+        else:
+            self.set_active_roi(lesion_id)
         if not navigate:
             return
         node = self.roi_nodes[lesion_id]
@@ -2380,7 +2403,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # FIGO typing pages through the myomas in order, so it opens on the
         # first one rather than on whichever box was drawn or picked last.
         if self.lesion_list.count:
+            # refresh_ui() syncs the combo and form from the list, and the FIGO
+            # stage is not up yet, so keep the row handler from arming a box.
+            self.lesion_list.blockSignals(True)
             self.lesion_list.setCurrentRow(0)
+            self.lesion_list.blockSignals(False)
         self.refresh_ui()
         if state.lesions:
             self._reveal_lesion(self._selected_lesion_id())
@@ -2987,6 +3014,23 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
         return self._roi_edits_allowed() and self.page_stack.currentIndex == 0
 
+    def _figo_focus_active(self) -> bool:
+        """Whether the reader is typing FIGO on the blinded annotation page.
+
+        Boxing has its own stage, so by now the boxes are settled: FIGO typing
+        looks at one myoma at a time and never edits geometry. After reveal the
+        annotation page keeps its click-to-edit handles, so it is excluded.
+        """
+
+        state = self.logic.state
+        return bool(
+            state is not None
+            and not self.logic.read_only
+            and state.phase == ReviewPhase.BLIND.value
+            and self.page_stack.currentIndex == 0
+            and self.blind_stack.currentIndex == 1
+        )
+
     def _apply_roi_selection(self) -> None:
         """Push the current selection, visibility and page onto every box.
 
@@ -2999,8 +3043,21 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         *other* box is hidden outright regardless of selection, for a clear,
         uncluttered view while the reader judges the new box's extent; see
         _update_box_edit_cursor for the matching cursor swap.
+
+        While FIGO typing (``_figo_focus_active``) it is the list selection that
+        decides what is drawn: the selected myoma alone, as a thin outline with
+        no handles, and every other box and label hidden.
         """
 
+        focus = self._figo_focus_active()
+        if focus and self.active_roi_id is not None:
+            # Nothing may stay in hand while typing FIGO. This flushes a pending
+            # drag, disarms the box, and re-enters here with nothing selected.
+            self.set_active_roi(None)
+            return
+        focus_id = self._selected_lesion_id() if focus else None
+        if self.roi_overlay is not None:
+            self.roi_overlay.set_only(focus_id if focus else None)
         draggable = self._roi_handles_draggable()
         hide_all = self._has_unresolved_roi()
         for identifier, node in self.roi_nodes.items():
@@ -3012,7 +3069,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             outline = self.roi_outline_nodes.get(identifier)
             if outline is not None:
                 self._style_outline_display(outline, bold=selected)
-                outline.SetDisplayVisibility(bool(self.roi_boxes_visible and not hide_all))
+                shown = not focus or identifier == focus_id
+                outline.SetDisplayVisibility(bool(shown and self.roi_boxes_visible and not hide_all))
         # The cursor is the corner-drag affordance, so it only holds for the
         # initial drag; once the square is set and handle fine-tuning takes
         # over (roi_draft_node exists, draw_tool is no longer active) the
@@ -3154,7 +3212,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def on_view_clicked(self, view_name: str, point_ras: tuple[float, float, float]) -> None:
         """Select the myoma box under a click in a T2 view, or clear the selection."""
 
-        if not self.roi_boxes_visible or self._has_unresolved_roi():
+        # Only the myoma chosen in the FIGO list is drawn there, so a click
+        # must not select a box the reader cannot see.
+        if not self.roi_boxes_visible or self._has_unresolved_roi() or self._figo_focus_active():
             return
         candidates = []
         for lesion_id, node in self.roi_nodes.items():
