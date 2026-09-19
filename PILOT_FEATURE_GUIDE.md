@@ -25,7 +25,8 @@ The following controls address the pilot list:
    in **Myoma Ddx**, and choose **Save FIGO and Ddx**. It is saved per lesion
    and remains available after geometry edits and AI reveal. FIGO typing
    opens on the first myoma (M01), not the last one drawn. Choosing a myoma in
-   **Selected lesion** shows its box and centers the three T2 views on it.
+   **Selected lesion** shows its box and centers the three T2 views on it;
+   picking a myoma in the boxing-stage list does the same.
    Saving jumps to the next myoma in the list automatically, so the reader can
    page straight through all of them; saving the last myoma instead asks
    whether to reveal AI now.

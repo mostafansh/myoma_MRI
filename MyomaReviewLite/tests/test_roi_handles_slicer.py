@@ -140,14 +140,36 @@ def test_clicking_a_box_reveals_only_that_box() -> None:
         widget.cleanup()
 
 
-def test_selecting_a_row_does_not_reveal_handles() -> None:
+def test_selecting_a_row_selects_that_box() -> None:
     widget, first, second = _build_case("sub-00002")
     try:
+        widget.logic.activate_layout()
         widget.lesion_list.setCurrentRow(widget.figo_lesion_combo.findData(second))
         assert widget._selected_lesion_id() == second, "the fixture did not select a row"
-        assert widget.active_roi_id is None, "only a click in a view may reveal handles"
-        for lesion_id in (first, second):
-            assert not widget.roi_nodes[lesion_id].GetDisplayNode().GetHandlesInteractive()
+        assert widget.active_roi_id == second, "the selected box did not follow the list"
+        assert widget.roi_nodes[second].GetDisplayVisibility()
+        assert widget.roi_nodes[second].GetDisplayNode().GetHandlesInteractive()
+        assert not widget.roi_nodes[first].GetDisplayVisibility()
+        assert not widget.roi_nodes[first].GetDisplayNode().GetHandlesInteractive()
+        assert _views_pass_through(SMALL_BOX_INSIDE), "the views did not follow the list"
+
+        widget.lesion_list.setCurrentRow(widget.figo_lesion_combo.findData(first))
+        assert widget.active_roi_id == first
+        assert not widget.roi_nodes[second].GetDisplayVisibility()
+        assert _views_pass_through(BIG_BOX_CENTER)
+    finally:
+        widget.cleanup()
+
+
+def test_selecting_a_row_while_drawing_leaves_the_drawing_alone() -> None:
+    widget, first, _second = _build_case("sub-00022")
+    try:
+        widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
+        assert widget._has_unresolved_roi()
+        widget.lesion_list.setCurrentRow(widget.figo_lesion_combo.findData(first))
+        assert widget.active_roi_id is None, "a box was selected while another was being placed"
+        assert widget._has_unresolved_roi(), "picking a row cancelled the box being placed"
+        widget.cancel_roi_edit()
     finally:
         widget.cleanup()
 
@@ -564,7 +586,8 @@ def test_handles_are_drawn_smaller_than_the_slicer_default() -> None:
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
-    test_selecting_a_row_does_not_reveal_handles,
+    test_selecting_a_row_selects_that_box,
+    test_selecting_a_row_while_drawing_leaves_the_drawing_alone,
     test_figo_typing_opens_on_the_first_myoma_and_shows_its_box,
     test_choosing_a_myoma_in_figo_typing_shows_that_box,
     test_saving_figo_advances_to_and_shows_the_next_myoma,

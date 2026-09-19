@@ -2257,6 +2257,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.figo_lesion_combo.setCurrentIndex(index)
         self.figo_lesion_combo.blockSignals(False)
         self._load_selected_annotation()
+        # Picking a myoma from the list changes the selected box with it. Not
+        # while a box is being placed (every other box is hidden then), and not
+        # for a completed case's read-only list, which is filled on load and
+        # must not pull the views anywhere.
+        if self.logic.state is not None and not self._has_unresolved_roi():
+            self._reveal_lesion(self._selected_lesion_id())
 
     def _on_figo_lesion_changed(self, index: int) -> None:
         self.lesion_list.blockSignals(True)
@@ -2448,8 +2454,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             if 0 <= position < len(ordered_ids) - 1:
                 self.lesion_list.setCurrentRow(position + 1)
             self.refresh_ui()
-            if 0 <= position < len(ordered_ids) - 1:
-                self._reveal_lesion(ordered_ids[position + 1])
             if position == len(ordered_ids) - 1:
                 self._offer_ai_reveal_after_last_figo()
         except Exception as exc:
