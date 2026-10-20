@@ -2025,23 +2025,42 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         edit.raise_()
 
     def _set_comment_overlay_tracking(self, on: bool) -> None:
-        """Follow the bar's moves only while the box is open, so Qt never holds
-        the filter through a Python object that dies before the bar does."""
+        """While the box is open: follow the bar's moves, and fold the box
+        when the reader clicks anywhere else. Installed only while open, so Qt
+        never holds the filter through a Python object that dies first."""
 
+        app = qt.QApplication.instance()
         try:
             if on:
                 self.comment_toggle.installEventFilter(self._comment_overlay_filter)
+                app.installEventFilter(self._comment_overlay_filter)
             else:
                 self.comment_toggle.removeEventFilter(self._comment_overlay_filter)
+                app.removeEventFilter(self._comment_overlay_filter)
         except Exception:
             pass
+
+    def _fold_comment_if_clicked_outside(self, clicked: Any) -> None:
+        if not isinstance(clicked, qt.QWidget):
+            # The same press also passes through its window; judge it once,
+            # at the widget that receives it.
+            return
+        for own in (self.case_comment_edit, self.comment_toggle):
+            # The bar's own click already toggles the box.
+            if clicked is own or own.isAncestorOf(clicked):
+                return
+        # After the click is handled, so it still reaches what was clicked.
+        qt.QTimer.singleShot(0, lambda: setattr(self.comment_toggle, "checked", False))
 
     def _make_comment_overlay_filter(self) -> Any:
         widget = self
 
         class _CommentOverlayFilter(qt.QObject):
-            def eventFilter(self, _obj, event):
-                if event.type() in (qt.QEvent.Move, qt.QEvent.Resize):
+            def eventFilter(self, obj, event):
+                kind = event.type()
+                if kind == qt.QEvent.MouseButtonPress:
+                    widget._fold_comment_if_clicked_outside(obj)
+                elif kind in (qt.QEvent.Move, qt.QEvent.Resize) and obj is widget.comment_toggle:
                     widget._position_comment_overlay()
                 return False
 
