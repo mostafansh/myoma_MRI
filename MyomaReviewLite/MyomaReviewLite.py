@@ -64,8 +64,6 @@ from MyomaReviewLiteLib import (  # noqa: E402
     CaseManifest,
     CaseStorage,
     DatasetManifest,
-    FIGOClassification,
-    FIGOKind,
     ImageGeometry,
     QueueStatus,
     QueueSummary,
@@ -88,7 +86,7 @@ from MyomaReviewLiteLib.roi import (  # noqa: E402
     stable_public_id,
 )
 from MyomaReviewLiteLib.domain import validate_correction_mask_values
-from MyomaReviewLiteLib.figo_card import FigoCard, card_position
+from MyomaReviewLiteLib.figo_card import FigoCard, card_position, figo_label, missing_figo_ids
 from MyomaReviewLiteLib.view_tools import ReviewViewTools
 from MyomaReviewLiteLib.correction_tools import ReviewCorrectionTools
 
@@ -118,6 +116,9 @@ ROI_OUTLINE_THICKNESS_PX = 1
 # one currently being drawn or edited, draws at the thinnest possible line.
 ROI_ACTIVE_OUTLINE_THICKNESS_PX = 1
 ROI_OUTLINE_COLOR = (1.0, 0.85, 0.15)
+# On-image M## labels: yellow once FIGO is set, amber while it is missing.
+ROI_LABEL_COLOR = (1.0, 0.93, 0.2)
+ROI_LABEL_MISSING_COLOR = (1.0, 0.6, 0.1)
 # Interaction handles stay hidden until a box is clicked, and are drawn smaller
 # than the 3.0 % default so they cover less of the T2 underneath.
 ROI_HANDLE_SCALE_PERCENT = 1.5
@@ -148,8 +149,6 @@ SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] 
     ("redo_alt", "Redo (alternate)", "Ctrl+Shift+Z", "on_redo", None, None),
     ("add_box", "Add myoma box", "", "on_add_box", "add_button", "Add myoma box"),
     ("delete_box", "Delete box", "", "on_delete_box", "delete_button", "Delete"),
-    ("continue_to_figo", "Continue to FIGO typing", "", "on_continue_to_figo",
-     "continue_to_figo_button", "Done boxing → continue to FIGO typing"),
     ("save_draft", "Save draft", "", "on_save_draft", "save_draft_button", "Save Draft"),
     ("show_myomas", "Show segmented myomas", "V", "on_show_myomas", None, None),
 )
@@ -726,25 +725,17 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
 if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
 
     class LiteRoiLabelOverlay:
-        """Display stable M## labels on every view whose slice intersects a box."""
+        """Display each box's M## label and FIGO status on every view whose slice
+        intersects it; the text and colour come from ``widget.roi_label``."""
 
         def __init__(self, widget: "MyomaReviewLiteWidget") -> None:
             self.widget = widget
             self.entries: dict[int, dict[str, Any]] = {}
             self.views: dict[str, dict[str, Any]] = {}
             self.enabled = True
-            # When set, only this myoma is labelled (the FIGO stage shows one
-            # box at a time); None labels every box.
-            self.only_id: str | None = None
 
         def set_enabled(self, enabled: bool) -> None:
             self.enabled = bool(enabled)
-            self.refresh()
-
-        def set_only(self, public_id: str | None) -> None:
-            if public_id == self.only_id:
-                return
-            self.only_id = public_id
             self.refresh()
 
         def bind_views(self) -> None:
@@ -815,13 +806,14 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
             for view_name, binding in self.views.items():
                 if view_name in entry["actors"]:
                     continue
+                text, colour = self.widget.roi_label(entry["public_id"])
                 actor = vtk.vtkTextActor()
-                actor.SetInput(entry["public_id"])
+                actor.SetInput(text)
                 actor.PickableOff()
                 prop = actor.GetTextProperty()
                 prop.SetFontSize(16)
                 prop.BoldOn()
-                prop.SetColor(1.0, 0.93, 0.2)
+                prop.SetColor(*colour)
                 binding["renderer"].AddActor2D(actor)
                 entry["actors"][view_name] = actor
 
@@ -838,11 +830,9 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
             for row, entry in enumerate(sorted(self.entries.values(), key=lambda item: item["public_id"])):
                 actor = entry["actors"].get(view_name)
                 node = entry["node"]
-                if self.only_id is not None:
-                    if entry["public_id"] != self.only_id:
-                        actor.SetVisibility(False)
-                        continue
-                    row = 0
+                text, colour = self.widget.roi_label(entry["public_id"])
+                actor.SetInput(text)
+                actor.GetTextProperty().SetColor(*colour)
                 bounds = [0.0] * 6
                 try:
                     node.GetRASBounds(bounds)
@@ -1180,9 +1170,6 @@ else:
         def set_enabled(self, enabled: bool) -> None:
             pass
 
-        def set_only(self, public_id: str | None) -> None:
-            pass
-
 
     class LiteRoiClickSelector:  # pragma: no cover - only a fallback symbol
         def __init__(self, widget: Any) -> None:
@@ -1235,9 +1222,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.roi_boxes_visible = True
         self.active_roi_id: str | None = None
         self.active_roi_geometry: BoxGeometry | None = None
-        # Gates the blind page between "boxing" and "FIGO typing": the reader
-        # places every myoma box first, then explicitly moves on to FIGO.
-        self._boxing_stage_done = False
         self.roi_click_baseline: BoxGeometry | None = None
         self.committing_roi_geometry = False
         self.roi_transaction = RoiTransaction()
@@ -1272,6 +1256,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # and the observers that keep it beside its box.
         self.figo_card: FigoCard | None = None
         self._figo_card_view: str | None = None
+        # The saved FIGO the open card last showed; refresh_ui only pushes a
+        # different one, so a half-made 8/Hybrid choice survives a refresh.
+        self._figo_card_figo: dict[str, Any] | None = None
         self._figo_card_observers: list[tuple[Any, int]] = []
         self._last_view_name: str | None = None
         self._card_escape_shortcuts: dict[str, Any] = {}
@@ -1797,19 +1784,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
         self.page_stack = qt.QStackedWidget()
         annotation_layout.addWidget(self.page_stack, 1)
+        # The blinded annotation page: boxes, FIGO (on the image card), early
+        # stops and reveal all live here; the same page is used after reveal.
         blind = qt.QWidget()
         blind_layout = qt.QVBoxLayout(blind)
-        self.blind_stack = qt.QStackedWidget()
-        blind_layout.addWidget(self.blind_stack, 1)
-
-        # --- Stage 1: myoma boxing. The reader places every box on this
-        # page first; FIGO typing only becomes reachable once they are done. ---
-        boxing_page = qt.QWidget()
-        boxing_layout = qt.QVBoxLayout(boxing_page)
         self.lesion_list = qt.QListWidget()
         self.lesion_list.connect("currentRowChanged(int)", self._on_lesion_row_changed)
         self.lesion_list.connect("itemClicked(QListWidgetItem*)", self._on_lesion_item_clicked)
-        boxing_layout.addWidget(self.lesion_list, 1)
+        blind_layout.addWidget(self.lesion_list, 1)
         actions = qt.QHBoxLayout()
         self.add_button = qt.QPushButton("Add myoma box")
         self.add_button.connect("clicked()", self.on_add_box)
@@ -1817,7 +1799,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.delete_button.connect("clicked()", self.on_delete_box)
         for button in (self.add_button, self.delete_button):
             actions.addWidget(button)
-        boxing_layout.addLayout(actions)
+        blind_layout.addLayout(actions)
         roi_transaction_actions = qt.QHBoxLayout()
         self.save_roi_button = qt.QPushButton("Save ROI")
         self.save_roi_button.enabled = False
@@ -1827,12 +1809,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.cancel_roi_button.connect("clicked()", self.cancel_roi_edit)
         roi_transaction_actions.addWidget(self.save_roi_button)
         roi_transaction_actions.addWidget(self.cancel_roi_button)
-        boxing_layout.addLayout(roi_transaction_actions)
+        blind_layout.addLayout(roi_transaction_actions)
         self.zero_check = qt.QCheckBox("Confirm zero myomas")
         self.zero_check.connect("toggled(bool)", self.on_zero_toggled)
-        boxing_layout.addWidget(self.zero_check)
+        blind_layout.addWidget(self.zero_check)
         # Early stops answer "is there anything to box at all", so they sit
-        # with the zero-myoma confirmation rather than with FIGO typing.
+        # with the zero-myoma confirmation.
         stops = qt.QHBoxLayout()
         self.early_stop_buttons = []
         for text_value, status in (("No uterus", "no_uterus"), ("Wrong image", "wrong_image"), ("Cannot assess", "cannot_assess")):
@@ -1840,62 +1822,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             button.connect("clicked()", lambda _checked=False, value=status: self.on_early_stop(value))
             stops.addWidget(button)
             self.early_stop_buttons.append(button)
-        boxing_layout.addLayout(stops)
-        self.continue_to_figo_button = qt.QPushButton("Done boxing → continue to FIGO typing")
-        self.continue_to_figo_button.connect("clicked()", self.on_continue_to_figo)
-        boxing_layout.addWidget(self.continue_to_figo_button)
-        self.blind_stack.addWidget(boxing_page)
-
-        # --- Stage 2: FIGO typing. Reachable only after boxing is done; the
-        # FIGO/type values are chosen from fixed options, never free-typed. ---
-        figo_page = qt.QWidget()
-        figo_page_layout = qt.QVBoxLayout(figo_page)
-        self.back_to_boxing_button = qt.QPushButton("← Back to myoma boxes")
-        self.back_to_boxing_button.connect("clicked()", self.on_back_to_boxing)
-        figo_page_layout.addWidget(self.back_to_boxing_button)
-        figo_form = qt.QFormLayout()
-        self.figo_lesion_combo = qt.QComboBox()
-        self.figo_lesion_combo.connect("currentIndexChanged(int)", self._on_figo_lesion_changed)
-        figo_form.addRow("Selected lesion", self.figo_lesion_combo)
-        self.figo_kind_combo = qt.QComboBox()
-        for kind in FIGOKind:
-            self.figo_kind_combo.addItem(kind.value, kind.value)
-        self.figo_kind_combo.connect("currentIndexChanged(int)", self._refresh_figo_controls)
-        figo_form.addRow("FIGO kind", self.figo_kind_combo)
-        self.figo_type_combo = qt.QComboBox()
-        for type_value in range(9):
-            self.figo_type_combo.addItem(str(type_value), type_value)
-        self.figo_type_combo.connect("currentIndexChanged(int)", self._refresh_figo_controls)
-        figo_form.addRow("Standard type", self.figo_type_combo)
-        self.figo_location_combo = qt.QComboBox()
-        for location in ("cervical", "round_ligament", "broad_ligament", "parasitic_or_other_extrauterine"):
-            self.figo_location_combo.addItem(location, location)
-        figo_form.addRow("Type 8 location", self.figo_location_combo)
-        self.figo_endometrial_combo = qt.QComboBox()
-        for type_value in range(9):
-            self.figo_endometrial_combo.addItem(str(type_value), type_value)
-        figo_form.addRow("Hybrid endometrial", self.figo_endometrial_combo)
-        self.figo_serosal_combo = qt.QComboBox()
-        for type_value in range(9):
-            self.figo_serosal_combo.addItem(str(type_value), type_value)
-        figo_form.addRow("Hybrid serosal", self.figo_serosal_combo)
-        self.figo_reason_combo = qt.QComboBox()
-        for reason in ("endometrial_interface_unclear", "serosal_interface_unclear", "both_interfaces_unclear", "otherwise_not_classifiable"):
-            self.figo_reason_combo.addItem(reason, reason)
-        figo_form.addRow("Uncertain reason", self.figo_reason_combo)
-        self.ddx_edit = qt.QLineEdit()
-        self.ddx_edit.maxLength = 4000
-        self.ddx_edit.placeholderText = "Reviewer differential diagnosis / notes"
-        figo_form.addRow("Myoma Ddx", self.ddx_edit)
-        self.lesion_comment_edit = qt.QLineEdit()
-        self.lesion_comment_edit.maxLength = 4000
-        self.lesion_comment_edit.placeholderText = "Comment on this myoma"
-        figo_form.addRow("Myoma comment", self.lesion_comment_edit)
-        self.apply_figo_button = qt.QPushButton("Save FIGO and Ddx")
-        self.apply_figo_button.connect("clicked()", self.on_apply_figo)
-        figo_form.addRow("", self.apply_figo_button)
-        figo_page_layout.addLayout(figo_form)
-
+        blind_layout.addLayout(stops)
         lower = qt.QHBoxLayout()
         self.save_draft_button = qt.QPushButton("Save Draft")
         self.save_draft_button.connect("clicked()", self.on_save_draft)
@@ -1907,8 +1834,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         lower.addWidget(self.save_draft_button)
         lower.addWidget(self.reveal_button)
         lower.addWidget(self.return_correction_button)
-        figo_page_layout.addLayout(lower)
-        self.blind_stack.addWidget(figo_page)
+        blind_layout.addLayout(lower)
         self.page_stack.addWidget(blind)
 
         correction = qt.QWidget()
@@ -1934,7 +1860,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.complete_button.connect("clicked()", self.on_complete)
         correction_layout.addWidget(self.complete_button)
         self.page_stack.addWidget(correction)
-        self._refresh_figo_controls()
         self.figo_card = FigoCard(self._on_card_figo, self._on_card_text, self._on_card_closed)
         # The per-view Esc shortcuts (_bind_card_escape_shortcuts) overlap the
         # card's own while focus is in the card; whichever Qt picks must close.
@@ -2046,6 +1971,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # the cursor/hidden-boxes reset has to run again here.
             self._apply_roi_selection()
             return
+        source = self.annotation_undo if undo else self.annotation_redo
+        step_ready = bool(source) and source[-1]["phase"] == self.logic.state.phase
+        if not step_ready and not (undo and self._has_unbanked_edit()):
+            # Nothing to restore: leave an open card (and a half-made choice
+            # on it) alone rather than closing and reopening it.
+            return
         # The flush below closes an open card (banking its typed text as its
         # own undo step); bring it back afterwards for the same box, refreshed
         # from the restored state, unless the undo removed that box.
@@ -2071,6 +2002,30 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         finally:
             if reopen is not None and reopen[0] in self.logic.state.lesions:
                 self.open_figo_card(*reopen)
+
+    def _has_unbanked_edit(self) -> bool:
+        """Whether the flush would add an undo step: a dragged box or card text."""
+
+        card = self.figo_card
+        if card is not None and card.has_unsaved_text():
+            return True
+        lesion_id = self.active_roi_id
+        node = self.roi_nodes.get(lesion_id) if lesion_id else None
+        previous = self.active_roi_geometry
+        if (
+            node is None
+            or previous is None
+            or node.GetScene() is not slicer.mrmlScene
+            or not self._roi_edits_allowed()
+        ):
+            return False
+        current = self._roi_geometry_or_none(node)
+        return current is not None and any(
+            abs(new - old) > 1e-4
+            for new, old in zip(
+                current.center_ras + current.size_mm, previous.center_ras + previous.size_mm
+            )
+        )
 
     def on_undo(self) -> None:
         if self.logic.read_only:
@@ -2229,7 +2184,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def _load_case(self, manifest_path: Path, case_id: str | None) -> None:
         self.logic.open_manifest(manifest_path, case_id=case_id)
-        self._boxing_stage_done = self.logic.phase != ReviewPhase.BLIND.value
         self._load_case_comment()
         self.shutdown_saved = False
         self.save_coordinator.clear_dirty()
@@ -2269,7 +2223,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             if read_only:
                 self.segment_editor_widget.setActiveEffectByName("")
         self.correction_save_button.enabled = not read_only
-        self.ddx_edit.enabled = not read_only
         self.correction_tools.refresh()
         self.reopen_button.visible = bool(
             read_only and (self.logic.final_annotation or {}).get("status") == "complete"
@@ -2277,93 +2230,80 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if state is None:
             if not self.logic.read_only or self.logic.final_annotation is None:
                 return
+            # Filled on load: picking row 0 here must not pull the views anywhere.
+            self.lesion_list.blockSignals(True)
             self.lesion_list.clear()
-            self.figo_lesion_combo.blockSignals(True)
-            self.figo_lesion_combo.clear()
             for lesion in self.logic.final_annotation.get("lesions", []):
                 lesion_id = str(lesion.get("lesion_id", ""))
-                item = qt.QListWidgetItem(f"{lesion_id} Â· final")
+                item = qt.QListWidgetItem(f"{lesion_id} · {figo_label(lesion.get('figo'))}")
                 item.setData(qt.Qt.UserRole, lesion_id)
                 self.lesion_list.addItem(item)
-                self.figo_lesion_combo.addItem(lesion_id, lesion_id)
-            self.figo_lesion_combo.blockSignals(False)
             if self.lesion_list.count:
                 self.lesion_list.setCurrentRow(0)
+            self.lesion_list.blockSignals(False)
             for control in (
                 self.add_button,
                 self.delete_button,
                 self.zero_check,
-                self.figo_lesion_combo,
-                self.figo_kind_combo,
-                self.apply_figo_button,
                 self.reveal_button,
                 self.save_draft_button,
                 self.complete_button,
                 *self.early_stop_buttons,
             ):
                 control.enabled = False
-            self.figo_lesion_combo.enabled = True
-            self.back_to_boxing_button.enabled = False
-            self.continue_to_figo_button.enabled = False
-            self.blind_stack.setCurrentIndex(1)
+            self.reveal_button.toolTip = ""
             self.return_correction_button.visible = self.logic.segmentation_node is not None
-            self._load_selected_annotation()
             self._refresh_roi_arming()
+            if self.roi_overlay is not None:
+                self.roi_overlay.refresh()
             status = str(self.logic.final_annotation.get("status", "complete")).replace("_", " ")
             self._set_status(f"Final outcome: {status}. This record is read-only.")
             self._refresh_progress()
             return
-        self.zero_check.blockSignals(True)
-        self.zero_check.checked = state.zero_myomas
-        self.zero_check.enabled = state.phase == ReviewPhase.BLIND.value and not state.lesions
-        self.zero_check.blockSignals(False)
         selected_id = self._selected_lesion_id()
         self.lesion_list.blockSignals(True)
-        self.figo_lesion_combo.blockSignals(True)
         self.lesion_list.clear()
-        self.figo_lesion_combo.clear()
         for lesion in state.active_lesions:
-            label = lesion.lesion_id + (" Â· FIGO pending" if lesion.figo is None else " Â· FIGO set")
-            item = qt.QListWidgetItem(label)
+            text, _colour = self.roi_label(lesion.lesion_id)
+            item = qt.QListWidgetItem(text)
             item.setData(qt.Qt.UserRole, lesion.lesion_id)
             self.lesion_list.addItem(item)
-            self.figo_lesion_combo.addItem(label, lesion.lesion_id)
-        selected_index = self.figo_lesion_combo.findData(selected_id) if selected_id else 0
-        if self.figo_lesion_combo.count:
-            selected_index = max(0, selected_index)
-            self.figo_lesion_combo.setCurrentIndex(selected_index)
-            self.lesion_list.setCurrentRow(selected_index)
+        if self.lesion_list.count:
+            selected_index = self._lesion_row(selected_id) if selected_id else 0
+            self.lesion_list.setCurrentRow(max(0, selected_index))
         self.lesion_list.blockSignals(False)
-        self.figo_lesion_combo.blockSignals(False)
         locked = read_only or state.phase not in (ReviewPhase.BLIND.value, ReviewPhase.AI_REVEALED.value)
-        # Boxing and FIGO typing are separate stages of the annotation page.
-        # A revealed case opens on FIGO, but the reader may go back to the
-        # boxes to add, redraw or delete one; the blinded snapshot is frozen.
-        in_figo_stage = self._boxing_stage_done
-        self.blind_stack.setCurrentIndex(1 if in_figo_stage else 0)
-        for control in (self.add_button, self.delete_button, self.zero_check):
-            control.enabled = not locked and not in_figo_stage
-        for control in (self.figo_lesion_combo, self.figo_kind_combo, self.apply_figo_button):
+        # One page before and after reveal: boxes can still be added, redrawn
+        # or deleted once AI is shown; the blinded snapshot stays frozen.
+        for control in (self.add_button, self.delete_button):
             control.enabled = not locked
-        self.zero_check.enabled = not locked and not in_figo_stage and not state.lesions
-        self.continue_to_figo_button.enabled = not locked and not in_figo_stage and bool(state.zero_myomas or state.lesions)
-        self.back_to_boxing_button.enabled = not locked and in_figo_stage
+        self.zero_check.blockSignals(True)
+        self.zero_check.checked = state.zero_myomas
+        self.zero_check.enabled = not locked and not state.lesions
+        self.zero_check.blockSignals(False)
         self.reveal_button.enabled = bool(state.can_reveal)
+        missing = missing_figo_ids(state)
+        self.reveal_button.toolTip = f"FIGO missing: {', '.join(missing)}" if missing else ""
         self.reveal_button.visible = state.phase == ReviewPhase.BLIND.value
         self.return_correction_button.visible = state.phase != ReviewPhase.BLIND.value
         self.save_draft_button.enabled = not self.logic.read_only
         self.complete_button.enabled = state.phase == ReviewPhase.AI_REVEALED.value
         for button in self.early_stop_buttons:
-            button.enabled = not locked and not in_figo_stage and state.phase == ReviewPhase.BLIND.value
-        self._load_selected_annotation()
+            button.enabled = not locked and state.phase == ReviewPhase.BLIND.value
         self._refresh_roi_arming()
+        if self.roi_overlay is not None:
+            self.roi_overlay.refresh()
         self._set_status(f"Phase: {state.phase} Â· {state.lesion_count} myomas (no count limit)")
         self._refresh_progress()
-        # Keep an open card's highlight in step with the state (say, after the
-        # left-panel form saved this box's FIGO); opening/closing is not ours.
+        # Keep an open card's highlight in step with the saved FIGO (say, after
+        # an undo); opening/closing is not ours. Only a changed value is pushed,
+        # so a half-made 8/Hybrid choice on the card is not reset.
         card = self.figo_card
         if card is not None and card.is_open and card.lesion_id in state.lesions:
-            card.set_figo(state.lesions[card.lesion_id].to_dict().get("figo"))
+            saved = state.lesions[card.lesion_id].to_dict().get("figo")
+            if saved != self._figo_card_figo:
+                card.set_figo(saved)
+                self._figo_card_figo = saved
 
     def _refresh_roi_arming(self) -> None:
         if self.roi_nodes:
@@ -2382,22 +2322,39 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         item = self.lesion_list.currentItem()
         return str(item.data(qt.Qt.UserRole)) if item is not None else None
 
-    def _on_lesion_row_changed(self, index: int) -> None:
-        if not hasattr(self, "figo_lesion_combo"):
+    def _lesion_row(self, lesion_id: str | None) -> int:
+        for row in range(self.lesion_list.count):
+            if str(self.lesion_list.item(row).data(qt.Qt.UserRole)) == lesion_id:
+                return row
+        return -1
+
+    def _select_lesion_row(self, lesion_id: str) -> None:
+        """Make ``lesion_id`` the current row without re-running the row handler."""
+
+        row = self._lesion_row(lesion_id)
+        if row < 0:
             return
-        self.figo_lesion_combo.blockSignals(True)
-        self.figo_lesion_combo.setCurrentIndex(index)
-        self.figo_lesion_combo.blockSignals(False)
-        self._load_selected_annotation()
-        # Picking a myoma from the list changes the selected box with it. Not
-        # while a box is being placed (every other box is hidden then), and not
-        # for a completed case's read-only list, which is filled on load and
-        # must not pull the views anywhere.
-        if self.logic.state is not None and not self._has_unresolved_roi():
-            self._reveal_lesion(self._selected_lesion_id())
-            # The old FIGO-typing page still has its own form (until it goes).
-            if not self._figo_focus_active():
-                self.open_figo_card(self._selected_lesion_id())
+        self.lesion_list.blockSignals(True)
+        self.lesion_list.setCurrentRow(row)
+        self.lesion_list.blockSignals(False)
+
+    def _lesions_pickable(self) -> bool:
+        """Whether a list pick may select a box: a case is open and no box is being placed."""
+
+        has_case = self.logic.state is not None or (
+            self.logic.read_only and self.logic.final_annotation is not None
+        )
+        return has_case and not self._has_unresolved_roi()
+
+    def _on_lesion_row_changed(self, _index: int) -> None:
+        # Picking a myoma from the list selects its box, brings it on screen
+        # and opens its card. Not while a box is being placed (every other box
+        # is hidden then).
+        if not self._lesions_pickable():
+            return
+        lesion_id = self._selected_lesion_id()
+        self._reveal_lesion(lesion_id)
+        self.open_figo_card(lesion_id)
 
     def _on_lesion_item_clicked(self, item: Any) -> None:
         """Reopen the card when the reader clicks the row that is already current.
@@ -2406,9 +2363,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         otherwise not be brought back from the list.
         """
 
-        if item is None or self.logic.state is None or self._has_unresolved_roi():
-            return
-        if self._figo_focus_active():
+        if item is None or not self._lesions_pickable():
             return
         lesion_id = str(item.data(qt.Qt.UserRole))
         card = self.figo_card
@@ -2417,39 +2372,16 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._reveal_lesion(lesion_id)
         self.open_figo_card(lesion_id)
 
-    def _on_figo_lesion_changed(self, index: int) -> None:
-        self.lesion_list.blockSignals(True)
-        self.lesion_list.setCurrentRow(index)
-        self.lesion_list.blockSignals(False)
-        self._load_selected_annotation()
-        # Picking a myoma while typing FIGO shows its box. A box picked by
-        # clicking it in a view is already revealed (on_view_clicked reveals
-        # first, then syncs this combo), so the views stay put in that case.
-        # In the boxing stage the combo is only synced, never chosen by hand,
-        # so nothing is revealed there.
-        if self.blind_stack.currentIndex == 1:
-            lesion_id = self._selected_lesion_id()
-            self._reveal_lesion(lesion_id, navigate=lesion_id != self.active_roi_id)
+    def _reveal_lesion(self, lesion_id: str | None) -> None:
+        """Show one myoma's box: select it and centre the three T2 views on it.
 
-    def _reveal_lesion(self, lesion_id: str | None, navigate: bool = True) -> None:
-        """Show one myoma's box: reveal it, and optionally bring it on screen.
-
-        A box is only visible on the slices it crosses, so with ``navigate``
-        the three T2 views are centred on the box; otherwise choosing a myoma
-        from the FIGO list could leave its box off the current slice.
-
-        While typing FIGO the list selection already is the shown box (see
-        ``_figo_focus_active``), so it is redrawn instead of being put in hand.
+        A box is only visible on the slices it crosses, so without centring a
+        myoma picked from the list could leave its box off the current slice.
         """
 
         if not lesion_id or lesion_id not in self.roi_nodes:
             return
-        if self._figo_focus_active():
-            self._apply_roi_selection()
-        else:
-            self.set_active_roi(lesion_id)
-        if not navigate:
-            return
+        self.set_active_roi(lesion_id)
         node = self.roi_nodes[lesion_id]
         if node.GetScene() is not slicer.mrmlScene:
             return
@@ -2460,30 +2392,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             view = manager.sliceWidget(view_name)
             if view is not None:
                 view.mrmlSliceNode().JumpSliceByCentering(*center)
-
-    def _load_selected_annotation(self) -> None:
-        if not hasattr(self, "ddx_edit"):
-            return
-        lesion_id = self._selected_lesion_id()
-        state = self.logic.state
-        lesion = state.lesions.get(lesion_id) if state is not None else None
-        payload = lesion.to_dict() if lesion is not None else next(
-            (item for item in (self.logic.final_annotation or {}).get("lesions", []) if item.get("lesion_id") == lesion_id), {}
-        )
-        figo = payload.get("figo") or {"kind": "standard", "type": 0}
-        self.figo_kind_combo.setCurrentIndex(max(0, self.figo_kind_combo.findData(figo["kind"])))
-        self.figo_type_combo.setCurrentIndex(max(0, self.figo_type_combo.findData(figo.get("type", 0))))
-        self.figo_location_combo.setCurrentIndex(max(0, self.figo_location_combo.findData(figo.get("location"))))
-        self.figo_endometrial_combo.setCurrentIndex(max(0, self.figo_endometrial_combo.findData(figo.get("endometrial", 0))))
-        self.figo_serosal_combo.setCurrentIndex(max(0, self.figo_serosal_combo.findData(figo.get("serosal", 0))))
-        self.figo_reason_combo.setCurrentIndex(max(0, self.figo_reason_combo.findData(figo.get("reason"))))
-        self.ddx_edit.text = payload.get("differential_diagnosis", "")
-        self.lesion_comment_edit.text = payload.get("comment", "")
-        for control in (self.figo_kind_combo, self.figo_type_combo, self.figo_location_combo,
-                        self.figo_endometrial_combo, self.figo_serosal_combo, self.figo_reason_combo,
-                        self.ddx_edit, self.lesion_comment_edit, self.apply_figo_button):
-            control.enabled = bool(payload) and not self.logic.read_only
-        self._refresh_figo_controls()
 
     def on_add_box(self) -> None:
         if self._has_unresolved_roi():
@@ -2522,34 +2430,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         except Exception as exc:
             self._show_error(str(exc))
 
-    def on_continue_to_figo(self) -> None:
-        if self._has_unresolved_roi():
-            self._show_error("Save or cancel the current myoma box first.")
-            return
-        state = self.logic.state
-        if state is None or not (state.zero_myomas or state.lesions):
-            self._show_error("Add at least one myoma box, or confirm zero myomas, before continuing.")
-            return
-        self._boxing_stage_done = True
-        # FIGO typing pages through the myomas in order, so it opens on the
-        # first one rather than on whichever box was drawn or picked last.
-        if self.lesion_list.count:
-            # refresh_ui() syncs the combo and form from the list, and the FIGO
-            # stage is not up yet, so keep the row handler from arming a box.
-            self.lesion_list.blockSignals(True)
-            self.lesion_list.setCurrentRow(0)
-            self.lesion_list.blockSignals(False)
-        self.refresh_ui()
-        if state.lesions:
-            self._reveal_lesion(self._selected_lesion_id())
-
-    def on_back_to_boxing(self) -> None:
-        if self._has_unresolved_roi():
-            self._show_error("Save or cancel the current myoma box first.")
-            return
-        self._boxing_stage_done = False
-        self.refresh_ui()
-
     def on_zero_toggled(self, checked: bool) -> None:
         if self.logic.state is None:
             return
@@ -2563,69 +2443,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.zero_check.checked = False
             self.zero_check.blockSignals(False)
             self._show_error(str(exc))
-
-    def _refresh_figo_controls(self, _index: int = 0) -> None:
-        if not hasattr(self, "figo_kind_combo"):
-            return
-        kind = str(self.figo_kind_combo.itemData(self.figo_kind_combo.currentIndex))
-        standard_type = self.figo_type_combo.itemData(self.figo_type_combo.currentIndex)
-        self.figo_type_combo.visible = kind == FIGOKind.STANDARD.value
-        self.figo_location_combo.visible = kind == FIGOKind.STANDARD.value and standard_type == 8
-        self.figo_endometrial_combo.visible = kind == FIGOKind.HYBRID.value
-        self.figo_serosal_combo.visible = kind == FIGOKind.HYBRID.value
-        self.figo_reason_combo.visible = kind == FIGOKind.UNCERTAIN.value
-
-    def on_apply_figo(self) -> None:
-        state = self.logic.state
-        lesion_id = self._selected_lesion_id()
-        if state is None:
-            return
-        if lesion_id is None and self.figo_lesion_combo.currentIndex >= 0:
-            lesion_id = str(self.figo_lesion_combo.itemData(self.figo_lesion_combo.currentIndex))
-        if not lesion_id:
-            return
-        kind = str(self.figo_kind_combo.itemData(self.figo_kind_combo.currentIndex))
-        try:
-            if kind == FIGOKind.STANDARD.value:
-                standard_type = int(self.figo_type_combo.itemData(self.figo_type_combo.currentIndex))
-                value: dict[str, Any] = {"kind": kind, "type": standard_type}
-                if standard_type == 8:
-                    value["location"] = str(self.figo_location_combo.itemData(self.figo_location_combo.currentIndex))
-            elif kind == FIGOKind.HYBRID.value:
-                value = {
-                    "kind": kind,
-                    "endometrial": int(self.figo_endometrial_combo.itemData(self.figo_endometrial_combo.currentIndex)),
-                    "serosal": int(self.figo_serosal_combo.itemData(self.figo_serosal_combo.currentIndex)),
-                }
-            else:
-                value = {"kind": kind, "reason": str(self.figo_reason_combo.itemData(self.figo_reason_combo.currentIndex))}
-            FIGOClassification.from_dict(value)
-            self._remember_annotation()
-            state.set_figo(lesion_id, value)
-            state.set_differential_diagnosis(lesion_id, str(self.ddx_edit.text))
-            state.set_lesion_comment(lesion_id, str(self.lesion_comment_edit.text))
-            self._write_current_draft()
-            # Saving FIGO advances straight to the next myoma so the reader
-            # can page through the whole list without reselecting each one;
-            # saving the last myoma instead offers to move on to AI reveal.
-            ordered_ids = [lesion.lesion_id for lesion in state.active_lesions]
-            position = ordered_ids.index(lesion_id) if lesion_id in ordered_ids else -1
-            if 0 <= position < len(ordered_ids) - 1:
-                self.lesion_list.setCurrentRow(position + 1)
-            self.refresh_ui()
-            if position == len(ordered_ids) - 1 and self.logic.phase == ReviewPhase.BLIND.value:
-                self._offer_ai_reveal_after_last_figo()
-        except Exception as exc:
-            self._show_error(str(exc))
-
-    def _offer_ai_reveal_after_last_figo(self) -> None:
-        answer = qt.QMessageBox.question(
-            slicer.util.mainWindow(),
-            "FIGO saved",
-            "FIGO and Ddx saved for the last myoma. Reveal AI now?",
-        )
-        if answer == qt.QMessageBox.Yes:
-            self.on_reveal_ai()
 
     def on_show_myomas(self) -> None:
         if self.logic.segmentation_node is None:
@@ -2859,7 +2676,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # dragged box must be committed while the phase is still blind.
             self._flush_pending_roi_drag()
             self.logic.reveal_ai()
-            self._boxing_stage_done = True
             self.annotation_undo.clear()
             self.annotation_redo.clear()
             self.logic.load_ai_mask()
@@ -3241,23 +3057,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
         return self._roi_edits_allowed() and self.page_stack.currentIndex == 0
 
-    def _figo_focus_active(self) -> bool:
-        """Whether the reader is typing FIGO on the blinded annotation page.
-
-        Boxing has its own stage, so by now the boxes are settled: FIGO typing
-        looks at one myoma at a time and never edits geometry. After reveal the
-        annotation page keeps its click-to-edit handles, so it is excluded.
-        """
-
-        state = self.logic.state
-        return bool(
-            state is not None
-            and not self.logic.read_only
-            and state.phase == ReviewPhase.BLIND.value
-            and self.page_stack.currentIndex == 0
-            and self.blind_stack.currentIndex == 1
-        )
-
     def _apply_roi_selection(self) -> None:
         """Push the current selection, visibility and page onto every box.
 
@@ -3271,20 +3070,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         uncluttered view while the reader judges the new box's extent; see
         _update_box_edit_cursor for the matching cursor swap.
 
-        While FIGO typing (``_figo_focus_active``) it is the list selection that
-        decides what is drawn: the selected myoma alone, as a thin outline with
-        no handles, and every other box and label hidden.
+        The open FIGO card hides and returns with its box, so it is placed again.
         """
 
-        focus = self._figo_focus_active()
-        if focus and self.active_roi_id is not None:
-            # Nothing may stay in hand while typing FIGO. This flushes a pending
-            # drag, disarms the box, and re-enters here with nothing selected.
-            self.set_active_roi(None)
-            return
-        focus_id = self._selected_lesion_id() if focus else None
-        if self.roi_overlay is not None:
-            self.roi_overlay.set_only(focus_id if focus else None)
         draggable = self._roi_handles_draggable()
         hide_all = self._has_unresolved_roi()
         for identifier, node in self.roi_nodes.items():
@@ -3296,13 +3084,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             outline = self.roi_outline_nodes.get(identifier)
             if outline is not None:
                 self._style_outline_display(outline, bold=selected)
-                shown = not focus or identifier == focus_id
-                outline.SetDisplayVisibility(bool(shown and self.roi_boxes_visible and not hide_all))
+                outline.SetDisplayVisibility(bool(self.roi_boxes_visible and not hide_all))
         # The cursor is the corner-drag affordance, so it only holds for the
         # initial drag; once the square is set and handle fine-tuning takes
         # over (roi_draft_node exists, draw_tool is no longer active) the
         # normal cursor comes back even though the other boxes stay hidden.
         self._update_box_edit_cursor(bool(self.draw_tool is not None and self.draw_tool.active))
+        self._position_figo_card()
 
     def _box_placement_cursor(self) -> Any:
         """A small filled yellow dot: shown while placing or redrawing a box."""
@@ -3439,9 +3227,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def on_view_clicked(self, view_name: str, point_ras: tuple[float, float, float]) -> None:
         """Select the myoma box under a click in a T2 view, or clear the selection."""
 
-        # Only the myoma chosen in the FIGO list is drawn there, so a click
-        # must not select a box the reader cannot see.
-        if not self.roi_boxes_visible or self._has_unresolved_roi() or self._figo_focus_active():
+        if not self.roi_boxes_visible or self._has_unresolved_roi():
             return
         self._last_view_name = view_name
         candidates = []
@@ -3472,9 +3258,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # Empty image: the deselected box takes its card with it.
             self.close_figo_card()
             return
-        index = self.figo_lesion_combo.findData(lesion_id)
-        if index >= 0:
-            self.figo_lesion_combo.setCurrentIndex(index)
+        self._select_lesion_row(lesion_id)
         self.open_figo_card(lesion_id, view_name)
 
     # -- on-image FIGO card ------------------------------------------------
@@ -3493,6 +3277,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             )
         lesion = state.lesions.get(lesion_id)
         return lesion.to_dict() if lesion is not None else None
+
+    def roi_label(self, lesion_id: str) -> tuple[str, tuple[float, float, float]]:
+        """The on-image label of one box and its colour: amber while FIGO is missing."""
+
+        figo = (self._card_payload(lesion_id) or {}).get("figo")
+        colour = ROI_LABEL_COLOR if figo is not None else ROI_LABEL_MISSING_COLOR
+        return f"{lesion_id} · {figo_label(figo)}", colour
 
     def open_figo_card(self, lesion_id: str, view_name: str | None = None) -> None:
         """Show one box's FIGO card beside it, in the view the reader is working in."""
@@ -3526,6 +3317,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             bool(self.logic.read_only),
         )
         self._figo_card_view = view_name
+        self._figo_card_figo = payload.get("figo")
         self._bind_card_escape_shortcuts()
         self._set_card_escape_enabled(True)
         self._observe_figo_card(lesion_id)
@@ -3566,10 +3358,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._figo_card_observers = []
 
     def _position_figo_card(self) -> None:
-        """Put the card beside its box's projection; hide it off the box's slices.
+        """Put the card beside its box's projection; hide it while the box is not drawn.
 
-        Hiding is not closing: the card stays open (and keeps any typed text)
-        and comes back when the slice returns into the box.
+        The box is not drawn off its slices, while the boxes are hidden, or
+        while another box is being placed. Hiding is not closing: the card
+        stays open (and keeps any typed text) and comes back with the box.
         """
 
         card = self.figo_card
@@ -3583,6 +3376,16 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         )
         if node is None or slice_widget is None:
             card.widget.visible = False
+            return
+        outline = self.roi_outline_nodes.get(card.lesion_id)
+        drawn = bool(
+            self.roi_boxes_visible
+            and not self._has_unresolved_roi()
+            and (node.GetDisplayVisibility() or (outline is not None and outline.GetDisplayVisibility()))
+        )
+        if not drawn:
+            if not card.widget.isHidden():
+                card.widget.visible = False
             return
         bounds = [0.0] * 6
         node.GetRASBounds(bounds)
@@ -3821,7 +3624,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             if self.roi_overlay is not None:
                 self.roi_overlay.track(node, lesion_id)
             self.refresh_ui()
-            self.figo_lesion_combo.setCurrentIndex(self.figo_lesion_combo.findData(lesion_id))
+            self._select_lesion_row(lesion_id)
         except Exception:
             self.cancel_roi_edit()
             raise

@@ -282,16 +282,24 @@ class FigoCard:
         self.widget.show()
         self.widget.raise_()
 
+    def has_unsaved_text(self) -> bool:
+        """Whether closing would save Ddx/comment text typed since the card opened."""
+        return bool(
+            self.is_open
+            and self.lesion_id is not None
+            and (
+                self._ddx.text.strip() != self._orig_ddx
+                or self._comment.text.strip() != self._orig_comment
+            )
+        )
+
     def close(self) -> None:
         if not self.is_open:
             return
+        unsaved = self.has_unsaved_text()
         self.is_open = False
-        ddx = self._ddx.text.strip()
-        comment = self._comment.text.strip()
-        if self.lesion_id is not None and (
-            ddx != self._orig_ddx or comment != self._orig_comment
-        ):
-            self._on_text(self.lesion_id, ddx, comment)
+        if unsaved:
+            self._on_text(self.lesion_id, self._ddx.text.strip(), self._comment.text.strip())
         self.widget.hide()
         self._on_close()
 
