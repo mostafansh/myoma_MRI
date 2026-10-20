@@ -1149,6 +1149,47 @@ def test_a_read_only_list_shows_figo_and_opens_the_card_read_only() -> None:
         widget.cleanup()
 
 
+def test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r() -> None:
+    """The sagittal slice normal is -R, so GetSliceOffset() is -R: compare positions, not offsets."""
+
+    widget, _first, _second = _build_case("sub-00079")
+    try:
+        off_midline = widget.logic.state.add_lesion((-41.4, 0.0, 0.0), (40.0, 40.0, 40.0))
+        widget.rebuild_roi_nodes()
+        widget.refresh_ui()
+        widget.logic.activate_layout()
+        widget.roi_overlay.bind_views()
+        view_name = VIEW_NAMES["sagittal"]
+        slice_node = slicer.app.layoutManager().sliceWidget(view_name).mrmlSliceNode()
+        slice_to_ras = vtk.vtkMatrix4x4()
+        # Screen x = -A, screen y = +S, so the normal is x cross y = -R.
+        for row, (x, y, z) in enumerate(((0.0, 0.0, -1.0), (-1.0, 0.0, 0.0), (0.0, 1.0, 0.0))):
+            slice_to_ras.SetElement(row, 0, x)
+            slice_to_ras.SetElement(row, 1, y)
+            slice_to_ras.SetElement(row, 2, z)
+        slice_to_ras.SetElement(0, 3, -41.44)
+        slice_node.GetSliceToRAS().DeepCopy(slice_to_ras)
+        slice_node.UpdateMatrices()
+        slicer.app.processEvents()
+        assert abs(slice_node.GetSliceOffset() - 41.44) < 1e-3, slice_node.GetSliceOffset()
+
+        widget.open_figo_card(off_midline, view_name)
+        slicer.app.processEvents()
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == off_midline
+        assert not widget.figo_card.widget.isHidden(), "the card hid on a sagittal slice through its box"
+        entry = next(e for e in widget.roi_overlay.entries.values() if e["public_id"] == off_midline)
+        assert entry["actors"][view_name].GetVisibility(), "the box's label is not drawn in sagittal"
+
+        # The mirrored slice (R = +41.44, offset -41.44) misses the box.
+        slice_node.GetSliceToRAS().SetElement(0, 3, 41.44)
+        slice_node.UpdateMatrices()
+        slicer.app.processEvents()
+        assert widget.figo_card.widget.isHidden(), "the card showed on the mirrored sagittal slice"
+        assert not entry["actors"][view_name].GetVisibility(), "the label showed on the mirrored slice"
+    finally:
+        widget.cleanup()
+
+
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
@@ -1198,6 +1239,7 @@ TESTS = (
     test_a_no_op_undo_leaves_the_card_alone,
     test_the_card_hides_while_its_box_is_not_drawn,
     test_a_read_only_list_shows_figo_and_opens_the_card_read_only,
+    test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r,
 )
 
 failures = 0

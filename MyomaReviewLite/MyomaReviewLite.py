@@ -237,6 +237,23 @@ def validate_four_label_values(values: Iterable[Any]) -> None:
     validate_ai_mask_values(values)
 
 
+def slice_cuts_bounds(slice_node: Any, bounds: list[float]) -> bool:
+    """Whether the slice plane passes through the RAS box ``bounds``.
+
+    Projects the plane and the box's corners onto the slice normal rather
+    than comparing GetSliceOffset() with one RAS axis: the offset is the
+    plane's position along the normal, so a view whose normal points down an
+    axis (this module's sagittal is -R) reports the negated coordinate.
+    """
+
+    matrix = slice_node.GetSliceToRAS()
+    normal = [matrix.GetElement(row, 2) for row in range(3)]
+    plane = sum(normal[row] * matrix.GetElement(row, 3) for row in range(3))
+    reach = sum(abs(normal[row]) * (bounds[row * 2 + 1] - bounds[row * 2]) / 2.0 for row in range(3))
+    centre = sum(normal[row] * (bounds[row * 2] + bounds[row * 2 + 1]) / 2.0 for row in range(3))
+    return centre - reach - 1e-4 <= plane <= centre + reach + 1e-4
+
+
 class MyomaReviewLite(ScriptedLoadableModule):
     def __init__(self, parent: Any) -> None:
         super().__init__(parent)
@@ -825,8 +842,7 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
             binding = self.views.get(view_name)
             if binding is None:
                 return
-            axis = 0 if "Sagittal" in view_name else 1 if "Coronal" in view_name else 2
-            offset = float(binding["slice_node"].GetSliceOffset())
+            slice_node = binding["slice_node"]
             for row, entry in enumerate(sorted(self.entries.values(), key=lambda item: item["public_id"])):
                 actor = entry["actors"].get(view_name)
                 node = entry["node"]
@@ -839,7 +855,7 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
                 except Exception:
                     actor.SetVisibility(False)
                     continue
-                visible = bounds[axis * 2] - 1e-4 <= offset <= bounds[axis * 2 + 1] + 1e-4
+                visible = slice_cuts_bounds(slice_node, bounds)
                 actor.SetVisibility(bool(visible and self.enabled))
                 if visible:
                     actor.SetDisplayPosition(8, 12 + row * 22)
@@ -3391,11 +3407,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         bounds = [0.0] * 6
         node.GetRASBounds(bounds)
         slice_node = slice_widget.mrmlSliceNode()
-        view_name = self._figo_card_view
-        # Same axis rule as LiteRoiLabelOverlay.refresh_view.
-        axis = 0 if "Sagittal" in view_name else 1 if "Coronal" in view_name else 2
-        offset = float(slice_node.GetSliceOffset())
-        if not bounds[axis * 2] - 1e-4 <= offset <= bounds[axis * 2 + 1] + 1e-4:
+        # Same rule as LiteRoiLabelOverlay.refresh_view.
+        if not slice_cuts_bounds(slice_node, bounds):
             if not card.widget.isHidden():
                 card.widget.visible = False
             return
