@@ -100,6 +100,9 @@ VIEW_NAMES = {
 VIEW_ORIENTATIONS = {"sagittal": "Sagittal", "axial": "Axial", "coronal": "Coronal"}
 SAFE_VOLUME_NAMES = {key: f"T2 {key.title()}" for key in VIEW_NAMES}
 CUSTOM_LAYOUT_ID = 735
+# Segment editor node reference to an auto-complete effect's preview
+# segmentation (ResultPreviewNodeReferenceRole in Slicer's SegmentEditorEffects).
+EFFECT_PREVIEW_REFERENCE_ROLE = "SegmentationResultPreview"
 FIXED_SEGMENT_IDS = {
     1: "uterine_wall",
     2: "uterine_cavity",
@@ -737,7 +740,19 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
     def _clear_loaded_nodes(self) -> None:
         if not SLICER_AVAILABLE:
             return
-        for node in list(self.volume_nodes.values()) + [self.ai_mask_node, self.segmentation_node, self.segment_editor_node]:
+        # Fill between slices and Grow from seeds keep an unapplied result in a
+        # "<segmentation> preview" node that only Apply or Cancel removes; it
+        # holds every segment, so left behind it draws this case's labels on
+        # the next case, blind phase included.
+        preview_node = None
+        if self.segment_editor_node is not None:
+            preview_node = self.segment_editor_node.GetNodeReference(EFFECT_PREVIEW_REFERENCE_ROLE)
+        for node in list(self.volume_nodes.values()) + [
+            self.ai_mask_node,
+            preview_node,
+            self.segmentation_node,
+            self.segment_editor_node,
+        ]:
             if node is not None and node.GetScene() is slicer.mrmlScene:
                 slicer.mrmlScene.RemoveNode(node)
         self.volume_nodes = {}
