@@ -26,4 +26,15 @@ def _dialog_stub(*args, **kwargs):
 for _name in ("question", "warning", "critical", "information"):
     setattr(qt.QMessageBox, _name, staticmethod(_dialog_stub))
 
-runpy.run_path(os.environ["MYOMA_TEST_SCRIPT"], run_name="__main__")
+try:
+    runpy.run_path(os.environ["MYOMA_TEST_SCRIPT"], run_name="__main__")
+except Exception:
+    # A script that dies before its own exit call (say, on a failing import)
+    # would otherwise leave Slicer open and the unattended run hanging.
+    import traceback
+
+    import slicer
+
+    log.write(traceback.format_exc())
+    log.flush()
+    slicer.app.exit(1)

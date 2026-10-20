@@ -9,10 +9,13 @@ import shutil
 import sys
 import tempfile
 import traceback
+import types
 from pathlib import Path
+from typing import Any
 
 import qt
 import slicer
+import vtk
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -896,6 +899,203 @@ def test_reload_also_drops_the_helper_package() -> None:
         widget.cleanup()
 
 
+def _card_child(widget: MyomaReviewLiteWidget, name: str) -> Any:
+    child = slicer.util.findChild(widget.figo_card.widget, name)
+    assert child is not None, f"the FIGO card has no {name}"
+    return child
+
+
+def _center_views_on(point: tuple[float, float, float]) -> None:
+    manager = slicer.app.layoutManager()
+    for view_name in VIEW_NAMES.values():
+        manager.sliceWidget(view_name).mrmlSliceNode().JumpSliceByCentering(*point)
+    slicer.app.processEvents()
+
+
+def _box_qt_rect(widget: MyomaReviewLiteWidget, lesion_id: str, view_name: str) -> Any:
+    """The box's on-screen rectangle in the view's logical Qt pixels (top-left origin)."""
+
+    slice_widget = slicer.app.layoutManager().sliceWidget(view_name)
+    view = slice_widget.sliceView()
+    inverse = vtk.vtkMatrix4x4()
+    vtk.vtkMatrix4x4.Invert(slice_widget.mrmlSliceNode().GetXYToRAS(), inverse)
+    bounds = [0.0] * 6
+    widget.roi_nodes[lesion_id].GetRASBounds(bounds)
+    xs, ys = [], []
+    for r in bounds[0:2]:
+        for a in bounds[2:4]:
+            for s in bounds[4:6]:
+                x, y, _z, _w = inverse.MultiplyPoint([r, a, s, 1.0])
+                xs.append(x)
+                ys.append(y)
+    ratio = float(view.devicePixelRatioF())
+    height = int(view.height)
+    left, right = min(xs) / ratio, max(xs) / ratio
+    top, bottom = height - max(ys) / ratio, height - min(ys) / ratio
+    return qt.QRect(int(left), int(top), max(1, int(right - left)), max(1, int(bottom - top)))
+
+
+def test_saving_a_new_box_opens_its_card() -> None:
+    widget, _first, _second = _build_case("sub-00060")
+    try:
+        widget.logic.activate_layout()
+        widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
+        widget.save_roi_edit()
+        assert widget.figo_card.is_open, "saving a new box did not open its FIGO card"
+        assert widget.figo_card.lesion_id == "M03"
+    finally:
+        widget.cleanup()
+
+
+def test_clicking_a_box_opens_its_card_and_empty_image_closes_it() -> None:
+    widget, _first, second = _build_case("sub-00061")
+    try:
+        widget.logic.activate_layout()
+        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == second
+        widget.on_view_clicked("MyomaLiteAxial", FAR_OUTSIDE)
+        assert not widget.figo_card.is_open, "clicking empty image left the card open"
+    finally:
+        widget.cleanup()
+
+
+def test_picking_a_row_opens_that_card() -> None:
+    widget, first, second = _build_case("sub-00062")
+    try:
+        widget.logic.activate_layout()
+        # The fixture already has row 0 current, so pick the other row first.
+        widget.lesion_list.setCurrentRow(1)
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == second
+        widget.lesion_list.setCurrentRow(0)
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == first
+    finally:
+        widget.cleanup()
+
+
+def test_a_card_choice_is_saved_and_undoable() -> None:
+    widget, first, _second = _build_case("sub-00063")
+    try:
+        widget.logic.activate_layout()
+        widget.open_figo_card(first)
+        _card_child(widget, "figo_type_4").click()
+        figo = widget.logic.state.lesions[first].figo
+        assert figo is not None and figo.type == 4, f"the card choice was not saved: {figo}"
+        draft = widget.logic.storage.load_draft()
+        assert draft is not None and draft.lesions[first].figo.type == 4, "the draft lacks the choice"
+        widget.on_undo()
+        assert widget.logic.state.lesions[first].figo is None, "Ctrl+Z did not undo the card choice"
+    finally:
+        widget.cleanup()
+
+
+def test_card_sits_beside_the_box_not_on_it() -> None:
+    widget, _first, second = _build_case("sub-00064")
+    try:
+        widget.logic.activate_layout()
+        _center_views_on(SMALL_BOX_INSIDE)
+        widget.open_figo_card(second, "MyomaLiteAxial")
+        slicer.app.processEvents()
+        assert widget.figo_card.is_open and not widget.figo_card.widget.isHidden()
+        box = _box_qt_rect(widget, second, "MyomaLiteAxial")
+        card = widget.figo_card.widget.geometry
+        assert not box.intersects(card), (
+            f"the card {card.x()},{card.y()} {card.width()}x{card.height()} covers the box "
+            f"{box.x()},{box.y()} {box.width()}x{box.height()}"
+        )
+    finally:
+        widget.cleanup()
+
+
+def test_card_hides_when_the_slice_leaves_the_box() -> None:
+    widget, _first, second = _build_case("sub-00065")
+    try:
+        widget.logic.activate_layout()
+        _center_views_on(SMALL_BOX_INSIDE)
+        widget.open_figo_card(second, "MyomaLiteAxial")
+        assert not widget.figo_card.widget.isHidden()
+        slice_node = slicer.app.layoutManager().sliceWidget("MyomaLiteAxial").mrmlSliceNode()
+        offset = slice_node.GetSliceOffset()
+        slice_node.SetSliceOffset(offset + 100.0)
+        assert widget.figo_card.widget.isHidden(), "the card stayed up off the box's slices"
+        assert widget.figo_card.is_open, "leaving the box closed the card instead of hiding it"
+        slice_node.SetSliceOffset(offset)
+        assert not widget.figo_card.widget.isHidden(), "the card did not come back"
+    finally:
+        widget.cleanup()
+
+
+def test_undo_refreshes_or_closes_the_open_card() -> None:
+    widget, first, _second = _build_case("sub-00066")
+    try:
+        widget.logic.activate_layout()
+        widget.open_figo_card(first)
+        _card_child(widget, "figo_type_4").click()
+        widget.on_undo()
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == first
+        names = [f"figo_type_{n}" for n in range(9)] + ["figo_hybrid", "figo_uncertain"]
+        checked = [name for name in names if _card_child(widget, name).checked]
+        assert not checked, f"the card still shows the undone choice: {checked}"
+
+        widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
+        widget.save_roi_edit()
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == "M03"
+        widget.on_undo()
+        assert "M03" not in widget.logic.state.lesions
+        assert not widget.figo_card.is_open, "the card outlived its undone box"
+    finally:
+        widget.cleanup()
+
+
+def test_reveal_saves_text_typed_on_the_card_into_the_blinded_snapshot() -> None:
+    widget, first, second = _build_case("sub-00067")
+    try:
+        widget.logic.activate_layout()
+        # reveal_ai only needs the manifest for the AI mask path it returns.
+        widget.logic.manifest = types.SimpleNamespace(ai_mask=OUTPUT_ROOT / "ai.nii.gz")
+        widget.logic.load_ai_mask = lambda: None
+        widget._open_correction_page = lambda: None
+        for lesion_id in (first, second):
+            widget.open_figo_card(lesion_id)
+            _card_child(widget, "figo_type_0").click()
+        assert widget.figo_card.lesion_id == second
+        _card_child(widget, "figo_ddx").text = "Leiomyoma"
+        widget.on_reveal_ai()
+        assert widget.logic.state.phase == ReviewPhase.AI_REVEALED.value, "the reveal did not happen"
+        lesions = {item["lesion_id"]: item for item in widget.logic.state.blinded_snapshot["lesions"]}
+        assert lesions[second]["differential_diagnosis"] == "Leiomyoma", (
+            "the Ddx typed on the open card missed the blinded snapshot"
+        )
+        assert not widget.figo_card.is_open
+    finally:
+        widget.cleanup()
+
+
+def test_the_card_never_shows_on_the_correction_page() -> None:
+    widget, first, _second = _build_case("sub-00068")
+    try:
+        widget.logic.activate_layout()
+        widget.open_figo_card(first)
+        assert widget.figo_card.is_open
+        widget._show_page(1)
+        assert not widget.figo_card.is_open, "the card followed the reader to the correction page"
+        widget.open_figo_card(first)
+        assert not widget.figo_card.is_open, "the card opened on the correction page"
+    finally:
+        widget.cleanup()
+
+
+def test_escape_in_a_view_closes_the_card() -> None:
+    widget, first, _second = _build_case("sub-00069")
+    try:
+        widget.logic.activate_layout()
+        widget.open_figo_card(first, "MyomaLiteAxial")
+        assert widget.figo_card.is_open
+        widget._card_escape_shortcuts["MyomaLiteAxial"].activated()
+        assert not widget.figo_card.is_open, "Esc in the view left the card open"
+    finally:
+        widget.cleanup()
+
+
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
@@ -934,6 +1134,16 @@ TESTS = (
     test_the_case_comment_folds_away_and_is_saved,
     test_each_myoma_has_its_own_comment,
     test_reload_also_drops_the_helper_package,
+    test_saving_a_new_box_opens_its_card,
+    test_clicking_a_box_opens_its_card_and_empty_image_closes_it,
+    test_picking_a_row_opens_that_card,
+    test_a_card_choice_is_saved_and_undoable,
+    test_card_sits_beside_the_box_not_on_it,
+    test_card_hides_when_the_slice_leaves_the_box,
+    test_undo_refreshes_or_closes_the_open_card,
+    test_reveal_saves_text_typed_on_the_card_into_the_blinded_snapshot,
+    test_the_card_never_shows_on_the_correction_page,
+    test_escape_in_a_view_closes_the_card,
 )
 
 failures = 0

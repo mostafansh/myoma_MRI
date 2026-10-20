@@ -88,6 +88,7 @@ from MyomaReviewLiteLib.roi import (  # noqa: E402
     stable_public_id,
 )
 from MyomaReviewLiteLib.domain import validate_correction_mask_values
+from MyomaReviewLiteLib.figo_card import FigoCard, card_position
 from MyomaReviewLiteLib.view_tools import ReviewViewTools
 from MyomaReviewLiteLib.correction_tools import ReviewCorrectionTools
 
@@ -1044,7 +1045,7 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
             geometry = self.widget.rectangle_geometry(view_name, self.start_xy, end)
             update_id = self.update_lesion_id
             self.cancel()
-            self.widget.accept_rectangle(geometry, update_id)
+            self.widget.accept_rectangle(geometry, update_id, view_name)
 
 
     class LiteShiftCrosshairToggle(qt.QObject):
@@ -1267,6 +1268,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # and _has_unresolved_roi.
         self._place_box_cursor: Any = None
         self._box_cursor_applied = False
+        # The on-image FIGO card (built in _build_ui), the view it sits in,
+        # and the observers that keep it beside its box.
+        self.figo_card: FigoCard | None = None
+        self._figo_card_view: str | None = None
+        self._figo_card_observers: list[tuple[Any, int]] = []
+        self._last_view_name: str | None = None
+        self._card_escape_shortcuts: dict[str, Any] = {}
 
     def onReload(self) -> None:
         # Slicer's Reload re-reads only this file. Drop the helper package too,
@@ -1800,6 +1808,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         boxing_layout = qt.QVBoxLayout(boxing_page)
         self.lesion_list = qt.QListWidget()
         self.lesion_list.connect("currentRowChanged(int)", self._on_lesion_row_changed)
+        self.lesion_list.connect("itemClicked(QListWidgetItem*)", self._on_lesion_item_clicked)
         boxing_layout.addWidget(self.lesion_list, 1)
         actions = qt.QHBoxLayout()
         self.add_button = qt.QPushButton("Add myoma box")
@@ -1926,6 +1935,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         correction_layout.addWidget(self.complete_button)
         self.page_stack.addWidget(correction)
         self._refresh_figo_controls()
+        self.figo_card = FigoCard(self._on_card_figo, self._on_card_text, self._on_card_closed)
+        # The per-view Esc shortcuts (_bind_card_escape_shortcuts) overlap the
+        # card's own while focus is in the card; whichever Qt picks must close.
+        for shortcut in self.figo_card.widget.findChildren(qt.QShortcut):
+            shortcut.connect("activatedAmbiguously()", self.close_figo_card)
 
     def _focus_annotation_tab(self) -> None:
         """Switch to the Annotation tab once a case is loaded and ready.
@@ -1980,8 +1994,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # Not gated on existing boxes: the reader may draw the first one
             # after coming back, and nothing else re-binds the observers.
             self.click_selector.bind_views()
+        self._bind_card_escape_shortcuts()
 
     def exit(self) -> None:
+        # The card belongs to the module's views; leaving the module saves
+        # and closes it rather than leaving it floating over another module.
+        self.close_figo_card()
         for shortcut in self.shortcuts:
             shortcut.enabled = False
         self._release_shortcut_keys()
@@ -2004,6 +2022,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if self._has_unresolved_roi():
             self._show_error("Save or cancel the current myoma box first.")
             return
+        self.close_figo_card()
         if self.segment_editor_widget is not None:
             self.segment_editor_widget.setActiveEffectByName("")
         self.page_stack.setCurrentIndex(index)
@@ -2027,22 +2046,31 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # the cursor/hidden-boxes reset has to run again here.
             self._apply_roi_selection()
             return
+        # The flush below closes an open card (banking its typed text as its
+        # own undo step); bring it back afterwards for the same box, refreshed
+        # from the restored state, unless the undo removed that box.
+        card = self.figo_card
+        reopen = (card.lesion_id, self._figo_card_view) if card is not None and card.is_open else None
         # Give the drag its own undo entry, or this keystroke would throw it
         # away and revert whatever the reader did before it instead.
         self._flush_pending_roi_drag()
-        source, target = (self.annotation_undo, self.annotation_redo) if undo else (self.annotation_redo, self.annotation_undo)
-        if not source:
-            return
-        previous = source[-1]
-        if previous["phase"] != self.logic.state.phase:
-            return
-        target.append(self.logic.state.to_draft())
-        next_number = self.logic.state.next_lesion_number
-        self.logic.state = ReviewState.from_draft(source.pop())
-        self.logic.state.next_lesion_number = max(next_number, self.logic.state.next_lesion_number)
-        self.rebuild_roi_nodes()
-        self._write_current_draft()
-        self.refresh_ui()
+        try:
+            source, target = (self.annotation_undo, self.annotation_redo) if undo else (self.annotation_redo, self.annotation_undo)
+            if not source:
+                return
+            previous = source[-1]
+            if previous["phase"] != self.logic.state.phase:
+                return
+            target.append(self.logic.state.to_draft())
+            next_number = self.logic.state.next_lesion_number
+            self.logic.state = ReviewState.from_draft(source.pop())
+            self.logic.state.next_lesion_number = max(next_number, self.logic.state.next_lesion_number)
+            self.rebuild_roi_nodes()
+            self._write_current_draft()
+            self.refresh_ui()
+        finally:
+            if reopen is not None and reopen[0] in self.logic.state.lesions:
+                self.open_figo_card(*reopen)
 
     def on_undo(self) -> None:
         if self.logic.read_only:
@@ -2213,6 +2241,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.rebuild_roi_nodes()
         if self.click_selector is not None:
             self.click_selector.bind_views()
+        self._bind_card_escape_shortcuts()
         self.page_stack.setCurrentIndex(0)
         if self.logic.read_only:
             if (self.logic.final_annotation or {}).get("status") == "complete":
@@ -2330,6 +2359,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._refresh_roi_arming()
         self._set_status(f"Phase: {state.phase} Â· {state.lesion_count} myomas (no count limit)")
         self._refresh_progress()
+        # Keep an open card's highlight in step with the state (say, after the
+        # left-panel form saved this box's FIGO); opening/closing is not ours.
+        card = self.figo_card
+        if card is not None and card.is_open and card.lesion_id in state.lesions:
+            card.set_figo(state.lesions[card.lesion_id].to_dict().get("figo"))
 
     def _refresh_roi_arming(self) -> None:
         if self.roi_nodes:
@@ -2361,6 +2395,27 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # must not pull the views anywhere.
         if self.logic.state is not None and not self._has_unresolved_roi():
             self._reveal_lesion(self._selected_lesion_id())
+            # The old FIGO-typing page still has its own form (until it goes).
+            if not self._figo_focus_active():
+                self.open_figo_card(self._selected_lesion_id())
+
+    def _on_lesion_item_clicked(self, item: Any) -> None:
+        """Reopen the card when the reader clicks the row that is already current.
+
+        currentRowChanged does not fire then, so a card closed with Esc could
+        otherwise not be brought back from the list.
+        """
+
+        if item is None or self.logic.state is None or self._has_unresolved_roi():
+            return
+        if self._figo_focus_active():
+            return
+        lesion_id = str(item.data(qt.Qt.UserRole))
+        card = self.figo_card
+        if card is not None and card.is_open and card.lesion_id == lesion_id:
+            return
+        self._reveal_lesion(lesion_id)
+        self.open_figo_card(lesion_id)
 
     def _on_figo_lesion_changed(self, index: int) -> None:
         self.lesion_list.blockSignals(True)
@@ -2434,6 +2489,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if self._has_unresolved_roi():
             self._show_error("Save or cancel the current myoma box first.")
             return
+        # Drawing needs the views, so the card goes before the drag starts.
+        self.close_figo_card()
         # An armed box would follow the drawing drag too, so disarm it first.
         self.set_active_roi(None)
         if self.draw_tool is not None:
@@ -2443,6 +2500,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._apply_roi_selection()
 
     def on_delete_box(self) -> None:
+        # Closing first banks the card's typed text as its own undo step.
+        self.close_figo_card()
         lesion_id = self._selected_lesion_id()
         if not lesion_id or self.logic.state is None:
             return
@@ -2576,6 +2635,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def on_save_draft(self) -> None:
         try:
+            # Text typed on the card lives only in the card until it closes.
+            self.close_figo_card()
             self._write_current_draft()
             self.save_coordinator.clear_dirty()
             self._set_status("Draft saved.")
@@ -2623,9 +2684,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
         The blinded snapshot, the published annotation and the undo stack are
         all built from ``logic.state``, so a drag that still lives only in the
-        markups node has to land there first or it is silently dropped.
+        markups node has to land there first or it is silently dropped. The
+        same goes for Ddx/comment text still sitting in an open FIGO card, so
+        the card is closed (which saves that text) first.
         """
 
+        self.close_figo_card()
         self._commit_active_roi_geometry()
         self._commit_case_comment()
 
@@ -2714,6 +2778,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.segmentation_observer = None
 
     def _teardown_current_case(self) -> None:
+        # Before anything else, so typed card text still lands in this case.
+        self.close_figo_card()
+        self._unobserve_figo_card()
         self.annotation_undo.clear()
         self.annotation_redo.clear()
         if self.correction_tools is not None:
@@ -2802,6 +2869,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._show_error(f"AI reveal failed: {exc}")
 
     def _open_correction_page(self) -> None:
+        # The card never shows on the correction page.
+        self.close_figo_card()
         if self.segment_editor_widget is not None:
             return
         self.segment_editor_widget = self.logic.setup_segment_editor(self.segment_editor_host)
@@ -3374,6 +3443,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # must not select a box the reader cannot see.
         if not self.roi_boxes_visible or self._has_unresolved_roi() or self._figo_focus_active():
             return
+        self._last_view_name = view_name
         candidates = []
         for lesion_id, node in self.roi_nodes.items():
             if node.GetScene() is not slicer.mrmlScene:
@@ -3399,10 +3469,249 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 return
         self.set_active_roi(lesion_id)
         if lesion_id is None:
+            # Empty image: the deselected box takes its card with it.
+            self.close_figo_card()
             return
         index = self.figo_lesion_combo.findData(lesion_id)
         if index >= 0:
             self.figo_lesion_combo.setCurrentIndex(index)
+        self.open_figo_card(lesion_id, view_name)
+
+    # -- on-image FIGO card ------------------------------------------------
+    def _card_payload(self, lesion_id: str) -> dict[str, Any] | None:
+        """The saved FIGO/Ddx/comment for one box; a completed case reads its record."""
+
+        state = self.logic.state
+        if self.logic.read_only or state is None:
+            return next(
+                (
+                    dict(item)
+                    for item in (self.logic.final_annotation or {}).get("lesions", [])
+                    if str(item.get("lesion_id")) == lesion_id
+                ),
+                None,
+            )
+        lesion = state.lesions.get(lesion_id)
+        return lesion.to_dict() if lesion is not None else None
+
+    def open_figo_card(self, lesion_id: str, view_name: str | None = None) -> None:
+        """Show one box's FIGO card beside it, in the view the reader is working in."""
+
+        card = self.figo_card
+        if card is None or not hasattr(self, "page_stack") or self.page_stack.currentIndex == 1:
+            return
+        if not lesion_id or lesion_id not in self.roi_nodes:
+            return
+        view_name = view_name or self._last_view_name or VIEW_NAMES["sagittal"]
+        if card.is_open and card.lesion_id == lesion_id and self._figo_card_view == view_name:
+            # Re-opening would throw away a half-made choice (8 without a
+            # location, Hybrid with one side) for nothing.
+            self._position_figo_card()
+            return
+        slice_widget = slicer.app.layoutManager().sliceWidget(view_name)
+        if slice_widget is None:
+            return
+        # Close first, so text typed on the old card is saved before this
+        # box's values are read (it may be the same box, in another view).
+        card.close()
+        payload = self._card_payload(lesion_id)
+        if payload is None:
+            return
+        card.open(
+            slice_widget.sliceView(),
+            lesion_id,
+            payload.get("figo"),
+            payload.get("differential_diagnosis", ""),
+            payload.get("comment", ""),
+            bool(self.logic.read_only),
+        )
+        self._figo_card_view = view_name
+        self._bind_card_escape_shortcuts()
+        self._set_card_escape_enabled(True)
+        self._observe_figo_card(lesion_id)
+        self._position_figo_card()
+
+    def close_figo_card(self) -> None:
+        if self.figo_card is not None:
+            self.figo_card.close()
+
+    def _on_card_closed(self) -> None:
+        self._unobserve_figo_card()
+        self._set_card_escape_enabled(False)
+        self._figo_card_view = None
+
+    def _observe_figo_card(self, lesion_id: str) -> None:
+        """Follow pans, zooms, slice scrolls and box drags with the card."""
+
+        self._unobserve_figo_card()
+        nodes = []
+        manager = slicer.app.layoutManager()
+        for view_name in VIEW_NAMES.values():
+            slice_widget = manager.sliceWidget(view_name)
+            if slice_widget is not None:
+                nodes.append(slice_widget.mrmlSliceNode())
+        roi = self.roi_nodes.get(lesion_id)
+        if roi is not None:
+            nodes.append(roi)
+        for node in nodes:
+            tag = node.AddObserver(vtk.vtkCommand.ModifiedEvent, lambda *_: self._position_figo_card())
+            self._figo_card_observers.append((node, tag))
+
+    def _unobserve_figo_card(self) -> None:
+        for node, tag in self._figo_card_observers:
+            try:
+                node.RemoveObserver(tag)
+            except Exception:
+                pass
+        self._figo_card_observers = []
+
+    def _position_figo_card(self) -> None:
+        """Put the card beside its box's projection; hide it off the box's slices.
+
+        Hiding is not closing: the card stays open (and keeps any typed text)
+        and comes back when the slice returns into the box.
+        """
+
+        card = self.figo_card
+        if card is None or not card.is_open:
+            return
+        node = self.roi_nodes.get(card.lesion_id) if card.lesion_id else None
+        slice_widget = (
+            slicer.app.layoutManager().sliceWidget(self._figo_card_view)
+            if self._figo_card_view
+            else None
+        )
+        if node is None or slice_widget is None:
+            card.widget.visible = False
+            return
+        bounds = [0.0] * 6
+        node.GetRASBounds(bounds)
+        slice_node = slice_widget.mrmlSliceNode()
+        view_name = self._figo_card_view
+        # Same axis rule as LiteRoiLabelOverlay.refresh_view.
+        axis = 0 if "Sagittal" in view_name else 1 if "Coronal" in view_name else 2
+        offset = float(slice_node.GetSliceOffset())
+        if not bounds[axis * 2] - 1e-4 <= offset <= bounds[axis * 2 + 1] + 1e-4:
+            if not card.widget.isHidden():
+                card.widget.visible = False
+            return
+        inverse = vtk.vtkMatrix4x4()
+        vtk.vtkMatrix4x4.Invert(slice_node.GetXYToRAS(), inverse)
+        xs: list[float] = []
+        ys: list[float] = []
+        for r in bounds[0:2]:
+            for a in bounds[2:4]:
+                for s in bounds[4:6]:
+                    point = inverse.MultiplyPoint([r, a, s, 1.0])
+                    xs.append(point[0])
+                    ys.append(point[1])
+        view = slice_widget.sliceView()
+        try:
+            ratio = float(view.devicePixelRatioF())
+        except Exception:
+            ratio = 1.0
+        x, y = card_position(
+            (min(xs), min(ys), max(xs), max(ys)),
+            card.size(),
+            (int(view.width), int(view.height)),
+            device_pixel_ratio=ratio or 1.0,
+        )
+        card.move_to(x, y)
+        if card.widget.isHidden():
+            card.widget.visible = True
+
+    def _bind_card_escape_shortcuts(self) -> None:
+        """One Esc shortcut per T2 view; armed only while the card is open.
+
+        The card's own Esc only fires with focus inside the card, but the
+        reader is usually working in the view; disarmed, the views keep Esc.
+        """
+
+        manager = slicer.app.layoutManager()
+        if manager is None:
+            return
+        armed = self.figo_card is not None and self.figo_card.is_open
+        for view_name in VIEW_NAMES.values():
+            slice_widget = manager.sliceWidget(view_name)
+            if slice_widget is None:
+                continue
+            existing = self._card_escape_shortcuts.get(view_name)
+            if existing is not None:
+                try:
+                    if existing.parent() is not None:
+                        continue
+                except Exception:
+                    pass
+            shortcut = qt.QShortcut(qt.QKeySequence("Esc"), slice_widget)
+            shortcut.context = qt.Qt.WidgetWithChildrenShortcut
+            shortcut.connect("activated()", self.close_figo_card)
+            # With focus inside the card (a child of this view) the card's own
+            # Esc matches too; Qt then fires neither, only "ambiguously".
+            shortcut.connect("activatedAmbiguously()", self.close_figo_card)
+            shortcut.enabled = armed
+            self._card_escape_shortcuts[view_name] = shortcut
+
+    def _set_card_escape_enabled(self, enabled: bool) -> None:
+        for shortcut in self._card_escape_shortcuts.values():
+            try:
+                shortcut.enabled = bool(enabled)
+            except Exception:
+                pass
+
+    def _dispose_figo_card(self) -> None:
+        """Take the card and its Esc shortcuts off the views, which outlive this widget."""
+
+        self.close_figo_card()
+        self._unobserve_figo_card()
+        for shortcut in self._card_escape_shortcuts.values():
+            try:
+                shortcut.enabled = False
+                shortcut.deleteLater()
+            except Exception:
+                pass
+        self._card_escape_shortcuts = {}
+        if self.figo_card is not None:
+            # Unparent only: the Python wrapper owns the frame, and a
+            # deleteLater on top of that deletes it twice and crashes Slicer.
+            try:
+                self.figo_card.widget.hide()
+                self.figo_card.widget.setParent(None)
+            except Exception:
+                pass
+            self.figo_card = None
+
+    def _on_card_figo(self, lesion_id: str, figo: dict) -> None:
+        """Save one FIGO choice made on the card as its own undo step."""
+
+        state = self.logic.state
+        if state is None or self.logic.read_only or lesion_id not in state.lesions:
+            return
+        self._remember_annotation()
+        try:
+            state.set_figo(lesion_id, figo)
+        except Exception as exc:
+            self.annotation_undo.pop()
+            self._show_error(str(exc))
+            return
+        self._write_current_draft()
+        self.refresh_ui()
+
+    def _on_card_text(self, lesion_id: str, ddx: str, comment: str) -> None:
+        """Save the card's Ddx and comment together, as one undo step."""
+
+        state = self.logic.state
+        if state is None or self.logic.read_only or lesion_id not in state.lesions:
+            return
+        self._remember_annotation()
+        try:
+            state.set_differential_diagnosis(lesion_id, ddx)
+            state.set_lesion_comment(lesion_id, comment)
+        except Exception as exc:
+            self.logic.state = ReviewState.from_draft(self.annotation_undo.pop())
+            self._show_error(str(exc))
+            return
+        self._write_current_draft()
+        self.refresh_ui()
 
     def update_roi_preview(self, preview_node: Any, geometry: BoxGeometry, view_name: str) -> Any:
         node = self._update_outline_node(preview_node, geometry, "Lite ROI preview", bold=True)
@@ -3441,9 +3750,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         center = tuple(sum(point[index] for point in corners) / 4.0 for index in range(3))
         return BoxGeometry(center, tuple(extents))
 
-    def accept_rectangle(self, geometry: BoxGeometry, update_lesion_id: str | None) -> None:
+    def accept_rectangle(
+        self, geometry: BoxGeometry, update_lesion_id: str | None, view_name: str | None = None
+    ) -> None:
         if self.roi_draft_node is not None:
             raise ValidationError("save or cancel the current ROI edit first")
+        if view_name is not None:
+            # The saved box's card opens in the view it was drawn in.
+            self._last_view_name = view_name
         # The box being drawn owns the handles; drop any earlier reveal, which
         # also flushes a pending drag before the node it belongs to is replaced.
         self.set_active_roi(None)
@@ -3511,6 +3825,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         except Exception:
             self.cancel_roi_edit()
             raise
+        self.open_figo_card(lesion_id)
 
     def cancel_roi_edit(self) -> None:
         self._stop_live_outline_sync()
@@ -3599,6 +3914,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if self.shutdown_saved:
             return
         try:
+            self.close_figo_card()
             self._write_current_draft()
             self.save_coordinator.clear_dirty()
             self.shutdown_saved = True
@@ -3627,6 +3943,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             except Exception:
                 pass
             self._teardown_current_case()
+            self._dispose_figo_card()
         super().cleanup()
 
 
