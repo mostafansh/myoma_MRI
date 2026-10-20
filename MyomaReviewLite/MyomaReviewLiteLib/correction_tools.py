@@ -5,30 +5,16 @@ from typing import Any
 
 
 class ReviewCorrectionTools:
-    """Small correction panel owned by one MyomaReviewLite widget."""
+    """Segmentation overlay handling owned by one MyomaReviewLite widget.
+
+    The mask is always drawn at a fixed fill opacity; there are no panel
+    controls for it (V centres the views on the myomas).
+    """
+
+    FILL_OPACITY = 0.35
 
     def __init__(self, owner: Any) -> None:
-        import qt
         self.owner = owner
-        self.widget = qt.QWidget()
-        layout = qt.QVBoxLayout(self.widget)
-        layout.setContentsMargins(0, 0, 0, 0)
-        overlays = qt.QHBoxLayout()
-        self.show_check = qt.QCheckBox("Show segmentation overlays")
-        self.show_check.checked = True
-        self.show_check.connect("toggled(bool)", self.update_overlays)
-        overlays.addWidget(self.show_check)
-        overlays.addWidget(qt.QLabel("Fill opacity"))
-        self.opacity = qt.QSlider(qt.Qt.Horizontal)
-        self.opacity.minimum = 0
-        self.opacity.maximum = 100
-        self.opacity.value = 35
-        self.opacity.connect("valueChanged(int)", self.update_overlays)
-        overlays.addWidget(self.opacity)
-        layout.addLayout(overlays)
-        help_label = qt.QLabel("Press V to show the segmented myomas. Edit the myoma label with the Segment Editor below; there is no six-myoma limit.")
-        help_label.wordWrap = True
-        layout.addWidget(help_label)
         self.refresh()
 
     @property
@@ -39,9 +25,6 @@ class ReviewCorrectionTools:
         """Nothing case-specific is held; kept for the widget's teardown call."""
 
     def refresh(self) -> None:
-        has_segmentation = self.logic.segmentation_node is not None
-        self.show_check.enabled = has_segmentation
-        self.opacity.enabled = has_segmentation
         self.update_overlays()
 
     def update_overlays(self, *_args: Any) -> None:
@@ -50,8 +33,8 @@ class ReviewCorrectionTools:
             return
         node.CreateDefaultDisplayNodes()
         display = node.GetDisplayNode()
-        display.SetVisibility(bool(self.show_check.checked))
-        display.SetOpacity2DFill(float(self.opacity.value) / 100.0)
+        display.SetVisibility(True)
+        display.SetOpacity2DFill(self.FILL_OPACITY)
         display.SetOpacity2DOutline(1.0)
 
     def _reference_matrix(self) -> Any:
@@ -74,7 +57,6 @@ class ReviewCorrectionTools:
             reference = self.logic.volume_nodes["sagittal"]
             mask = slicer.util.arrayFromSegmentBinaryLabelmap(node, self.logic.segment_ids[3], reference)
             positions = np.argwhere(mask > 0)
-            self.show_check.checked = True
             self.update_overlays()
             node.GetDisplayNode().SetSegmentVisibility(self.logic.segment_ids[3], True)
             if not len(positions):

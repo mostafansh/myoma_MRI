@@ -1274,6 +1274,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._case_filter = DEFAULT_CASE_FILTER
         # Slicer turns dark while this module is shown; see theme.DarkAppStyle.
         self.app_style = theme.DarkAppStyle()
+        self._hidden_panel_chrome: list[Any] = []
+        self._close_filter: Any = None
         # Placing/redrawing a box swaps the slice-view cursor for a small
         # yellow dot and hides every other myoma box so the reader gets an
         # uncluttered view of the anatomy underneath; see _apply_roi_selection
@@ -1386,181 +1388,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             hint = ", ".join(text for text in (key_text, mouse_text) if text)
             button.text = f"{base_text} ({hint})" if hint else base_text
 
-    def on_configure_shortcuts(self) -> None:
-        """Open the shortcut panel so a reviewer can rebind any action, by key or by mouse button."""
-        settings = qt.QSettings()
-        dialog = qt.QDialog(slicer.util.mainWindow())
-        dialog.setWindowTitle("Shortcuts")
-        layout = qt.QVBoxLayout(dialog)
-        form = qt.QFormLayout()
-        layout.addLayout(form)
-        editors: dict[str, Any] = {}
-        mouse_buttons: dict[str, int] = dict(self.mouse_button_bindings)
-        mouse_labels: dict[str, Any] = {}
-        # Holds the in-progress capture filter between the click that arms it
-        # and the button press it is waiting for; nothing else keeps it
-        # referenced, and an unfinished capture is torn down below once the
-        # dialog closes either way.
-        capture_state: dict[str, Any] = {"active": None}
-
-        def _mouse_button_text(action_id: str) -> str:
-            return _mouse_button_label(mouse_buttons.get(action_id, 0))
-
-        def _set_mouse_button(action_id: str, value: int) -> None:
-            mouse_buttons[action_id] = value
-            mouse_labels[action_id].text = _mouse_button_text(action_id)
-
-        def _start_capture(action_id: str, capture_button: Any) -> None:
-            if capture_state["active"] is not None:
-                return  # Only one capture armed at a time.
-            original_text = capture_button.text
-            capture_button.text = "Press a mouse button..."
-            capture_button.enabled = False
-
-            def _finish(value: int) -> None:
-                capture_state["active"] = None
-                capture_button.text = original_text
-                capture_button.enabled = True
-                if value in MOUSE_BUTTON_RESERVED:
-                    qt.QMessageBox.warning(
-                        dialog,
-                        "Reserved button",
-                        "The left and right mouse buttons can't be reassigned; "
-                        "they are needed for normal editing.",
-                    )
-                    return
-                _set_mouse_button(action_id, value)
-
-            capture = LiteMouseButtonCapture(_finish)
-            capture_state["active"] = capture
-            # Installed after (and so, per Qt's filter order, checked before)
-            # the persistent LiteMouseButtonDispatcher, so a button that is
-            # already bound to some other action fires this capture instead
-            # of that action while the dialog is waiting for a press.
-            slicer.app.installEventFilter(capture)
-
-        for action_id, label, _default_key, _method_name, *_ in SHORTCUT_ACTIONS:
-            editor = qt.QKeySequenceEdit()
-            shortcut = self.shortcut_bindings.get(action_id)
-            if shortcut is not None:
-                editor.setKeySequence(shortcut.key)
-            editors[action_id] = editor
-            row = qt.QHBoxLayout()
-            row.addWidget(editor, 1)
-            clear_button = qt.QToolButton()
-            clear_button.text = "Clear"
-            clear_button.connect("clicked()", lambda _checked=False, e=editor: e.clear())
-            row.addWidget(clear_button)
-
-            mouse_label = qt.QLabel(_mouse_button_text(action_id))
-            mouse_label.minimumWidth = 110
-            mouse_labels[action_id] = mouse_label
-            row.addWidget(mouse_label)
-            capture_button = qt.QToolButton()
-            capture_button.text = "Set mouse button..."
-            capture_button.connect(
-                "clicked()",
-                lambda _checked=False, a=action_id, b=capture_button: _start_capture(a, b),
-            )
-            row.addWidget(capture_button)
-            mouse_clear_button = qt.QToolButton()
-            mouse_clear_button.text = "Clear"
-            mouse_clear_button.connect(
-                "clicked()", lambda _checked=False, a=action_id: _set_mouse_button(a, 0)
-            )
-            row.addWidget(mouse_clear_button)
-
-            form.addRow(label, row)
-        hint = qt.QLabel(
-            "Click a field and press the new key combination, or click \"Set "
-            "mouse button...\" and press a mouse button, to rebind an action. "
-            "Leave a field (or a mouse binding) at empty / \"(none)\" to "
-            "disable it. Left and right click always stay reserved for "
-            "editing. A mouse's extra buttons beyond its two side buttons "
-            "are usually remapped to a keystroke by the mouse's own driver "
-            "software instead of sending a real click -- if \"Set mouse "
-            "button...\" never catches one, try binding it as a keyboard "
-            "shortcut above instead."
-        )
-        hint.wordWrap = True
-        layout.addWidget(hint)
-        restore_button = qt.QPushButton("Restore factory defaults")
-
-        def _restore_defaults() -> None:
-            for action_id, _label, default_key, _method_name, *_ in SHORTCUT_ACTIONS:
-                editors[action_id].setKeySequence(qt.QKeySequence(default_key))
-                _set_mouse_button(action_id, 0)
-
-        restore_button.connect("clicked()", _restore_defaults)
-        layout.addWidget(restore_button)
-        buttons = qt.QDialogButtonBox(qt.QDialogButtonBox.Save | qt.QDialogButtonBox.Cancel)
-        buttons.connect("accepted()", dialog.accept)
-        buttons.connect("rejected()", dialog.reject)
-        layout.addWidget(buttons)
-
-        accepted = dialog.exec_() == qt.QDialog.Accepted
-        if capture_state["active"] is not None:
-            # The dialog closed (Save, Cancel, or Esc) mid-capture; the next
-            # button press must not still be waiting for this dialog.
-            try:
-                slicer.app.removeEventFilter(capture_state["active"])
-            except Exception:
-                pass
-            capture_state["active"] = None
-        if not accepted:
-            return
-
-        new_key_text = {
-            action_id: editor.keySequence().toString() for action_id, editor in editors.items()
-        }
-        labels = {action_id: label for action_id, label, *_ in SHORTCUT_ACTIONS}
-        method_by_action = {
-            action_id: method_name for action_id, _label, _default_key, method_name, *_ in SHORTCUT_ACTIONS
-        }
-        seen: dict[str, str] = {}
-        conflicts: list[str] = []
-        for action_id, key_text in new_key_text.items():
-            if not key_text:
-                continue
-            if key_text in seen:
-                conflicts.append(f"{labels[seen[key_text]]} and {labels[action_id]} both use \"{key_text}\"")
-            else:
-                seen[key_text] = action_id
-        seen_mouse: dict[int, str] = {}
-        for action_id, value in mouse_buttons.items():
-            if not value:
-                continue
-            if value in seen_mouse:
-                conflicts.append(
-                    f"{labels[seen_mouse[value]]} and {labels[action_id]} both use "
-                    f"{_mouse_button_label(value)}"
-                )
-            else:
-                seen_mouse[value] = action_id
-        if conflicts:
-            qt.QMessageBox.warning(
-                slicer.util.mainWindow(),
-                "Shortcut conflict",
-                "These shortcuts were not saved because they collide:\n" + "\n".join(conflicts),
-            )
-            return
-
-        for action_id, key_text in new_key_text.items():
-            settings.setValue(self._shortcut_setting_key(action_id), key_text)
-            self.shortcut_bindings[action_id].setKey(qt.QKeySequence(key_text))
-        if self.shortcuts and self.shortcuts[0].enabled:
-            self._claim_shortcut_keys()
-        for action_id, value in mouse_buttons.items():
-            settings.setValue(self._mouse_button_setting_key(action_id), value)
-        self.mouse_button_bindings = mouse_buttons
-        if self.mouse_button_dispatcher is not None:
-            self.mouse_button_dispatcher.bindings = {
-                value: method_by_action[action_id]
-                for action_id, value in mouse_buttons.items()
-                if value
-            }
-        self._refresh_shortcut_button_labels()
-
     def _enable_synced_crosshair(self) -> None:
         # A small "+" that follows the mouse in whichever slice view is
         # hovered, and is projected onto the other two slice views at the
@@ -1628,48 +1455,87 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 pass
 
     def _hide_module_panel_boilerplate(self) -> None:
-        # Stock Slicer boilerplate that has nothing to do with reading:
-        # the "Help & Acknowledgement" collapsible (built by the module
-        # panel itself from parent.helpText/acknowledgementText) and the
-        # "Reload & Test" collapsible (added by ScriptedLoadableModuleWidget
-        # only when Developer Mode is on, which some reading workstations
-        # have enabled). Both just eat vertical space above the actual
-        # module UI, so they are hidden the same way _hide_data_probe hides
-        # the Data Probe panel.
+        # The "Reload & Test" collapsible is added by ScriptedLoadableModuleWidget
+        # only when Developer Mode is on, which some reading workstations have
+        # enabled; it has nothing to do with reading. Slicer's own logo and
+        # "Help & Acknowledgement" box are handled in _hide_panel_chrome.
         if hasattr(self, "reloadCollapsibleButton"):
             try:
                 self._hide_widget(self.reloadCollapsibleButton)
             except Exception:
                 pass
+
+    # Slicer's own chrome around the module: the menu bar, the toolbars, the
+    # logo above the module panel and the panel's "Help & Acknowledgement"
+    # box. The panel shows the help box again every time a module is
+    # selected, so all of it is hidden on every enter and given back on exit,
+    # where other modules expect it. Slicer saves which toolbars are shown when
+    # its window closes, so they also come back just before that (see
+    # _make_close_filter); otherwise plain Slicer would start without them.
+    PANEL_CHROME_NAMES = ("LogoLabel", "HelpCollapsibleButton")
+
+    def _panel_chrome_widgets(self) -> list[Any]:
+        try:
+            main_window = slicer.util.mainWindow()
+        except Exception:
+            return []
+        if main_window is None:
+            return []
+        widgets = [main_window.menuBar()]
+        widgets += [bar for bar in main_window.findChildren(qt.QToolBar) if bar.parent() is main_window]
+        for name in self.PANEL_CHROME_NAMES:
+            widget = main_window.findChild(qt.QWidget, name)
+            if widget is not None:
+                widgets.append(widget)
+        return widgets
+
+    def _hide_panel_chrome(self) -> None:
+        for widget in self._panel_chrome_widgets():
+            if widget is None or widget.isHidden():
+                continue
+            widget.visible = False
+            if not any(widget is hidden for hidden in self._hidden_panel_chrome):
+                self._hidden_panel_chrome.append(widget)
+        self._set_close_filter(True)
+
+    def _restore_panel_chrome(self) -> None:
+        for widget in self._hidden_panel_chrome:
+            try:
+                widget.visible = True
+            except Exception:
+                pass
+        self._hidden_panel_chrome = []
+        self._set_close_filter(False)
+
+    def _set_close_filter(self, on: bool) -> None:
         try:
             main_window = slicer.util.mainWindow()
         except Exception:
             return
         if main_window is None:
             return
-        seen: set[int] = set()
+        if self._close_filter is None:
+            self._close_filter = self._make_close_filter()
         try:
-            widget = slicer.util.findChild(main_window, "HelpCollapsibleButton")
+            if on:
+                main_window.installEventFilter(self._close_filter)
+            else:
+                main_window.removeEventFilter(self._close_filter)
         except Exception:
-            widget = None
-        if widget is not None:
-            seen.add(id(widget))
-            self._hide_widget(widget)
-        try:
-            candidates = list(slicer.util.findChildren(main_window, className="ctkCollapsibleButton"))
-        except Exception:
-            candidates = []
-        hidden_titles = {"help & acknowledgement", "reload && test", "reload & test"}
-        for candidate in candidates:
-            if id(candidate) in seen:
-                continue
-            try:
-                title = str(candidate.text).strip().lower()
-            except Exception:
-                continue
-            if title in hidden_titles:
-                seen.add(id(candidate))
-                self._hide_widget(candidate)
+            pass
+
+    def _make_close_filter(self) -> Any:
+        """Give Slicer its chrome back before the closing window saves its layout."""
+
+        widget = self
+
+        class _CloseFilter(qt.QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == qt.QEvent.Close:
+                    widget._restore_panel_chrome()
+                return False
+
+        return _CloseFilter()
 
     @staticmethod
     def _hide_widget(widget: Any) -> None:
@@ -1729,11 +1595,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         title_row = qt.QHBoxLayout()
         self.study_label = theme.set_role(qt.QLabel("Myoma review"), "title")
         title_row.addWidget(self.study_label, 1)
-        self.shortcuts_button = theme.set_role(qt.QToolButton(), "icon")
-        self.shortcuts_button.text = "Shortcuts"
-        self.shortcuts_button.toolTip = "Keyboard and mouse shortcuts"
-        self.shortcuts_button.connect("clicked()", self.on_configure_shortcuts)
-        title_row.addWidget(self.shortcuts_button)
         header.addLayout(title_row)
         sub_row = qt.QHBoxLayout()
         sub_row.setSpacing(6)
@@ -1975,7 +1836,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.show_roi_check.connect("toggled(bool)", self.on_show_roi_toggled)
         correction_layout.addWidget(self.show_roi_check)
         self.correction_tools = ReviewCorrectionTools(self)
-        correction_layout.addWidget(self.correction_tools.widget)
         self.segment_editor_host = qt.QWidget()
         self.segment_editor_host_layout = qt.QVBoxLayout(self.segment_editor_host)
         self.segment_editor_host_layout.setContentsMargins(0, 0, 0, 0)
@@ -2143,6 +2003,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def enter(self) -> None:
         self.app_style.enter()
+        self._hide_panel_chrome()
+        # The module panel re-shows its help box after enter() runs.
+        qt.QTimer.singleShot(0, self._hide_panel_chrome)
         # Slicer's module panel resets its layout margins after setup; put ours back.
         self.layout.setContentsMargins(10, 8, 10, 8)
         for shortcut in self.shortcuts:
@@ -2160,6 +2023,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def exit(self) -> None:
         self.app_style.exit()
+        self._restore_panel_chrome()
         # The card belongs to the module's views; leaving the module saves
         # and closes it rather than leaving it floating over another module.
         self.close_figo_card()
