@@ -757,6 +757,24 @@ def test_navigation_stays_available_while_placing_a_box() -> None:
         widget.cleanup()
 
 
+def test_early_stops_sit_with_zero_myomas_on_the_boxing_page() -> None:
+    widget, _first, _second = _build_case("sub-00044")
+    try:
+        boxing_page = widget.blind_stack.widget(0)
+        figo_page = widget.blind_stack.widget(1)
+        texts = [button.text for button in widget.early_stop_buttons]
+        assert texts == ["No uterus", "Wrong image", "Cannot assess"], texts
+        for button in widget.early_stop_buttons:
+            assert boxing_page.isAncestorOf(button), f"{button.text} is not on the boxing page"
+            assert not figo_page.isAncestorOf(button), f"{button.text} is still on the FIGO page"
+            assert button.enabled, f"{button.text} is disabled while boxing"
+        assert boxing_page.isAncestorOf(widget.zero_check)
+        widget.on_continue_to_figo()
+        assert not any(button.enabled for button in widget.early_stop_buttons)
+    finally:
+        widget.cleanup()
+
+
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
@@ -788,6 +806,7 @@ TESTS = (
     test_saving_the_last_figo_after_reveal_does_not_offer_reveal,
     test_only_a_completed_read_only_case_offers_reopen,
     test_navigation_stays_available_while_placing_a_box,
+    test_early_stops_sit_with_zero_myomas_on_the_boxing_page,
 )
 
 failures = 0

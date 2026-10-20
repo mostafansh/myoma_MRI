@@ -1811,6 +1811,16 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.zero_check = qt.QCheckBox("Confirm zero myomas")
         self.zero_check.connect("toggled(bool)", self.on_zero_toggled)
         boxing_layout.addWidget(self.zero_check)
+        # Early stops answer "is there anything to box at all", so they sit
+        # with the zero-myoma confirmation rather than with FIGO typing.
+        stops = qt.QHBoxLayout()
+        self.early_stop_buttons = []
+        for text_value, status in (("No uterus", "no_uterus"), ("Wrong image", "wrong_image"), ("Cannot assess", "cannot_assess")):
+            button = qt.QPushButton(text_value)
+            button.connect("clicked()", lambda _checked=False, value=status: self.on_early_stop(value))
+            stops.addWidget(button)
+            self.early_stop_buttons.append(button)
+        boxing_layout.addLayout(stops)
         self.continue_to_figo_button = qt.QPushButton("Done boxing → continue to FIGO typing")
         self.continue_to_figo_button.connect("clicked()", self.on_continue_to_figo)
         boxing_layout.addWidget(self.continue_to_figo_button)
@@ -1874,14 +1884,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         lower.addWidget(self.reveal_button)
         lower.addWidget(self.return_correction_button)
         figo_page_layout.addLayout(lower)
-        stops = qt.QHBoxLayout()
-        self.early_stop_buttons = []
-        for text_value, status in (("No uterus", "no_uterus"), ("Wrong image", "wrong_image"), ("Cannot assess", "cannot_assess")):
-            button = qt.QPushButton(text_value)
-            button.connect("clicked()", lambda _checked=False, value=status: self.on_early_stop(value))
-            stops.addWidget(button)
-            self.early_stop_buttons.append(button)
-        figo_page_layout.addLayout(stops)
         self.blind_stack.addWidget(figo_page)
         self.page_stack.addWidget(blind)
 
@@ -2277,7 +2279,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.save_draft_button.enabled = not self.logic.read_only
         self.complete_button.enabled = state.phase == ReviewPhase.AI_REVEALED.value
         for button in self.early_stop_buttons:
-            button.enabled = state.phase == ReviewPhase.BLIND.value
+            button.enabled = not locked and not in_figo_stage and state.phase == ReviewPhase.BLIND.value
         self._load_selected_annotation()
         self._refresh_roi_arming()
         self._set_status(f"Phase: {state.phase} Â· {state.lesion_count} myomas (no count limit)")
