@@ -1268,6 +1268,16 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._place_box_cursor: Any = None
         self._box_cursor_applied = False
 
+    def onReload(self) -> None:
+        # Slicer's Reload re-reads only this file. Drop the helper package too,
+        # or the new widget code runs against the old MyomaReviewLiteLib classes.
+        for name in [
+            name for name in sys.modules
+            if name == "MyomaReviewLiteLib" or name.startswith("MyomaReviewLiteLib.")
+        ]:
+            del sys.modules[name]
+        super().onReload()
+
     def setup(self) -> None:
         super().setup()
         if not SLICER_AVAILABLE:

@@ -875,6 +875,27 @@ def test_each_myoma_has_its_own_comment() -> None:
         widget.cleanup()
 
 
+def test_reload_also_drops_the_helper_package() -> None:
+    # Slicer's Reload re-reads only MyomaReviewLite.py; a stale
+    # MyomaReviewLiteLib once left ReviewState without its new fields.
+    widget, _first, _second = _build_case("sub-00050")
+    saved_modules = dict(sys.modules)
+    original_reload = slicer.util.reloadScriptedModule
+    reloaded = []
+    slicer.util.reloadScriptedModule = lambda name: reloaded.append(name)
+    try:
+        widget.moduleName = "MyomaReviewLite"
+        assert "MyomaReviewLiteLib.domain" in sys.modules
+        widget.onReload()
+        assert reloaded == ["MyomaReviewLite"], f"Slicer's reload did not run: {reloaded}"
+        stale = [name for name in sys.modules if name.startswith("MyomaReviewLiteLib")]
+        assert not stale, f"stale helper modules survived the reload: {stale}"
+    finally:
+        slicer.util.reloadScriptedModule = original_reload
+        sys.modules.update(saved_modules)
+        widget.cleanup()
+
+
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
@@ -912,6 +933,7 @@ TESTS = (
     test_undo_and_redo_keys_reach_the_module_while_it_is_open,
     test_the_case_comment_folds_away_and_is_saved,
     test_each_myoma_has_its_own_comment,
+    test_reload_also_drops_the_helper_package,
 )
 
 failures = 0
