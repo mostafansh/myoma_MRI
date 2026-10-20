@@ -106,6 +106,9 @@ FIXED_SEGMENT_IDS = {
     4: "nabothian_cyst",
 }
 FIXED_SEGMENT_NAMES = {segment_id: LABEL_NAMES[value] for value, segment_id in FIXED_SEGMENT_IDS.items()}
+# Segments of the former six-label set. Drafts saved before their removal still
+# carry them; loading drops them and their voxels become background.
+RETIRED_SEGMENT_IDS = ("cervix", "cesarean_scar_niche")
 
 # A markups ROI draws its slice outline at a hardcoded 3 px that no display-node
 # property feeds, so the visible box is a model node instead: its slice
@@ -586,6 +589,10 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
                 legacy_placeholder_ids.append(legacy_id)
         if len(legacy_placeholder_ids) == 4:
             for segment_id in legacy_placeholder_ids:
+                segmentation.RemoveSegment(segment_id)
+
+        for segment_id in RETIRED_SEGMENT_IDS:
+            if segmentation.GetSegment(segment_id) is not None:
                 segmentation.RemoveSegment(segment_id)
 
         # Imported labelmaps may expose their values as names such as "1",
