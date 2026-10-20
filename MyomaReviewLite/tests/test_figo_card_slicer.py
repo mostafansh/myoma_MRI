@@ -116,7 +116,61 @@ def test_read_only_disables_every_control():
                 assert not w.enabled, w.objectName
 
 
+def test_wheel_over_an_unfocused_list_does_not_save():
+    card, parent, figo, _t, _c = _card()
+    parent.show()
+    _child(card, qt.QToolButton, "figo_hybrid").click()
+    _choose(_child(card, qt.QComboBox, "figo_endometrial"), 2)
+    serosal = _child(card, qt.QComboBox, "figo_serosal")
+    _choose(serosal, 5)
+    assert len(figo) == 1, figo
+    serosal.clearFocus()
+    assert not serosal.hasFocus()
+    event = qt.QWheelEvent(
+        qt.QPointF(5, 5), qt.QPointF(5, 5), qt.QPoint(0, 0), qt.QPoint(0, -120),
+        0, qt.Qt.Vertical, qt.Qt.NoButton, qt.Qt.NoModifier,
+    )
+    qt.QApplication.sendEvent(serosal, event)
+    assert len(figo) == 1, ("wheel changed a saved FIGO", figo)
+    assert serosal.currentIndex == serosal.findData(5)
+
+
+def test_close_hides_even_when_saving_text_fails():
+    figo_calls, closes = [], []
+
+    def boom(lid, d, c):
+        raise RuntimeError("save failed")
+
+    card = FigoCard(on_figo=lambda *a: figo_calls.append(a), on_text=boom, on_close=lambda: closes.append(1))
+    parent = qt.QWidget()
+    parent.resize(400, 300)
+    card.open(parent, "M01", None, "a", "", False)
+    _child(card, qt.QLineEdit, "figo_ddx").text = "b"
+    raised = False
+    try:
+        card.close()
+    except RuntimeError:
+        raised = True
+    assert raised, "the failure was swallowed"
+    assert not card.is_open
+    assert not card.widget.visible, "the card is stuck on screen"
+    assert len(closes) == 1, closes
+
+
+def test_reclicking_the_selected_kind_keeps_its_choices():
+    card, _p, figo, _t, _c = _card()
+    card.set_figo({"kind": "hybrid", "endometrial": 2, "serosal": 5})
+    _child(card, qt.QToolButton, "figo_hybrid").click()
+    endo = _child(card, qt.QComboBox, "figo_endometrial")
+    sero = _child(card, qt.QComboBox, "figo_serosal")
+    assert endo.itemData(endo.currentIndex) == 2 and sero.itemData(sero.currentIndex) == 5
+    assert figo == [], figo
+
+
 TESTS = (
+    test_wheel_over_an_unfocused_list_does_not_save,
+    test_close_hides_even_when_saving_text_fails,
+    test_reclicking_the_selected_kind_keeps_its_choices,
     test_a_type_button_saves_at_once,
     test_type_8_waits_for_a_location,
     test_hybrid_waits_for_both_parts,

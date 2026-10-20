@@ -70,6 +70,7 @@ class FigoCard:
         self.lesion_id: str | None = None
         self.is_open = False
         self._loading = False
+        self._kind_key = None
         self._orig_ddx = ""
         self._orig_comment = ""
 
@@ -122,16 +123,23 @@ class FigoCard:
             [(m.value.replace("_", " "), m.value) for m in UncertainReason],
         )
         self._combos = (self._location, self._endo, self._sero, self._reason)
+        # A wheel turned over an unfocused list must scroll the image, not
+        # silently change (and save) a FIGO choice.
+        self._wheel_guard = self._make_wheel_guard()
         for combo in self._combos:
+            combo.setFocusPolicy(qt.Qt.StrongFocus)
+            combo.installEventFilter(self._wheel_guard)
             layout.addWidget(combo)
             combo.connect("currentIndexChanged(int)", self._on_choice_changed)
 
         self._ddx = qt.QLineEdit()
         self._ddx.objectName = "figo_ddx"
         self._ddx.placeholderText = "Differential diagnosis"
+        self._ddx.maxLength = 4000
         self._comment = qt.QLineEdit()
         self._comment.objectName = "figo_comment"
         self._comment.placeholderText = "Comment"
+        self._comment.maxLength = 4000
         layout.addWidget(self._ddx)
         layout.addWidget(self._comment)
 
@@ -140,6 +148,18 @@ class FigoCard:
         shortcut.connect("activated()", self.close)
         self._shortcut = shortcut
         self._update_rows(None)
+
+    def _make_wheel_guard(self):
+        qt = self._qt
+
+        class _WheelGuard(qt.QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == qt.QEvent.Wheel and not obj.hasFocus():
+                    event.ignore()
+                    return True
+                return False
+
+        return _WheelGuard()
 
     def _add_button(self, grid, key, name, text, value, row, col, span=1) -> None:
         button = self._qt.QToolButton()
@@ -184,6 +204,10 @@ class FigoCard:
     def _on_type_clicked(self, value) -> None:
         if self._loading:
             return
+        # Re-clicking the kind already chosen must keep its saved choices.
+        if value == self._kind_key:
+            return
+        self._kind_key = value
         self._update_rows(value)
         self._reset_combos()
         self._emit()
@@ -251,6 +275,7 @@ class FigoCard:
                     self._buttons[key].checked = True
                 else:
                     key = None
+            self._kind_key = key
             self._update_rows(key)
         finally:
             self._loading = was_loading
@@ -298,10 +323,12 @@ class FigoCard:
             return
         unsaved = self.has_unsaved_text()
         self.is_open = False
-        if unsaved:
-            self._on_text(self.lesion_id, self._ddx.text.strip(), self._comment.text.strip())
-        self.widget.hide()
-        self._on_close()
+        try:
+            if unsaved:
+                self._on_text(self.lesion_id, self._ddx.text.strip(), self._comment.text.strip())
+        finally:
+            self.widget.hide()
+            self._on_close()
 
     def move_to(self, x: int, y: int) -> None:
         self.widget.move(int(x), int(y))

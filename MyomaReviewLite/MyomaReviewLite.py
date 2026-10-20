@@ -2001,6 +2001,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.refresh_ui()
         finally:
             if reopen is not None and reopen[0] in self.logic.state.lesions:
+                self.set_active_roi(reopen[0])
                 self.open_figo_card(*reopen)
 
     def _has_unbanked_edit(self) -> bool:
@@ -3628,6 +3629,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         except Exception:
             self.cancel_roi_edit()
             raise
+        if not self.logic.read_only:
+            self.set_active_roi(lesion_id)
         self.open_figo_card(lesion_id)
 
     def cancel_roi_edit(self) -> None:

@@ -806,6 +806,8 @@ def test_saving_a_new_box_opens_its_card() -> None:
         widget.save_roi_edit()
         assert widget.figo_card.is_open, "saving a new box did not open its FIGO card"
         assert widget.figo_card.lesion_id == "M03"
+        assert widget.active_roi_id == "M03", widget.active_roi_id
+        assert widget.roi_nodes["M03"].GetDisplayNode().GetHandlesInteractive(), "the saved box has no handles"
     finally:
         widget.cleanup()
 

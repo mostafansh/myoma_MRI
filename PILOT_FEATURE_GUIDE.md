@@ -30,7 +30,7 @@ The following controls address the pilot list:
    outside the box. Ddx, comment and FIGO stay available after geometry edits
    and AI reveal. FIGO can be revised after reveal while the case is still
    unfinished, using the same card. A myoma with no FIGO yet reads e.g.
-   **M01 · FIGO ?** in amber on the image and in the list; a typed one reads
+   **M01 · FIGO ?** — in amber on the image — until FIGO is set; a typed one reads
    **M01 · FIGO 3**. **Reveal AI** stays disabled until every myoma has a
    FIGO; its tooltip names what is missing, e.g. "FIGO missing: M02, M04".
 2. **Case comment.** The folded **Case comment** bar above the pages opens a
