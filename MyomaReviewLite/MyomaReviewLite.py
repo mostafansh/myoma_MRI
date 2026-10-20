@@ -3478,6 +3478,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # Unparent only: the Python wrapper owns the frame, and a
             # deleteLater on top of that deletes it twice and crashes Slicer.
             try:
+                self.figo_card.dispose()
                 self.figo_card.widget.hide()
                 self.figo_card.widget.setParent(None)
             except Exception:

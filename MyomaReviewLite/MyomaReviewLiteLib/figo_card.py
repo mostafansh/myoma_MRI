@@ -128,7 +128,6 @@ class FigoCard:
         self._wheel_guard = self._make_wheel_guard()
         for combo in self._combos:
             combo.setFocusPolicy(qt.Qt.StrongFocus)
-            combo.installEventFilter(self._wheel_guard)
             layout.addWidget(combo)
             combo.connect("currentIndexChanged(int)", self._on_choice_changed)
 
@@ -160,6 +159,21 @@ class FigoCard:
                 return False
 
         return _WheelGuard()
+
+    def _set_wheel_guard(self, on: bool) -> None:
+        """Filter the combos only while the card is open, so Qt never holds a
+        filter on them through a Python object that dies before they do."""
+        for combo in self._combos:
+            try:
+                if on:
+                    combo.installEventFilter(self._wheel_guard)
+                else:
+                    combo.removeEventFilter(self._wheel_guard)
+            except Exception:
+                pass
+
+    def dispose(self) -> None:
+        self._set_wheel_guard(False)
 
     def _add_button(self, grid, key, name, text, value, row, col, span=1) -> None:
         button = self._qt.QToolButton()
@@ -302,6 +316,7 @@ class FigoCard:
             for control in self.widget.findChildren(cls):
                 if control.objectName != "figo_close":
                     control.enabled = not read_only
+        self._set_wheel_guard(True)
         self.is_open = True
         self.widget.adjustSize()
         self.widget.show()
@@ -327,6 +342,7 @@ class FigoCard:
             if unsaved:
                 self._on_text(self.lesion_id, self._ddx.text.strip(), self._comment.text.strip())
         finally:
+            self._set_wheel_guard(False)
             self.widget.hide()
             self._on_close()
 
