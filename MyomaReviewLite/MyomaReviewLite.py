@@ -2122,9 +2122,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             return
         counts = summary.counts
         self.progress_label.text = (
-            f"Complete {counts[QueueStatus.COMPLETE]} Â· "
-            f"In progress {counts[QueueStatus.IN_PROGRESS]} Â· "
-            f"New {counts[QueueStatus.NEW]} Â· "
+            f"Complete {counts[QueueStatus.COMPLETE]} · "
+            f"In progress {counts[QueueStatus.IN_PROGRESS]} · "
+            f"New {counts[QueueStatus.NEW]} · "
             f"Attention {counts[QueueStatus.ATTENTION]}"
         )
 
@@ -2188,7 +2188,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.shutdown_saved = False
         self.save_coordinator.clear_dirty()
         self._refresh_case_list()
-        self.case_header.text = f"Reader {self.logic.manifest.reader_id} Â· Case {self.logic.case_id}"  # type: ignore[union-attr]
+        self.case_header.text = f"Reader {self.logic.manifest.reader_id} · Case {self.logic.case_id}"  # type: ignore[union-attr]
         self.logic.load_registered_volumes()
         self.view_tools.refresh()
         self.roi_boxes_visible = True
@@ -2293,7 +2293,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._refresh_roi_arming()
         if self.roi_overlay is not None:
             self.roi_overlay.refresh()
-        self._set_status(f"Phase: {state.phase} Â· {state.lesion_count} myomas (no count limit)")
+        self._set_status(f"Phase: {state.phase} · {state.lesion_count} myomas (no count limit)")
         self._refresh_progress()
         # Keep an open card's highlight in step with the saved FIGO (say, after
         # an undo); opening/closing is not ours. Only a changed value is pushed,
