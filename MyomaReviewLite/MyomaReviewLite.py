@@ -929,6 +929,14 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
                 traceback.print_exc()
 
 
+    def _draw_blocked_actions(style: Any) -> int:
+        """The slice-view actions a box drag would trigger: left-drag window/level."""
+
+        mask = 0
+        for name in ("AdjustWindowLevelBackground", "AdjustWindowLevelForeground"):
+            mask |= int(getattr(style, name, 0))
+        return mask
+
     class LiteRectangleDrawTool:
         """Corner drag tool that restores every temporarily disabled action."""
 
@@ -964,7 +972,9 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
                     if scalar is not None and hasattr(scalar, "GetAdjustBackgroundWindowLevelEnabled"):
                         scalar_states = (bool(scalar.GetAdjustBackgroundWindowLevelEnabled()), bool(scalar.GetAdjustForegroundWindowLevelEnabled()))
                     self.styles.append((style, "actions", (states, scalar, scalar_states)))
-                    style.SetActionEnabled(mask, False)
+                    # Only plain left-drag window/level competes with drawing;
+                    # zoom, pan and slice scrolling stay usable while placing.
+                    style.SetActionEnabled(_draw_blocked_actions(style), False)
                     if scalar_states is not None:
                         scalar.SetAdjustBackgroundWindowLevelEnabled(False)
                         scalar.SetAdjustForegroundWindowLevelEnabled(False)

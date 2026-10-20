@@ -719,6 +719,44 @@ def test_only_a_completed_read_only_case_offers_reopen() -> None:
         widget.cleanup()
 
 
+def _slice_styles() -> list:
+    styles = []
+    for view_name in VIEW_NAMES.values():
+        view = slicer.app.layoutManager().sliceWidget(view_name).sliceView()
+        styles.append(
+            view.interactorObserver() if hasattr(view, "interactorObserver")
+            else view.interactor().GetInteractorStyle()
+        )
+    return styles
+
+
+def test_navigation_stays_available_while_placing_a_box() -> None:
+    widget, _first, _second = _build_case("sub-00043")
+    try:
+        widget.logic.activate_layout()
+        styles = _slice_styles()
+        before = [
+            {bit: bool(style.GetActionEnabled(1 << bit)) for bit in range(int(style.AllActionsMask).bit_length())}
+            for style in styles
+        ]
+        widget.on_add_box()
+        assert widget.draw_tool.active
+        for style in styles:
+            for name in ("Zoom", "Translate", "BrowseSlice"):
+                assert style.GetActionEnabled(getattr(style, name)), f"{name} is locked while drawing"
+            for name in ("AdjustWindowLevelBackground", "AdjustWindowLevelForeground"):
+                assert not style.GetActionEnabled(getattr(style, name)), f"{name} would fight the box drag"
+        widget.draw_tool.cancel()
+        after = [
+            {bit: bool(style.GetActionEnabled(1 << bit)) for bit in range(int(style.AllActionsMask).bit_length())}
+            for style in styles
+        ]
+        assert after == before, "drawing did not restore the view actions"
+    finally:
+        widget.draw_tool.cancel()
+        widget.cleanup()
+
+
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
@@ -749,6 +787,7 @@ TESTS = (
     test_after_reveal_the_reader_can_go_back_and_add_a_box,
     test_saving_the_last_figo_after_reveal_does_not_offer_reveal,
     test_only_a_completed_read_only_case_offers_reopen,
+    test_navigation_stays_available_while_placing_a_box,
 )
 
 failures = 0
