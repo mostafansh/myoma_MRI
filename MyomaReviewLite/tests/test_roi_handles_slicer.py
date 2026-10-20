@@ -798,6 +798,83 @@ def test_removed_buttons_are_gone_and_v_shows_the_myomas() -> None:
         widget.cleanup()
 
 
+def test_the_redraw_button_is_gone() -> None:
+    widget, _first, _second = _build_case("sub-00046")
+    try:
+        texts = {button.text for button in widget.parent.findChildren(qt.QPushButton)}
+        assert not any(text.startswith("Redraw") for text in texts), "Redraw is still offered"
+        assert "redraw_box" not in {entry[0] for entry in bundled_module.SHORTCUT_ACTIONS}
+        assert not hasattr(widget, "redraw_button")
+    finally:
+        widget.cleanup()
+
+
+def _menu_actions_with(sequence: str) -> list:
+    target = qt.QKeySequence(sequence)
+    return [
+        action
+        for action in slicer.util.mainWindow().findChildren(qt.QAction)
+        if any(item.matches(target) == qt.QKeySequence.ExactMatch for item in action.shortcuts())
+    ]
+
+
+def test_undo_and_redo_keys_reach_the_module_while_it_is_open() -> None:
+    widget, first, _second = _build_case("sub-00047")
+    before_undo = _menu_actions_with("Ctrl+Z")
+    before_redo = _menu_actions_with("Ctrl+Y")
+    assert before_undo and before_redo, "Slicer no longer has Edit > Undo / Redo on Ctrl+Z / Ctrl+Y"
+    try:
+        widget._install_shortcuts()
+        widget.enter()
+        assert not _menu_actions_with("Ctrl+Z"), "Slicer's Edit > Undo still competes for Ctrl+Z"
+        assert not _menu_actions_with("Ctrl+Y"), "Slicer's Edit > Redo still competes for Ctrl+Y"
+        widget._remember_annotation()
+        widget.logic.state.delete_lesion(first)
+        undo = widget.shortcut_bindings["undo"]
+        assert undo.enabled
+        undo.activated()
+        assert first in widget.logic.state.lesions, "Ctrl+Z did not undo the delete"
+        widget.exit()
+        assert _menu_actions_with("Ctrl+Z") == before_undo, "Edit > Undo did not get Ctrl+Z back"
+        assert _menu_actions_with("Ctrl+Y") == before_redo, "Edit > Redo did not get Ctrl+Y back"
+    finally:
+        widget.exit()
+        widget.cleanup()
+
+
+def test_the_case_comment_folds_away_and_is_saved() -> None:
+    widget, _first, _second = _build_case("sub-00048")
+    try:
+        assert widget.case_comment_edit.isHidden(), "the comment box should start folded"
+        assert widget.comment_toggle.text == "Case comment"
+        widget.comment_toggle.checked = True
+        assert not widget.case_comment_edit.isHidden()
+        widget.case_comment_edit.plainText = "  Motion artefact on the axial series  "
+        widget.comment_toggle.checked = False
+        assert widget.case_comment_edit.isHidden()
+        assert widget.logic.state.comment == "Motion artefact on the axial series"
+        assert widget.comment_toggle.text == "Case comment (written)"
+        assert widget.logic.storage.load_draft().comment == "Motion artefact on the axial series"
+    finally:
+        widget.cleanup()
+
+
+def test_each_myoma_has_its_own_comment() -> None:
+    widget, first, second = _build_case("sub-00049")
+    try:
+        widget.on_continue_to_figo()
+        widget.lesion_list.setCurrentRow(0)
+        widget.lesion_comment_edit.text = "Calcified rim"
+        widget.on_apply_figo()
+        assert widget.logic.state.lesions[first].comment == "Calcified rim"
+        assert widget.logic.state.lesions[second].comment == ""
+        assert widget.lesion_comment_edit.text == "", "the next myoma showed the previous comment"
+        widget.lesion_list.setCurrentRow(0)
+        assert widget.lesion_comment_edit.text == "Calcified rim"
+    finally:
+        widget.cleanup()
+
+
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
@@ -831,6 +908,10 @@ TESTS = (
     test_navigation_stays_available_while_placing_a_box,
     test_early_stops_sit_with_zero_myomas_on_the_boxing_page,
     test_removed_buttons_are_gone_and_v_shows_the_myomas,
+    test_the_redraw_button_is_gone,
+    test_undo_and_redo_keys_reach_the_module_while_it_is_open,
+    test_the_case_comment_folds_away_and_is_saved,
+    test_each_myoma_has_its_own_comment,
 )
 
 failures = 0

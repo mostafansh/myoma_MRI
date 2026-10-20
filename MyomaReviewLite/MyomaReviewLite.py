@@ -146,7 +146,6 @@ SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] 
     ("redo", "Redo", "Ctrl+Y", "on_redo", None, None),
     ("redo_alt", "Redo (alternate)", "Ctrl+Shift+Z", "on_redo", None, None),
     ("add_box", "Add myoma box", "", "on_add_box", "add_button", "Add myoma box"),
-    ("redraw_box", "Redraw box", "", "on_redraw_box", "redraw_button", "Redraw"),
     ("delete_box", "Delete box", "", "on_delete_box", "delete_button", "Delete"),
     ("continue_to_figo", "Continue to FIGO typing", "", "on_continue_to_figo",
      "continue_to_figo_button", "Done boxing → continue to FIGO typing"),
@@ -1254,6 +1253,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.annotation_undo: list[dict[str, Any]] = []
         self.annotation_redo: list[dict[str, Any]] = []
         self.shortcuts: list[Any] = []
+        self._released_action_shortcuts: list[tuple[Any, list[Any]]] = []
         self.shortcut_bindings: dict[str, Any] = {}
         self.mouse_button_bindings: dict[str, int] = {}
         self.mouse_button_dispatcher: Any = None
@@ -1515,6 +1515,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         for action_id, key_text in new_key_text.items():
             settings.setValue(self._shortcut_setting_key(action_id), key_text)
             self.shortcut_bindings[action_id].setKey(qt.QKeySequence(key_text))
+        if self.shortcuts and self.shortcuts[0].enabled:
+            self._claim_shortcut_keys()
         for action_id, value in mouse_buttons.items():
             settings.setValue(self._mouse_button_setting_key(action_id), value)
         self.mouse_button_bindings = mouse_buttons
@@ -1762,6 +1764,18 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.reopen_button.connect("clicked()", self.on_reopen_case)
         self.reopen_button.visible = False
         annotation_layout.addWidget(self.reopen_button)
+        # The case comment stays folded away until the reader wants it.
+        self.comment_toggle = qt.QToolButton()
+        self.comment_toggle.checkable = True
+        self.comment_toggle.toolButtonStyle = qt.Qt.ToolButtonTextBesideIcon
+        self.comment_toggle.connect("toggled(bool)", self.on_comment_toggled)
+        annotation_layout.addWidget(self.comment_toggle)
+        self.case_comment_edit = qt.QPlainTextEdit()
+        self.case_comment_edit.placeholderText = "Comment on the whole case"
+        self.case_comment_edit.maximumHeight = 90
+        self.case_comment_edit.visible = False
+        annotation_layout.addWidget(self.case_comment_edit)
+        self._refresh_comment_toggle()
 
         self.page_stack = qt.QStackedWidget()
         annotation_layout.addWidget(self.page_stack, 1)
@@ -1780,11 +1794,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         actions = qt.QHBoxLayout()
         self.add_button = qt.QPushButton("Add myoma box")
         self.add_button.connect("clicked()", self.on_add_box)
-        self.redraw_button = qt.QPushButton("Redraw")
-        self.redraw_button.connect("clicked()", self.on_redraw_box)
         self.delete_button = qt.QPushButton("Delete")
         self.delete_button.connect("clicked()", self.on_delete_box)
-        for button in (self.add_button, self.redraw_button, self.delete_button):
+        for button in (self.add_button, self.delete_button):
             actions.addWidget(button)
         boxing_layout.addLayout(actions)
         roi_transaction_actions = qt.QHBoxLayout()
@@ -1856,6 +1868,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.ddx_edit.maxLength = 4000
         self.ddx_edit.placeholderText = "Reviewer differential diagnosis / notes"
         figo_form.addRow("Myoma Ddx", self.ddx_edit)
+        self.lesion_comment_edit = qt.QLineEdit()
+        self.lesion_comment_edit.maxLength = 4000
+        self.lesion_comment_edit.placeholderText = "Comment on this myoma"
+        figo_form.addRow("Myoma comment", self.lesion_comment_edit)
         self.apply_figo_button = qt.QPushButton("Save FIGO and Ddx")
         self.apply_figo_button.connect("clicked()", self.on_apply_figo)
         figo_form.addRow("", self.apply_figo_button)
@@ -1911,9 +1927,41 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if hasattr(self, "tab_widget") and hasattr(self, "annotation_tab"):
             self.tab_widget.setCurrentWidget(self.annotation_tab)
 
+    def _claim_shortcut_keys(self) -> None:
+        """Take our keys away from Slicer's own menu actions while we are open.
+
+        Slicer's Edit > Undo / Redo already own Ctrl+Z / Ctrl+Y. Two shortcuts
+        on one key are ambiguous to Qt, which then runs neither, so the menu
+        actions lose just those keys until ``_release_shortcut_keys``.
+        """
+
+        self._release_shortcut_keys()
+        main_window = slicer.util.mainWindow()
+        if main_window is None:
+            return
+        ours = [shortcut.key for shortcut in self.shortcuts if not shortcut.key.isEmpty()]
+        for action in main_window.findChildren(qt.QAction):
+            current = list(action.shortcuts())
+            kept = [
+                sequence for sequence in current
+                if not any(sequence.matches(key) == qt.QKeySequence.ExactMatch for key in ours)
+            ]
+            if len(kept) != len(current):
+                self._released_action_shortcuts.append((action, current))
+                action.setShortcuts(kept)
+
+    def _release_shortcut_keys(self) -> None:
+        for action, shortcuts in self._released_action_shortcuts:
+            try:
+                action.setShortcuts(shortcuts)
+            except Exception:
+                pass
+        self._released_action_shortcuts = []
+
     def enter(self) -> None:
         for shortcut in self.shortcuts:
             shortcut.enabled = True
+        self._claim_shortcut_keys()
         if self.mouse_button_dispatcher is not None:
             self.mouse_button_dispatcher.enabled = True
         if self.view_tools is not None:
@@ -1926,6 +1974,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def exit(self) -> None:
         for shortcut in self.shortcuts:
             shortcut.enabled = False
+        self._release_shortcut_keys()
         if self.mouse_button_dispatcher is not None:
             self.mouse_button_dispatcher.enabled = False
         if self.segment_editor_widget is not None:
@@ -2143,6 +2192,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def _load_case(self, manifest_path: Path, case_id: str | None) -> None:
         self.logic.open_manifest(manifest_path, case_id=case_id)
         self._boxing_stage_done = self.logic.phase != ReviewPhase.BLIND.value
+        self._load_case_comment()
         self.shutdown_saved = False
         self.save_coordinator.clear_dirty()
         self._refresh_case_list()
@@ -2202,7 +2252,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 self.lesion_list.setCurrentRow(0)
             for control in (
                 self.add_button,
-                self.redraw_button,
                 self.delete_button,
                 self.zero_check,
                 self.figo_lesion_combo,
@@ -2253,7 +2302,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # boxes to add, redraw or delete one; the blinded snapshot is frozen.
         in_figo_stage = self._boxing_stage_done
         self.blind_stack.setCurrentIndex(1 if in_figo_stage else 0)
-        for control in (self.add_button, self.redraw_button, self.delete_button, self.zero_check):
+        for control in (self.add_button, self.delete_button, self.zero_check):
             control.enabled = not locked and not in_figo_stage
         for control in (self.figo_lesion_combo, self.figo_kind_combo, self.apply_figo_button):
             control.enabled = not locked
@@ -2364,9 +2413,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.figo_serosal_combo.setCurrentIndex(max(0, self.figo_serosal_combo.findData(figo.get("serosal", 0))))
         self.figo_reason_combo.setCurrentIndex(max(0, self.figo_reason_combo.findData(figo.get("reason"))))
         self.ddx_edit.text = payload.get("differential_diagnosis", "")
+        self.lesion_comment_edit.text = payload.get("comment", "")
         for control in (self.figo_kind_combo, self.figo_type_combo, self.figo_location_combo,
                         self.figo_endometrial_combo, self.figo_serosal_combo, self.figo_reason_combo,
-                        self.ddx_edit, self.apply_figo_button):
+                        self.ddx_edit, self.lesion_comment_edit, self.apply_figo_button):
             control.enabled = bool(payload) and not self.logic.read_only
         self._refresh_figo_controls()
 
@@ -2380,16 +2430,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.draw_tool.start()
             # Hide every other box and swap in the placement cursor now that
             # draw_tool.active is true, i.e. _has_unresolved_roi() flipped.
-            self._apply_roi_selection()
-
-    def on_redraw_box(self) -> None:
-        if self._has_unresolved_roi():
-            self._show_error("Save or cancel the current myoma box first.")
-            return
-        lesion_id = self._selected_lesion_id()
-        self.set_active_roi(None)
-        if lesion_id and self.draw_tool is not None:
-            self.draw_tool.start(lesion_id)
             self._apply_roi_selection()
 
     def on_delete_box(self) -> None:
@@ -2494,6 +2534,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._remember_annotation()
             state.set_figo(lesion_id, value)
             state.set_differential_diagnosis(lesion_id, str(self.ddx_edit.text))
+            state.set_lesion_comment(lesion_id, str(self.lesion_comment_edit.text))
             self._write_current_draft()
             # Saving FIGO advances straight to the next myoma so the reader
             # can page through the whole list without reselecting each one;
@@ -2545,11 +2586,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             and not state.zero_myomas
             and not state.lesions
             and state.blinded_snapshot is None
+            and not state.comment
         )
 
     def _write_current_draft(self) -> None:
         # A box dragged by its handles lives only in the node until this runs.
         self._commit_active_roi_geometry()
+        self._commit_case_comment()
         if self.logic.state is None or self.logic.read_only:
             return
         if self._state_is_untouched(self.logic.state):
@@ -2574,6 +2617,45 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         """
 
         self._commit_active_roi_geometry()
+        self._commit_case_comment()
+
+    def _commit_case_comment(self) -> None:
+        """Fold the typed case comment into the state; the editor is its source."""
+
+        state = self.logic.state
+        if state is None or self.logic.read_only or not hasattr(self, "case_comment_edit"):
+            return
+        text = str(self.case_comment_edit.plainText).strip()
+        if text != state.comment:
+            state.set_comment(text)
+
+    def _refresh_comment_toggle(self) -> None:
+        expanded = bool(self.comment_toggle.checked)
+        has_text = bool(str(self.case_comment_edit.plainText).strip())
+        self.comment_toggle.arrowType = qt.Qt.DownArrow if expanded else qt.Qt.RightArrow
+        self.comment_toggle.text = "Case comment" + (" (written)" if has_text and not expanded else "")
+
+    def on_comment_toggled(self, expanded: bool) -> None:
+        self.case_comment_edit.visible = bool(expanded)
+        if expanded:
+            self.case_comment_edit.setFocus()
+        else:
+            try:
+                self._write_current_draft()
+            except Exception as exc:
+                self._show_error(f"Comment could not be saved: {exc}")
+        self._refresh_comment_toggle()
+
+    def _load_case_comment(self) -> None:
+        state = self.logic.state
+        text = state.comment if state is not None else str((self.logic.final_annotation or {}).get("comment", ""))
+        self.case_comment_edit.plainText = text
+        self.case_comment_edit.readOnly = bool(self.logic.read_only)
+        self.comment_toggle.blockSignals(True)
+        self.comment_toggle.checked = False
+        self.comment_toggle.blockSignals(False)
+        self.case_comment_edit.visible = False
+        self._refresh_comment_toggle()
 
     def _has_unresolved_roi(self) -> bool:
         return bool(

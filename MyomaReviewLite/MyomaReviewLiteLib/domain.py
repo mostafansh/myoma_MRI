@@ -11,7 +11,7 @@ import json
 import math
 import re
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from numbers import Integral
@@ -474,6 +474,7 @@ class Lesion:
     size_mm: tuple[float, float, float]
     figo: FIGOClassification | None = None
     differential_diagnosis: str = ""
+    comment: str = ""
 
     def __post_init__(self) -> None:
         if not _LESION_RE.fullmatch(self.lesion_id):
@@ -487,6 +488,9 @@ class Lesion:
         if not isinstance(self.differential_diagnosis, str):
             raise ValidationError("differential_diagnosis must be text")
         self.differential_diagnosis = self.differential_diagnosis.strip()
+        if not isinstance(self.comment, str):
+            raise ValidationError("comment must be text")
+        self.comment = self.comment.strip()
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Lesion":
@@ -500,6 +504,7 @@ class Lesion:
             size_mm=value.get("size_mm"),
             figo=None if figo is None else FIGOClassification.from_dict(figo),
             differential_diagnosis=value.get("differential_diagnosis", ""),
+            comment=value.get("comment", ""),
         )
 
     def to_dict(self, *, require_figo: bool = False) -> dict[str, Any]:
@@ -511,6 +516,7 @@ class Lesion:
             "size_mm": list(self.size_mm),
             "figo": None if self.figo is None else self.figo.to_dict(),
             "differential_diagnosis": self.differential_diagnosis,
+            "comment": self.comment,
         }
 
 
@@ -527,6 +533,7 @@ class ReviewState:
     lesions: dict[str, Lesion] = field(default_factory=dict)
     blinded_snapshot: dict[str, Any] | None = None
     next_lesion_number: int = 1
+    comment: str = ""
 
     @classmethod
     def new(cls, study_id: str, reader_id: str, case_id: str, *, started_at: str | None = None) -> "ReviewState":
@@ -560,6 +567,7 @@ class ReviewState:
             lesions={item.lesion_id: item for item in lesions},
             blinded_snapshot=deepcopy(value.get("blinded_snapshot")),
             next_lesion_number=value.get("next_lesion_number", 1),
+            comment=value.get("comment", ""),
         )
         # Legacy revealed drafts were locked against annotation edits, so their
         # saved annotations are the original blinded record.
@@ -625,6 +633,9 @@ class ReviewState:
             raise ValidationError("phase is not recognized")
         if self.phase == ReviewPhase.BLIND.value and (self.ai_revealed_at is not None or self.blinded_snapshot is not None):
             raise ValidationError("a revealed record cannot return to the blind phase")
+        if not isinstance(self.comment, str):
+            raise ValidationError("comment must be text")
+        self.comment = self.comment.strip()
         if isinstance(self.next_lesion_number, bool) or not isinstance(self.next_lesion_number, int) or self.next_lesion_number < 1:
             raise ValidationError("next_lesion_number must be a positive integer")
         if len(self.lesions) != len(set(self.lesions)):
@@ -683,7 +694,7 @@ class ReviewState:
         if lesion_id not in self.lesions:
             raise ValidationError(f"unknown lesion: {lesion_id}")
         current = self.lesions[lesion_id]
-        self.lesions[lesion_id] = Lesion(lesion_id, tuple(center_ras), tuple(size_mm), current.figo, current.differential_diagnosis)
+        self.lesions[lesion_id] = replace(current, center_ras=tuple(center_ras), size_mm=tuple(size_mm))
         self.validate()
 
     def delete_lesion(self, lesion_id: str) -> None:
@@ -698,7 +709,7 @@ class ReviewState:
         if lesion_id not in self.lesions:
             raise ValidationError(f"unknown lesion: {lesion_id}")
         current = self.lesions[lesion_id]
-        self.lesions[lesion_id] = Lesion(current.lesion_id, current.center_ras, current.size_mm, FIGOClassification.from_dict(figo), current.differential_diagnosis)
+        self.lesions[lesion_id] = replace(current, figo=FIGOClassification.from_dict(figo))
         self.validate()
 
     def set_differential_diagnosis(self, lesion_id: str, text: str) -> None:
@@ -706,8 +717,23 @@ class ReviewState:
         if lesion_id not in self.lesions:
             raise ValidationError(f"unknown lesion: {lesion_id}")
         current = self.lesions[lesion_id]
-        self.lesions[lesion_id] = Lesion(current.lesion_id, current.center_ras, current.size_mm, current.figo, text)
+        self.lesions[lesion_id] = replace(current, differential_diagnosis=text)
         self.validate()
+
+    def set_lesion_comment(self, lesion_id: str, text: str) -> None:
+        self._ensure_editable()
+        if lesion_id not in self.lesions:
+            raise ValidationError(f"unknown lesion: {lesion_id}")
+        self.lesions[lesion_id] = replace(self.lesions[lesion_id], comment=text)
+        self.validate()
+
+    def set_comment(self, text: str) -> None:
+        """The reader's free-text note on the whole case."""
+
+        self._ensure_editable()
+        if not isinstance(text, str):
+            raise ValidationError("comment must be text")
+        self.comment = text.strip()
 
     def confirm_zero_myomas(self, confirmed: bool) -> None:
         self._ensure_editable()
@@ -761,6 +787,7 @@ class ReviewState:
             "lesions": [item.to_dict() for item in self.active_lesions],
             "blinded_snapshot": deepcopy(self.blinded_snapshot),
             "next_lesion_number": self.next_lesion_number,
+            "comment": self.comment,
         }
 
     def to_annotation(self, module_version: str, *, status: str) -> dict[str, Any]:
@@ -794,4 +821,5 @@ class ReviewState:
             "blinded_snapshot": deepcopy(self.blinded_snapshot),
             "label_names": dict(LABEL_NAMES),
             "corrected_labelmap": "corrected_labels.nii.gz" if status == "complete" else None,
+            "comment": self.comment,
         }

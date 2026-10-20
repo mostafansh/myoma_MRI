@@ -29,48 +29,54 @@ The following controls address the pilot list:
    picking a myoma selects its box (with handles) and centers the views too.
    Saving jumps to the next myoma in the list automatically, so the reader can
    page straight through all of them; saving the last myoma instead asks
-   whether to reveal AI now.
-2. **Undo.** `Ctrl+Z` undoes a Segment Editor change on the correction page,
+   whether to reveal AI now. **Myoma comment**, under the Ddx, is a free-text
+   note on that myoma and is saved with the same button.
+2. **Case comment.** The folded **Case comment** bar above the pages opens a
+   text box for a note on the whole case; click the bar again to fold it away.
+   It reads "(written)" while folded if there is text. The comment is saved
+   with the draft and the final result, including early stops.
+3. **Undo.** `Ctrl+Z` undoes a Segment Editor change on the correction page,
    or the latest myoma-box/FIGO/Ddx annotation change on the annotation page.
    `Ctrl+Y` redoes it; there are no Undo/Redo buttons, only the shortcuts.
+   While the module is open it takes `Ctrl+Z` / `Ctrl+Y` from Slicer's own
+   Edit menu (otherwise neither would fire) and gives them back on leaving.
    The Segment Editor also has its native undo history.
    Every default key above can be changed: the **Keyboard shortcuts…** button
    in the module header opens a panel listing all rebindable actions (Undo,
-   Redo, Add myoma box, Redraw box, Delete box, Continue to FIGO typing, Save
+   Redo, Add myoma box, Delete box, Continue to FIGO typing, Save
    draft, Show segmented myomas). Click a field, press the new key combination, and **Save** —
    bindings are remembered per Slicer user and the toolbar buttons update to
    show whatever is currently bound.
-3. **True axial and coronal views.** **Reset true planes and fit** restores
+4. **True axial and coronal views.** **Reset true planes and fit** restores
    patient-space sagittal, axial, and coronal orientations and puts the
    corresponding T2 image in each view. If the source NIfTI images were
    already resampled, the module cannot reconstruct their original acquisition
    planes.
-4. **Contrast.** In **Images and contrast**, choose one plane or **All three
+5. **Contrast.** In **Images and contrast**, choose one plane or **All three
    images**. Use **Automatic contrast** or enter Window and Level. This changes
    display settings only; the image voxels are unchanged.
-5. **Edit the myoma mask.** On the correction page select the myoma segment
+6. **Edit the myoma mask.** On the correction page select the myoma segment
    in the Segment Editor and use its Paint, Draw or Erase effects (Draw: outline
    a closed region, then press Enter to fill it). `Ctrl+Z` is available after
    each operation.
-6. **Correct FIGO.** On the annotation page select the lesion in the list,
+7. **Correct FIGO.** On the annotation page select the lesion in the list,
    choose `standard`, `hybrid`, or `uncertain`, fill the visible fields, and
    save. Type 8 also requires its location. FIGO can be revised after AI
    reveal while the case is still unfinished.
-7. **Add a new myoma.** Choose **Add myoma box**, drag a rectangle in any
+8. **Add a new myoma.** Choose **Add myoma box**, drag a rectangle in any
     T2 view, adjust the 3-D handles if needed, and press **Save ROI**. You can
     also paint the myoma segment in the Segment Editor after AI reveal for a
     mask-only correction.
-8. **Edit an existing myoma.** While boxing, or on the annotation page after
+9. **Edit an existing myoma.** While boxing, or on the annotation page after
     AI reveal, click the box in any T2 view to reveal its handles, then drag them to move or resize it; the new
     box is saved to the draft as soon as you click elsewhere, change page, save,
-    or reveal AI, and `Ctrl+Z` undoes it. You can also
-    select its row and choose **Redraw** to draw the box again from scratch, or
-    use Paint, Draw, and Erase on the myoma segment to edit its mask. Save the
-    draft before changing cases.
-9. **More than six myomas.** There is no six-lesion limit. Each annotation
+    or reveal AI, and `Ctrl+Z` undoes it. You can also use Paint, Draw, and
+    Erase on the myoma segment to edit its mask. Save the draft before changing
+    cases.
+10. **More than six myomas.** There is no six-lesion limit. Each annotation
     receives the next ID (`M01`, `M02`, …), and all lesions share the myoma
     segmentation label. Deleted IDs are not reused.
-10. **Myoma box appearance.** Every box is a one-pixel outline with no handle
+11. **Myoma box appearance.** Every box is a one-pixel outline with no handle
     circles, so the T2 underneath stays readable. The weight does not change as
     you work: the rectangle you drag out, the box you adjust before **Save
     ROI**, and every saved box are all drawn the same way. The box currently in
@@ -80,7 +86,7 @@ The following controls address the pilot list:
     move — a completed read-only case, or the segmentation page — the click
     still highlights the box but no circles appear, because in Slicer the
     circles are the drag control itself.
-11. **See segmented myoma.** Press `V` (rebindable) once AI is revealed. The myoma overlay is shown and all three views jump to an occupied
+12. **See segmented myoma.** Press `V` (rebindable) once AI is revealed. The myoma overlay is shown and all three views jump to an occupied
     myoma voxel. Scroll through the views to inspect separate lesions.
 
 Reveal captures the original blinded boxes, FIGO values, differential

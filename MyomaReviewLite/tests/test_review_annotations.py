@@ -271,5 +271,47 @@ class ReopenCompletedCaseTests(unittest.TestCase):
             self.assertTrue(storage.is_complete)
 
 
+class CommentTests(unittest.TestCase):
+    def test_case_and_myoma_comments_persist_and_survive_edits(self) -> None:
+        state = annotated_state()
+        state.set_comment("  Poor image quality in the fundus  ")
+        state.set_lesion_comment("M01", " Possibly degenerating ")
+        state.update_lesion("M01", (9, 8, 7), (6, 5, 4))
+        state.set_figo("M01", {"kind": "standard", "type": 5})
+        state.set_differential_diagnosis("M01", "Leiomyoma")
+        restored = ReviewState.from_draft(json.loads(json.dumps(state.to_draft())))
+        self.assertEqual(restored.comment, "Poor image quality in the fundus")
+        self.assertEqual(restored.lesions["M01"].comment, "Possibly degenerating")
+        restored.reveal(revealed_at=STAMP)
+        self.assertEqual(restored.blinded_snapshot["lesions"][0]["comment"], "Possibly degenerating")
+        restored.set_comment("Revised after AI")
+        final = restored.complete(completed_at=LATER)
+        self.assertEqual(final["comment"], "Revised after AI")
+        self.assertEqual(final["lesions"][0]["comment"], "Possibly degenerating")
+        self.assertEqual(final["lesions"][0]["differential_diagnosis"], "Leiomyoma")
+
+    def test_drafts_without_comments_still_load(self) -> None:
+        payload = annotated_state().to_draft()
+        payload.pop("comment")
+        payload["lesions"][0].pop("comment")
+        restored = ReviewState.from_draft(payload)
+        self.assertEqual(restored.comment, "")
+        self.assertEqual(restored.lesions["M01"].comment, "")
+
+    def test_completed_case_comments_are_read_only(self) -> None:
+        state = annotated_state()
+        state.reveal(revealed_at=STAMP)
+        state.complete(completed_at=LATER)
+        with self.assertRaises(ValidationError):
+            state.set_comment("late")
+        with self.assertRaises(ValidationError):
+            state.set_lesion_comment("M01", "late")
+
+    def test_early_stop_keeps_the_case_comment(self) -> None:
+        state = ReviewState.new("study", "reader", "case", started_at=STAMP)
+        state.set_comment("Only a pelvic scout was sent")
+        self.assertEqual(state.early_stop("wrong_image", completed_at=LATER)["comment"], "Only a pelvic scout was sent")
+
+
 if __name__ == "__main__":
     unittest.main()
