@@ -79,7 +79,8 @@ QLineEdit, QPlainTextEdit {{ background: {FIELD}; color: {TEXT}; border: 1px sol
     border-radius: 6px; padding: 6px 8px; selection-background-color: {ACCENT}; }}
 QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
 QPlainTextEdit[role="comment"] {{ border-top-left-radius: 0px; border-top-right-radius: 0px;
-    border-top: none; }}
+    border: 1px solid {ACCENT}; border-top: none; background: {FIELD}; }}
+QToolButton[role="bar"]:checked {{ border-color: {ACCENT}; }}
 
 QListWidget[role="rows"] {{ background: transparent; border: none; outline: none; }}
 

@@ -1849,25 +1849,27 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.reopen_button.connect("clicked()", self.on_reopen_case)
         self.reopen_button.visible = False
         annotation_layout.addWidget(self.reopen_button)
-        # The case comment stays folded away until the reader wants it.
-        comment_box = qt.QVBoxLayout()
-        comment_box.setSpacing(0)
+        # The case comment stays folded away until the reader wants it. Its
+        # bar sits under the current page's main actions (_place_comment_bar)
+        # and the text box drops down over the controls below it instead of
+        # pushing them down (_position_comment_overlay).
         self.comment_toggle = theme.set_role(qt.QToolButton(), "bar")
         self.comment_toggle.checkable = True
         self.comment_toggle.toolButtonStyle = qt.Qt.ToolButtonTextBesideIcon
         self.comment_toggle.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
         self.comment_toggle.connect("toggled(bool)", self.on_comment_toggled)
-        comment_box.addWidget(self.comment_toggle)
-        self.case_comment_edit = theme.set_role(qt.QPlainTextEdit(), "comment")
+        self.case_comment_edit = theme.set_role(qt.QPlainTextEdit(self.annotation_tab), "comment")
         self.case_comment_edit.placeholderText = "Comment on the whole case"
-        self.case_comment_edit.maximumHeight = 90
+        self.case_comment_edit.setFixedHeight(110)
         self.case_comment_edit.visible = False
-        comment_box.addWidget(self.case_comment_edit)
-        annotation_layout.addLayout(comment_box)
+        comment_escape = qt.QShortcut(qt.QKeySequence("Esc"), self.case_comment_edit)
+        comment_escape.context = qt.Qt.WidgetWithChildrenShortcut
+        comment_escape.connect("activated()", lambda: setattr(self.comment_toggle, "checked", False))
+        self._comment_overlay_filter = self._make_comment_overlay_filter()
         self._refresh_comment_toggle()
 
         self.page_stack = qt.QStackedWidget()
-        self.page_stack.connect("currentChanged(int)", lambda _index: self._refresh_steps())
+        self.page_stack.connect("currentChanged(int)", lambda _index: self._on_page_changed())
         annotation_layout.addWidget(self.page_stack, 1)
         # The blinded annotation page: boxes, FIGO (on the image card), early
         # stops and reveal all live here; the same page is used after reveal.
@@ -1892,6 +1894,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         actions.addWidget(self.add_button, 1)
         actions.addWidget(self.delete_button)
         blind_layout.addLayout(actions)
+        self.blind_comment_slot = qt.QVBoxLayout()
+        blind_layout.addLayout(self.blind_comment_slot)
         # Only shown while a box is being placed or redrawn.
         self.roi_edit_bar = qt.QWidget()
         roi_transaction_actions = qt.QHBoxLayout(self.roi_edit_bar)
@@ -1950,6 +1954,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.correction_save_button.connect("clicked()", self.on_save_draft)
         correction_actions.addWidget(self.correction_save_button)
         correction_layout.addLayout(correction_actions)
+        self.correction_comment_slot = qt.QVBoxLayout()
+        correction_layout.addLayout(self.correction_comment_slot)
         self.show_roi_check = qt.QCheckBox("Show ROI boxes")
         self.show_roi_check.checked = False
         self.show_roi_check.connect("toggled(bool)", self.on_show_roi_toggled)
@@ -1971,7 +1977,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # card's own while focus is in the card; whichever Qt picks must close.
         for shortcut in self.figo_card.widget.findChildren(qt.QShortcut):
             shortcut.connect("activatedAmbiguously()", self.close_figo_card)
-        self._refresh_steps()
+        self._on_page_changed()
 
     def _set_roi_edit_buttons(self, active: bool) -> None:
         """Enable Save/Cancel ROI, and show their bar, only while a box is open for editing."""
@@ -1991,6 +1997,55 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def _refresh_myoma_count(self) -> None:
         count = self.lesion_list.count
         self.myoma_section_label.text = f"MYOMAS · {count}" if count else "MYOMAS"
+
+    def _on_page_changed(self) -> None:
+        self._refresh_steps()
+        self._place_comment_bar()
+
+    def _place_comment_bar(self) -> None:
+        """Put the case comment bar under the visible page's main actions."""
+
+        on_correction = self.page_stack.currentIndex == 1
+        slot = self.correction_comment_slot if on_correction else self.blind_comment_slot
+        if slot.indexOf(self.comment_toggle) < 0:
+            # addWidget takes the bar out of the other page's slot.
+            slot.addWidget(self.comment_toggle)
+            self.comment_toggle.show()
+        self._position_comment_overlay()
+
+    def _position_comment_overlay(self) -> None:
+        """Lay the open comment box right under its bar, over whatever is below."""
+
+        edit = self.case_comment_edit
+        if edit.isHidden():
+            return
+        bar = self.comment_toggle
+        corner = bar.mapTo(self.annotation_tab, qt.QPoint(0, bar.height))
+        edit.setGeometry(corner.x(), corner.y(), bar.width, edit.height)
+        edit.raise_()
+
+    def _set_comment_overlay_tracking(self, on: bool) -> None:
+        """Follow the bar's moves only while the box is open, so Qt never holds
+        the filter through a Python object that dies before the bar does."""
+
+        try:
+            if on:
+                self.comment_toggle.installEventFilter(self._comment_overlay_filter)
+            else:
+                self.comment_toggle.removeEventFilter(self._comment_overlay_filter)
+        except Exception:
+            pass
+
+    def _make_comment_overlay_filter(self) -> Any:
+        widget = self
+
+        class _CommentOverlayFilter(qt.QObject):
+            def eventFilter(self, _obj, event):
+                if event.type() in (qt.QEvent.Move, qt.QEvent.Resize):
+                    widget._position_comment_overlay()
+                return False
+
+        return _CommentOverlayFilter()
 
     def _refresh_steps(self) -> None:
         """Highlight the current step: 1 Annotate, 2 Correct AI."""
@@ -2697,7 +2752,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def on_comment_toggled(self, expanded: bool) -> None:
         self.case_comment_edit.visible = bool(expanded)
+        self._set_comment_overlay_tracking(bool(expanded))
         if expanded:
+            self._position_comment_overlay()
             self.case_comment_edit.setFocus()
         else:
             try:
@@ -2715,6 +2772,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.comment_toggle.checked = False
         self.comment_toggle.blockSignals(False)
         self.case_comment_edit.visible = False
+        self._set_comment_overlay_tracking(False)
         self._refresh_comment_toggle()
 
     def _has_unresolved_roi(self) -> bool:
@@ -3893,6 +3951,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def cleanup(self) -> None:
         if SLICER_AVAILABLE:
             self.exit()
+            if hasattr(self, "comment_toggle"):
+                self._set_comment_overlay_tracking(False)
             for shortcut in self.shortcuts:
                 shortcut.deleteLater()
             self.shortcuts = []
