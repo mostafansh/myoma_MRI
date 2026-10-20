@@ -2,8 +2,6 @@
 
 from .domain import (
     AI_LABEL_VALUES,
-    CORRECTION_LABEL_NAMES,
-    CORRECTION_LABEL_VALUES,
     LABEL_NAMES,
     MODULE_VERSION,
     SCHEMA_VERSION,
@@ -18,7 +16,6 @@ from .domain import (
     load_manifest,
     ReviewPhase,
     ReviewState,
-    SplitPlane,
     Type8Location,
     UncertainReason,
     ValidationError,
@@ -48,8 +45,6 @@ from .roi import (
 
 __all__ = [
     "AI_LABEL_VALUES",
-    "CORRECTION_LABEL_NAMES",
-    "CORRECTION_LABEL_VALUES",
     "LABEL_NAMES",
     "MODULE_VERSION",
     "SCHEMA_VERSION",
@@ -64,7 +59,6 @@ __all__ = [
     "load_manifest",
     "ReviewPhase",
     "ReviewState",
-    "SplitPlane",
     "Type8Location",
     "UncertainReason",
     "ValidationError",

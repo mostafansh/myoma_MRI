@@ -29,10 +29,6 @@ LABEL_NAMES = {
     4: "Nabothian cyst",
 }
 AI_LABEL_VALUES = frozenset(LABEL_NAMES)
-# Source AI masks retain their original contract; these labels exist only in
-# reviewer corrections and must never expand the accepted AI input labels.
-CORRECTION_LABEL_NAMES = {**LABEL_NAMES, 5: "cervix", 6: "cesarean scar niche"}
-CORRECTION_LABEL_VALUES = frozenset(CORRECTION_LABEL_NAMES)
 VOLUME_NAMES = ("sagittal", "axial", "coronal")
 VALID_STATUSES = frozenset(("complete", "no_uterus", "wrong_image", "cannot_assess"))
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -199,8 +195,8 @@ def validate_correction_mask_values(values: Iterable[Any]) -> None:
     except TypeError as exc:
         raise ValidationError("correction mask values must be iterable") from exc
     for value in iterator:
-        if isinstance(value, bool) or not isinstance(value, Integral) or int(value) not in CORRECTION_LABEL_VALUES:
-            raise ValidationError("correction mask values must be a subset of integer labels 0 through 6")
+        if isinstance(value, bool) or not isinstance(value, Integral) or int(value) not in AI_LABEL_VALUES:
+            raise ValidationError("correction mask values must be a subset of integer labels 0 through 4")
 
 
 @dataclass(frozen=True)
@@ -471,34 +467,6 @@ class FIGOClassification:
 FIGO = FIGOClassification
 
 
-@dataclass(frozen=True)
-class SplitPlane:
-    """Reviewer-defined cervix/endometrium boundary, in physical RAS mm."""
-
-    origin_ras: tuple[float, float, float]
-    normal_ras: tuple[float, float, float]
-
-    def __post_init__(self) -> None:
-        origin = _finite_vector(self.origin_ras, "split_plane.origin_ras")
-        normal = _finite_vector(self.normal_ras, "split_plane.normal_ras")
-        length = math.hypot(*normal)
-        if not math.isfinite(length) or length < 1e-12:
-            raise ValidationError("split_plane.normal_ras must have non-zero length")
-        object.__setattr__(self, "origin_ras", origin)
-        object.__setattr__(self, "normal_ras", tuple(value / length for value in normal))
-
-    @classmethod
-    def from_dict(cls, value: Mapping[str, Any] | "SplitPlane") -> "SplitPlane":
-        if isinstance(value, cls):
-            return value
-        if not isinstance(value, Mapping):
-            raise ValidationError("split_plane must be an object")
-        return cls(value.get("origin_ras"), value.get("normal_ras"))
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"origin_ras": list(self.origin_ras), "normal_ras": list(self.normal_ras)}
-
-
 @dataclass
 class Lesion:
     lesion_id: str
@@ -557,7 +525,6 @@ class ReviewState:
     completed_at: str | None = None
     zero_myomas: bool = False
     lesions: dict[str, Lesion] = field(default_factory=dict)
-    split_plane: SplitPlane | None = None
     blinded_snapshot: dict[str, Any] | None = None
     next_lesion_number: int = 1
 
@@ -579,7 +546,8 @@ class ReviewState:
         lesions = [Lesion.from_dict(item) for item in value.get("lesions", [])]
         if len(lesions) != len({item.lesion_id for item in lesions}):
             raise ValidationError("lesion IDs must be unique")
-        split_plane = value.get("split_plane")
+        if value.get("split_plane") is not None:
+            raise ValidationError("the cervix boundary plane is no longer supported")
         state = cls(
             study_id=_identifier(value.get("study_id"), "study_id"),
             reader_id=_identifier(value.get("reader_id"), "reader_id"),
@@ -590,7 +558,6 @@ class ReviewState:
             completed_at=value.get("completed_at"),
             zero_myomas=bool(value.get("zero_myomas", value.get("zero_myomas_confirmed", False))),
             lesions={item.lesion_id: item for item in lesions},
-            split_plane=None if split_plane is None else SplitPlane.from_dict(split_plane),
             blinded_snapshot=deepcopy(value.get("blinded_snapshot")),
             next_lesion_number=value.get("next_lesion_number", 1),
         )
@@ -667,8 +634,6 @@ class ReviewState:
                 raise ValidationError("lesion mapping key must match lesion_id")
         if self.zero_myomas and self.lesions:
             raise ValidationError("zero_myomas is valid only when the lesion list is empty")
-        if self.split_plane is not None:
-            self.split_plane = SplitPlane.from_dict(self.split_plane)
         if self.blinded_snapshot is not None:
             if not isinstance(self.blinded_snapshot, Mapping):
                 raise ValidationError("blinded_snapshot must be an object")
@@ -681,7 +646,7 @@ class ReviewState:
             ):
                 raise ValidationError("blinded snapshot requires FIGO-complete or zero-myoma annotations")
             if self.blinded_snapshot.get("split_plane") is not None:
-                SplitPlane.from_dict(self.blinded_snapshot["split_plane"])
+                raise ValidationError("the cervix boundary plane is no longer supported")
         if self.phase == ReviewPhase.AI_REVEALED.value and not self.ai_revealed_at:
             raise ValidationError("ai_revealed phase requires ai_revealed_at")
         if self.phase in {ReviewPhase.COMPLETE.value, ReviewPhase.TERMINAL.value} and not self.completed_at:
@@ -701,7 +666,6 @@ class ReviewState:
         return {
             "zero_myomas": self.zero_myomas,
             "lesions": [item.to_dict() for item in self.active_lesions],
-            "split_plane": None if self.split_plane is None else self.split_plane.to_dict(),
         }
 
     def add_lesion(self, center_ras: Sequence[float], size_mm: Sequence[float]) -> str:
@@ -743,16 +707,6 @@ class ReviewState:
             raise ValidationError(f"unknown lesion: {lesion_id}")
         current = self.lesions[lesion_id]
         self.lesions[lesion_id] = Lesion(current.lesion_id, current.center_ras, current.size_mm, current.figo, text)
-        self.validate()
-
-    def set_split_plane(self, origin_ras: Sequence[float], normal_ras: Sequence[float]) -> None:
-        self._ensure_editable()
-        self.split_plane = SplitPlane(tuple(origin_ras), tuple(normal_ras))
-        self.validate()
-
-    def clear_split_plane(self) -> None:
-        self._ensure_editable()
-        self.split_plane = None
         self.validate()
 
     def confirm_zero_myomas(self, confirmed: bool) -> None:
@@ -805,7 +759,6 @@ class ReviewState:
             "completed_at": self.completed_at,
             "zero_myomas": self.zero_myomas,
             "lesions": [item.to_dict() for item in self.active_lesions],
-            "split_plane": None if self.split_plane is None else self.split_plane.to_dict(),
             "blinded_snapshot": deepcopy(self.blinded_snapshot),
             "next_lesion_number": self.next_lesion_number,
         }
@@ -838,8 +791,7 @@ class ReviewState:
             "completed_at": completed_at,
             "zero_myomas": self.zero_myomas,
             "lesions": lesions,
-            "split_plane": None if self.split_plane is None else self.split_plane.to_dict(),
             "blinded_snapshot": deepcopy(self.blinded_snapshot),
-            "label_names": dict(CORRECTION_LABEL_NAMES),
+            "label_names": dict(LABEL_NAMES),
             "corrected_labelmap": "corrected_labels.nii.gz" if status == "complete" else None,
         }

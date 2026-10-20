@@ -8,11 +8,10 @@ import unittest
 
 from MyomaReviewLiteLib import (
     AI_LABEL_VALUES,
-    CORRECTION_LABEL_NAMES,
+    LABEL_NAMES,
     CaseStorage,
     ImmutableCaseError,
     ReviewState,
-    SplitPlane,
     StorageError,
     ValidationError,
     validate_ai_mask_values,
@@ -32,15 +31,14 @@ def annotated_state() -> ReviewState:
 
 
 class ReviewerAnnotationTests(unittest.TestCase):
-    def test_correction_labels_do_not_expand_ai_input_contract(self) -> None:
+    def test_corrections_use_the_same_five_labels_as_the_ai_mask(self) -> None:
         self.assertEqual(AI_LABEL_VALUES, frozenset(range(5)))
-        self.assertEqual(CORRECTION_LABEL_NAMES[5], "cervix")
-        self.assertEqual(CORRECTION_LABEL_NAMES[6], "cesarean scar niche")
-        validate_correction_mask_values(range(7))
+        self.assertEqual(set(LABEL_NAMES), set(range(5)))
+        validate_correction_mask_values(range(5))
         for invalid in (5, 6):
             with self.subTest(ai_label=invalid), self.assertRaises(ValidationError):
                 validate_ai_mask_values([invalid])
-        for invalid in (-1, 7, 3.5, True):
+        for invalid in (-1, 5, 6, 3.5, True):
             with self.subTest(correction_label=invalid), self.assertRaises(ValidationError):
                 validate_correction_mask_values([invalid])
 
@@ -58,12 +56,10 @@ class ReviewerAnnotationTests(unittest.TestCase):
     def test_revealed_edits_preserve_blinded_snapshot_and_timestamp(self) -> None:
         state = annotated_state()
         state.set_differential_diagnosis("M01", "Original differential")
-        state.set_split_plane((1, 2, 3), (0, 0, 2))
         state.reveal(revealed_at=STAMP)
         original = json.loads(json.dumps(state.blinded_snapshot))
         state.set_figo("M01", {"kind": "standard", "type": 4})
         state.set_differential_diagnosis("M01", "Revised differential")
-        state.set_split_plane((4, 5, 6), (0, 3, 0))
         added = state.add_lesion((2, 3, 4), (1, 1, 1))
         state.set_figo(added, {"kind": "uncertain", "reason": "otherwise_not_classifiable"})
         state.delete_lesion("M01")
@@ -73,7 +69,7 @@ class ReviewerAnnotationTests(unittest.TestCase):
         final = state.complete(completed_at=LATER)
         self.assertEqual(final["blinded_snapshot"], original)
         self.assertEqual(final["lesions"][0]["lesion_id"], "M02")
-        self.assertEqual(final["split_plane"]["origin_ras"], [4, 5, 6])
+        self.assertNotIn("split_plane", final)
 
     def test_snapshot_serialization_is_detached(self) -> None:
         state = annotated_state()
@@ -86,7 +82,7 @@ class ReviewerAnnotationTests(unittest.TestCase):
         state = annotated_state()
         state.reveal(revealed_at=STAMP)
         legacy = state.to_draft()
-        for key in ("blinded_snapshot", "split_plane", "next_lesion_number"):
+        for key in ("blinded_snapshot", "next_lesion_number"):
             legacy.pop(key)
         legacy["lesions"][0].pop("differential_diagnosis")
         restored = ReviewState.from_draft(legacy)
@@ -97,7 +93,7 @@ class ReviewerAnnotationTests(unittest.TestCase):
 
     def test_legacy_blind_draft_remains_blind(self) -> None:
         legacy = annotated_state().to_draft()
-        for key in ("blinded_snapshot", "split_plane", "next_lesion_number"):
+        for key in ("blinded_snapshot", "next_lesion_number"):
             legacy.pop(key)
         restored = ReviewState.from_draft(legacy)
         self.assertIsNone(restored.blinded_snapshot)
@@ -134,18 +130,14 @@ class ReviewerAnnotationTests(unittest.TestCase):
         self.assertTrue(final["zero_myomas"])
         self.assertEqual(len(final["blinded_snapshot"]["lesions"]), 1)
 
-    def test_split_plane_normalizes_and_rejects_invalid_geometry(self) -> None:
-        plane = SplitPlane((1, 2, 3), (0, 3, 4))
-        self.assertEqual(plane.normal_ras, (0.0, 0.6, 0.8))
-        for origin, normal in (((0, 0, 0), (0, 0, 0)), ((float("nan"), 0, 0), (0, 0, 1)), ((0, 0, 0), (0, float("inf"), 0))):
-            with self.subTest(origin=origin, normal=normal), self.assertRaises(ValidationError):
-                SplitPlane(origin, normal)
-        state = annotated_state()
-        state.set_split_plane(plane.origin_ras, plane.normal_ras)
-        restored = ReviewState.from_draft(state.to_draft())
-        self.assertEqual(restored.split_plane, plane)
-        restored.clear_split_plane()
-        self.assertIsNone(restored.split_plane)
+    def test_a_saved_cervix_plane_is_rejected_but_an_empty_one_is_accepted(self) -> None:
+        payload = annotated_state().to_draft()
+        self.assertNotIn("split_plane", payload)
+        payload["split_plane"] = None
+        ReviewState.from_draft(payload)
+        payload["split_plane"] = {"origin_ras": [0, 0, 0], "normal_ras": [0, 0, 1]}
+        with self.assertRaises(ValidationError):
+            ReviewState.from_draft(payload)
 
     def test_completed_records_block_all_annotation_mutations(self) -> None:
         state = annotated_state()
@@ -157,8 +149,6 @@ class ReviewerAnnotationTests(unittest.TestCase):
             lambda: state.delete_lesion("M01"),
             lambda: state.set_figo("M01", {"kind": "standard", "type": 1}),
             lambda: state.set_differential_diagnosis("M01", "Revised"),
-            lambda: state.set_split_plane((0, 0, 0), (0, 0, 1)),
-            state.clear_split_plane,
         )
         for action in actions:
             with self.assertRaises(ValidationError):
@@ -181,14 +171,12 @@ class ReviewerStorageTests(unittest.TestCase):
             state.reveal(revealed_at=STAMP)
             storage.save_draft(state, b"synthetic segmentation")
             state.set_differential_diagnosis("M01", "Reviewer note")
-            state.set_split_plane((1, 2, 3), (0, 0, -1))
             storage.save_draft(state)
             restored = storage.load_draft()
             self.assertEqual(restored.lesions["M01"].differential_diagnosis, "Reviewer note")
-            self.assertEqual(restored.split_plane.normal_ras, (0, 0, -1))
             storage.publish_complete(restored.complete(completed_at=LATER), b"synthetic corrected labels")
             saved = storage.load_annotation()
-            self.assertEqual(saved["label_names"]["5"], "cervix")
+            self.assertEqual(set(saved["label_names"]), {"0", "1", "2", "3", "4"})
             self.assertEqual(saved["blinded_snapshot"]["lesions"][0]["figo"]["type"], 3)
             self.assertFalse(storage.draft_path.exists())
             with self.assertRaises(ImmutableCaseError):

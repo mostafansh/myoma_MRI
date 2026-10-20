@@ -87,7 +87,7 @@ from MyomaReviewLiteLib.roi import (  # noqa: E402
     pick_box_at_point,
     stable_public_id,
 )
-from MyomaReviewLiteLib.domain import CORRECTION_LABEL_NAMES, validate_correction_mask_values
+from MyomaReviewLiteLib.domain import validate_correction_mask_values
 from MyomaReviewLiteLib.view_tools import ReviewViewTools
 from MyomaReviewLiteLib.correction_tools import ReviewCorrectionTools
 
@@ -105,10 +105,8 @@ FIXED_SEGMENT_IDS = {
     2: "uterine_cavity",
     3: "myoma",
     4: "nabothian_cyst",
-    5: "cervix",
-    6: "cesarean_scar_niche",
 }
-FIXED_SEGMENT_NAMES = {segment_id: CORRECTION_LABEL_NAMES[value] for value, segment_id in FIXED_SEGMENT_IDS.items()}
+FIXED_SEGMENT_NAMES = {segment_id: LABEL_NAMES[value] for value, segment_id in FIXED_SEGMENT_IDS.items()}
 
 # A markups ROI draws its slice outline at a hardcoded 3 px that no display-node
 # property feeds, so the visible box is a model node instead: its slice
@@ -204,7 +202,7 @@ CASE_FILTER_STATUSES = {
 
 
 def validate_fixed_segment_ids(segment_ids: Iterable[str]) -> dict[str, list[str]]:
-    """Require the six named correction segments.
+    """Require the four named correction segments.
 
     The returned diagnostic is useful to a Slicer UI error message and keeps
     missing/added segments actionable instead of silently normalizing them.
@@ -583,8 +581,6 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         # can be repaired without discarding the imported label segments.
         legacy_placeholder_ids = []
         for label_value, stable_id in FIXED_SEGMENT_IDS.items():
-            if label_value > 4:
-                continue
             legacy_id = LABEL_NAMES[label_value]
             segment = segmentation.GetSegment(legacy_id)
             if segment is not None and str(segment.GetName()).lower() == stable_id.lower():
@@ -601,7 +597,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             for index in range(segmentation.GetNumberOfSegments())
         ]
         for label_value, stable_id in FIXED_SEGMENT_IDS.items():
-            label_name = CORRECTION_LABEL_NAMES[label_value]
+            label_name = LABEL_NAMES[label_value]
             found_id = stable_id if segmentation.GetSegment(stable_id) is not None else None
             aliases = {
                 label_name.lower(),
@@ -632,7 +628,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
                 raise ValidationError(f"normalized segment is unavailable: {stable_id}")
             segment.SetName(label_name)
             colors = {1: (0.85, 0.50, 0.50), 2: (1.0, 0.85, 0.2), 3: (0.2, 0.85, 0.3),
-                      4: (0.4, 0.7, 1.0), 5: (0.7, 0.4, 0.95), 6: (1.0, 0.45, 0.1)}
+                      4: (0.4, 0.7, 1.0)}
             segment.SetColor(*colors[label_value])
         actual = [segmentation.GetNthSegmentID(index) for index in range(segmentation.GetNumberOfSegments())]
         validate_fixed_segment_ids(actual)
