@@ -144,8 +144,8 @@ DEFAULT_CASE_FILTER = "all"
 # QSettings under "MyomaReviewLite/Shortcuts/<action id>" so the defaults
 # below only apply the first time a reviewer opens the module.
 SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] = (
-    ("undo", "Undo", "Ctrl+Z", "on_undo", "undo_button", "Undo"),
-    ("redo", "Redo", "Ctrl+Y", "on_redo", "redo_button", "Redo"),
+    ("undo", "Undo", "Ctrl+Z", "on_undo", None, None),
+    ("redo", "Redo", "Ctrl+Y", "on_redo", None, None),
     ("redo_alt", "Redo (alternate)", "Ctrl+Shift+Z", "on_redo", None, None),
     ("add_box", "Add myoma box", "", "on_add_box", "add_button", "Add myoma box"),
     ("redraw_box", "Redraw box", "", "on_redraw_box", "redraw_button", "Redraw"),
@@ -153,6 +153,7 @@ SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] 
     ("continue_to_figo", "Continue to FIGO typing", "", "on_continue_to_figo",
      "continue_to_figo_button", "Done boxing → continue to FIGO typing"),
     ("save_draft", "Save draft", "", "on_save_draft", "save_draft_button", "Save Draft"),
+    ("show_myomas", "Show segmented myomas", "V", "on_show_myomas", None, None),
 )
 SHORTCUT_SETTINGS_PREFIX = "MyomaReviewLite/Shortcuts/"
 # Mouse-button bindings, layered on the same action list as
@@ -1757,14 +1758,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # (Alt + left-drag in a slice view is the only way to adjust
         # window/level now, see AltDragWindowLevel), so there is nothing of
         # its to add to the layout here.
-        history_row = qt.QHBoxLayout()
-        self.undo_button = qt.QPushButton("Undo")
-        self.undo_button.connect("clicked()", self.on_undo)
-        self.redo_button = qt.QPushButton("Redo")
-        self.redo_button.connect("clicked()", self.on_redo)
-        history_row.addWidget(self.undo_button)
-        history_row.addWidget(self.redo_button)
-        annotation_layout.addLayout(history_row)
         self.reopen_button = qt.QPushButton("Reopen case for editing")
         self.reopen_button.toolTip = (
             "Return this completed case to AI correction. The published results are "
@@ -2190,8 +2183,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.segment_editor_widget.setReadOnly(read_only)
             if read_only:
                 self.segment_editor_widget.setActiveEffectByName("")
-        self.undo_button.enabled = not read_only and state is not None
-        self.redo_button.enabled = not read_only and state is not None
         self.correction_save_button.enabled = not read_only
         self.ddx_edit.enabled = not read_only
         self.correction_tools.refresh()
@@ -2529,6 +2520,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         )
         if answer == qt.QMessageBox.Yes:
             self.on_reveal_ai()
+
+    def on_show_myomas(self) -> None:
+        if self.logic.segmentation_node is None:
+            self._set_status("No segmentation is shown yet; reveal AI first.")
+            return
+        self.correction_tools.show_myomas()
 
     def on_save_draft(self) -> None:
         try:

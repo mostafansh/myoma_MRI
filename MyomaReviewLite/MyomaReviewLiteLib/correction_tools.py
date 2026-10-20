@@ -59,18 +59,7 @@ class ReviewCorrectionTools:
         self.opacity.connect("valueChanged(int)", self.update_overlays)
         overlays.addWidget(self.opacity)
         layout.addLayout(overlays)
-        self.show_myomas_button = qt.QPushButton("Show segmented myomas")
-        self.show_myomas_button.connect("clicked()", self.show_myomas)
-        layout.addWidget(self.show_myomas_button)
-        actions = qt.QHBoxLayout()
-        self.edit_buttons = []
-        for title, effect in (("Paint / add myoma", "Paint"), ("Fill chosen area", "Draw"), ("Erase myoma", "Erase")):
-            button = qt.QPushButton(title)
-            button.connect("clicked()", lambda _checked=False, name=effect: self.activate_myoma_effect(name))
-            actions.addWidget(button)
-            self.edit_buttons.append(button)
-        layout.addLayout(actions)
-        help_label = qt.QLabel("Fill chosen area: outline the myoma with Draw, then press Enter to fill the closed region. Paint another lesion into the same myoma label; there is no six-myoma limit.")
+        help_label = qt.QLabel("Press V to show the segmented myomas. Edit the myoma label with the Segment Editor below; there is no six-myoma limit.")
         help_label.wordWrap = True
         layout.addWidget(help_label)
 
@@ -137,10 +126,7 @@ class ReviewCorrectionTools:
         has_segmentation = self.logic.segmentation_node is not None
         self.show_check.enabled = has_segmentation
         self.opacity.enabled = has_segmentation
-        self.show_myomas_button.enabled = has_segmentation
         editable = self._editable() and has_segmentation
-        for button in self.edit_buttons:
-            button.enabled = editable
         self.plane_group.enabled = editable
         self.save_plane_button.enabled = editable and self.plane_node is not None and self.plane_node.GetIsPlaneValid()
         self.clear_plane_button.enabled = editable and (self.plane_node is not None or getattr(self.logic.state, "split_plane", None) is not None)
@@ -156,20 +142,6 @@ class ReviewCorrectionTools:
         display.SetOpacity2DFill(float(self.opacity.value) / 100.0)
         display.SetOpacity2DOutline(1.0)
 
-    def activate_myoma_effect(self, effect_name: str) -> None:
-        try:
-            self._require_editable()
-            editor = self.owner.segment_editor_widget
-            if editor is None or editor.effectByName(effect_name) is None:
-                raise RuntimeError(f"The {effect_name} effect is unavailable in this Slicer installation")
-            self.show_check.checked = True
-            self.logic.segmentation_node.GetDisplayNode().SetSegmentVisibility(self.logic.segment_ids[3], True)
-            editor.setCurrentSegmentID(self.logic.segment_ids[3])
-            editor.setActiveEffectByName(effect_name)
-            instruction = "Outline the area and press Enter to fill it." if effect_name == "Draw" else "Edit the selected myoma label in a slice view."
-            self.owner._set_status(f"{effect_name}: {instruction} Ctrl+Z undoes segmentation changes.")
-        except Exception as exc:
-            self.owner._show_error(str(exc))
 
     def _reference_matrix(self) -> Any:
         import numpy as np
@@ -195,7 +167,7 @@ class ReviewCorrectionTools:
             self.update_overlays()
             node.GetDisplayNode().SetSegmentVisibility(self.logic.segment_ids[3], True)
             if not len(positions):
-                self.owner._set_status("The myoma label is empty. Use Paint / add myoma or Fill chosen area to segment a lesion.")
+                self.owner._set_status("The myoma label is empty. Use the Segment Editor to segment a lesion.")
                 return
             # Choose an occupied voxel near the bounds center, so separated
             # lesions cannot leave all three views centered on empty space.

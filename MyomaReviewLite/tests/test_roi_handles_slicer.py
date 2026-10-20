@@ -775,6 +775,29 @@ def test_early_stops_sit_with_zero_myomas_on_the_boxing_page() -> None:
         widget.cleanup()
 
 
+def test_removed_buttons_are_gone_and_v_shows_the_myomas() -> None:
+    widget, _first, _second = _build_case("sub-00045")
+    try:
+        texts = {button.text for button in widget.parent.findChildren(qt.QPushButton)}
+        for removed in ("Undo", "Redo", "Show segmented myomas", "Paint / add myoma",
+                        "Fill chosen area", "Erase myoma"):
+            assert not any(text.startswith(removed) for text in texts), f"{removed} button is still there"
+        actions = {entry[0]: entry for entry in bundled_module.SHORTCUT_ACTIONS}
+        assert actions["show_myomas"][2] == "V"
+        assert actions["show_myomas"][3] == "on_show_myomas"
+        assert actions["undo"][2] == "Ctrl+Z" and actions["redo"][2] == "Ctrl+Y"
+        calls = []
+        widget.correction_tools.show_myomas = lambda: calls.append(True)
+        widget.on_show_myomas()
+        assert not calls, "V must do nothing before a segmentation exists"
+        widget.logic.segmentation_node = object()
+        widget.on_show_myomas()
+        assert calls == [True], "V did not show the segmented myomas"
+        widget.logic.segmentation_node = None
+    finally:
+        widget.cleanup()
+
+
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
@@ -807,6 +830,7 @@ TESTS = (
     test_only_a_completed_read_only_case_offers_reopen,
     test_navigation_stays_available_while_placing_a_box,
     test_early_stops_sit_with_zero_myomas_on_the_boxing_page,
+    test_removed_buttons_are_gone_and_v_shows_the_myomas,
 )
 
 failures = 0
