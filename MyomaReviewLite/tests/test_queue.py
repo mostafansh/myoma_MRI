@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from MyomaReviewLiteLib import (
+    CaseStorage,
     DatasetManifest,
     QueueStatus,
     QueueSummary,
@@ -155,6 +156,15 @@ class QueueSummaryTests(unittest.TestCase):
         self.assertIsNone(summary.next_unfinished("sub-00001"))
         self.assertEqual(summary.counts[QueueStatus.COMPLETE], 2)
 
+
+    def test_reopened_complete_case_is_in_progress(self) -> None:
+        manifest = self._manifest(("sub-00001",))
+        self._write_complete("sub-00001")
+        CaseStorage(self.output, "sub-00001").reopen_complete(b"segmentation")
+
+        summary = QueueSummary.scan(manifest)
+
+        self.assertIs(summary.entry("sub-00001").status, QueueStatus.IN_PROGRESS)
 
 if __name__ == "__main__":
     unittest.main()

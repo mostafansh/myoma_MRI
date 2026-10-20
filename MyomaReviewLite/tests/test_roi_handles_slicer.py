@@ -653,6 +653,72 @@ def test_handles_are_drawn_smaller_than_the_slicer_default() -> None:
         widget.cleanup()
 
 
+def _revealed_case(case_id: str) -> tuple[MyomaReviewLiteWidget, str, str]:
+    widget, first, second = _build_case(case_id)
+    widget.on_continue_to_figo()
+    for lesion_id in (first, second):
+        widget.logic.state.set_figo(lesion_id, {"kind": "standard", "type": 0})
+    widget.logic.state.reveal()
+    widget._boxing_stage_done = True
+    widget.refresh_ui()
+    return widget, first, second
+
+
+def test_after_reveal_the_reader_can_go_back_and_add_a_box() -> None:
+    widget, first, second = _revealed_case("sub-00040")
+    try:
+        assert widget.blind_stack.currentIndex == 1, "a revealed case should open on FIGO"
+        assert not widget.add_button.enabled
+        assert widget.back_to_boxing_button.enabled, "boxes cannot be reached after reveal"
+        blinded = widget.logic.state.blinded_snapshot
+        widget.on_back_to_boxing()
+        assert widget.blind_stack.currentIndex == 0
+        assert widget.add_button.enabled and widget.delete_button.enabled
+
+        widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
+        widget.save_roi_edit()
+        added = [item for item in widget.logic.state.lesions if item not in (first, second)]
+        assert added == ["M03"], f"the new box was not added: {sorted(widget.logic.state.lesions)}"
+        assert widget.logic.state.lesions["M03"].figo is None
+        assert widget.logic.state.blinded_snapshot == blinded, "the blinded record changed"
+        assert len(widget.logic.state.blinded_snapshot["lesions"]) == 2
+
+        widget.on_continue_to_figo()
+        assert widget.blind_stack.currentIndex == 1
+    finally:
+        widget.cleanup()
+
+
+def test_saving_the_last_figo_after_reveal_does_not_offer_reveal() -> None:
+    widget, first, second = _revealed_case("sub-00041")
+    offers = []
+    widget._offer_ai_reveal_after_last_figo = lambda: offers.append(True)
+    try:
+        widget.lesion_list.setCurrentRow(1)
+        widget.figo_kind_combo.setCurrentIndex(widget.figo_kind_combo.findData("standard"))
+        widget.on_apply_figo()
+        assert widget.logic.state.lesions[second].figo is not None
+        assert not offers, "the reveal prompt came back after AI was revealed"
+    finally:
+        widget.cleanup()
+
+
+def test_only_a_completed_read_only_case_offers_reopen() -> None:
+    widget, _first, _second = _revealed_case("sub-00042")
+    try:
+        assert widget.reopen_button.isHidden()
+        widget.logic.state = None
+        widget.logic.read_only = True
+        widget.logic.final_annotation = {"status": "wrong_image", "lesions": []}
+        widget.refresh_ui()
+        assert widget.reopen_button.isHidden(), "an early stop must not be reopened"
+        widget.logic.final_annotation = {"status": "complete", "lesions": []}
+        widget.refresh_ui()
+        assert not widget.reopen_button.isHidden()
+    finally:
+        widget.cleanup()
+
+
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
@@ -680,6 +746,9 @@ TESTS = (
     test_the_revealed_box_outline_follows_a_handle_drag,
     test_outline_nodes_stay_out_of_the_data_tree_and_saved_scenes,
     test_handles_are_drawn_smaller_than_the_slicer_default,
+    test_after_reveal_the_reader_can_go_back_and_add_a_box,
+    test_saving_the_last_figo_after_reveal_does_not_offer_reveal,
+    test_only_a_completed_read_only_case_offers_reopen,
 )
 
 failures = 0

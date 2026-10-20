@@ -428,6 +428,18 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         self.refresh_queue()
         return annotation
 
+    def reopen_complete(self, segmentation_source: str | Path | bytes | bytearray | None = None) -> ReviewState:
+        """Return the open completed case to the post-reveal correction phase."""
+
+        if self.storage is None or not self.read_only:
+            raise StorageError("a completed case must be open")
+        state = self.storage.reopen_complete(segmentation_source)
+        self.state = state
+        self.final_annotation = None
+        self.read_only = False
+        self.refresh_queue()
+        return state
+
     def load_registered_volumes(self) -> None:
         if not SLICER_AVAILABLE or self.manifest is None:
             return
@@ -1743,6 +1755,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         history_row.addWidget(self.undo_button)
         history_row.addWidget(self.redo_button)
         annotation_layout.addLayout(history_row)
+        self.reopen_button = qt.QPushButton("Reopen case for editing")
+        self.reopen_button.toolTip = (
+            "Return this completed case to AI correction. The published results are "
+            "backed up, and the case must be completed again."
+        )
+        self.reopen_button.connect("clicked()", self.on_reopen_case)
+        self.reopen_button.visible = False
+        annotation_layout.addWidget(self.reopen_button)
 
         self.page_stack = qt.QStackedWidget()
         annotation_layout.addWidget(self.page_stack, 1)
@@ -2120,8 +2140,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._refresh_case_list()
 
     def _load_case(self, manifest_path: Path, case_id: str | None) -> None:
-        self._boxing_stage_done = False
         self.logic.open_manifest(manifest_path, case_id=case_id)
+        self._boxing_stage_done = self.logic.phase != ReviewPhase.BLIND.value
         self.shutdown_saved = False
         self.save_coordinator.clear_dirty()
         self._refresh_case_list()
@@ -2163,6 +2183,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.correction_save_button.enabled = not read_only
         self.ddx_edit.enabled = not read_only
         self.correction_tools.refresh()
+        self.reopen_button.visible = bool(
+            read_only and (self.logic.final_annotation or {}).get("status") == "complete"
+        )
         if state is None:
             if not self.logic.read_only or self.logic.final_annotation is None:
                 return
@@ -2226,10 +2249,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.lesion_list.blockSignals(False)
         self.figo_lesion_combo.blockSignals(False)
         locked = read_only or state.phase not in (ReviewPhase.BLIND.value, ReviewPhase.AI_REVEALED.value)
-        # Boxing and FIGO typing are separate stages of the blind page: once
-        # the reader is past BLIND phase (or has explicitly moved on), the
-        # boxing controls stay locked and the FIGO sub-page is shown.
-        in_figo_stage = self._boxing_stage_done or state.phase != ReviewPhase.BLIND.value
+        # Boxing and FIGO typing are separate stages of the annotation page.
+        # A revealed case opens on FIGO, but the reader may go back to the
+        # boxes to add, redraw or delete one; the blinded snapshot is frozen.
+        in_figo_stage = self._boxing_stage_done
         self.blind_stack.setCurrentIndex(1 if in_figo_stage else 0)
         for control in (self.add_button, self.redraw_button, self.delete_button, self.zero_check):
             control.enabled = not locked and not in_figo_stage
@@ -2237,7 +2260,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             control.enabled = not locked
         self.zero_check.enabled = not locked and not in_figo_stage and not state.lesions
         self.continue_to_figo_button.enabled = not locked and not in_figo_stage and bool(state.zero_myomas or state.lesions)
-        self.back_to_boxing_button.enabled = not locked and in_figo_stage and state.phase == ReviewPhase.BLIND.value
+        self.back_to_boxing_button.enabled = not locked and in_figo_stage
         self.reveal_button.enabled = bool(state.can_reveal)
         self.reveal_button.visible = state.phase == ReviewPhase.BLIND.value
         self.return_correction_button.visible = state.phase != ReviewPhase.BLIND.value
@@ -2481,7 +2504,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             if 0 <= position < len(ordered_ids) - 1:
                 self.lesion_list.setCurrentRow(position + 1)
             self.refresh_ui()
-            if position == len(ordered_ids) - 1:
+            if position == len(ordered_ids) - 1 and self.logic.phase == ReviewPhase.BLIND.value:
                 self._offer_ai_reveal_after_last_figo()
         except Exception as exc:
             self._show_error(str(exc))
@@ -2672,6 +2695,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # dragged box must be committed while the phase is still blind.
             self._flush_pending_roi_drag()
             self.logic.reveal_ai()
+            self._boxing_stage_done = True
             self.annotation_undo.clear()
             self.annotation_redo.clear()
             self.logic.load_ai_mask()
@@ -2731,6 +2755,43 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._advance_after_finalization("Completed labels and annotations saved.")
         except Exception as exc:
             self._show_error(f"Completion failed: {exc}")
+        finally:
+            if source is not None:
+                try:
+                    source.unlink()
+                except OSError:
+                    pass
+
+    def on_reopen_case(self) -> None:
+        if not self.logic.read_only or self.logic.manifest_source is None:
+            return
+        answer = qt.QMessageBox.question(
+            slicer.util.mainWindow(),
+            "Reopen completed case",
+            "Reopen this case to edit myoma boxes, FIGO and labels? "
+            "The published results are backed up, and the case stays unfinished "
+            "until you complete it again.",
+        )
+        if answer != qt.QMessageBox.Yes:
+            return
+        source: Path | None = None
+        try:
+            # The read-only case shows the saved corrected labels; carrying them
+            # over as the draft segmentation keeps the earlier corrections.
+            if self.logic.segmentation_node is not None and self.logic.storage is not None:
+                source = self.logic.storage.case_directory / ".reopen.tmp.seg.nrrd"
+                if not slicer.util.saveNode(self.logic.segmentation_node, str(source)):
+                    raise RuntimeError("the saved labels could not be carried over")
+            self.logic.reopen_complete(source)
+            manifest_source = self.logic.manifest_source
+            case_id = self.logic.case_id
+            self._teardown_current_case()
+            self._load_case(manifest_source, case_id)
+            self._set_status("Case reopened. Complete it again when your edits are done.")
+        except Exception as exc:
+            traceback.print_exc()
+            self._show_error(f"Case could not be reopened: {exc}")
+            self._refresh_case_list()
         finally:
             if source is not None:
                 try:

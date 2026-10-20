@@ -222,5 +222,66 @@ class ReviewerStorageTests(unittest.TestCase):
             self.assertFalse(storage.corrected_labelmap_path.exists())
 
 
+def completed_storage(root: str) -> CaseStorage:
+    storage = CaseStorage(root, "case")
+    state = annotated_state()
+    state.reveal(revealed_at=STAMP)
+    state.add_lesion((7, 8, 9), (1, 1, 1))
+    state.set_figo("M02", {"kind": "standard", "type": 5})
+    storage.save_draft(state, b"draft segmentation")
+    storage.publish_complete(state.complete(completed_at=LATER), b"corrected labels")
+    return storage
+
+
+class ReopenCompletedCaseTests(unittest.TestCase):
+    def test_reopen_backs_up_results_and_resumes_after_reveal(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            storage = completed_storage(root)
+            original = storage.annotation_path.read_bytes()
+            state = storage.reopen_complete(b"reopened segmentation")
+            self.assertEqual(state.phase, "ai_revealed")
+            self.assertIsNone(state.completed_at)
+            self.assertEqual(state.ai_revealed_at, STAMP)
+            self.assertEqual(sorted(state.lesions), ["M01", "M02"])
+            self.assertEqual(len(state.blinded_snapshot["lesions"]), 1)
+            self.assertFalse(storage.is_complete)
+            self.assertFalse(storage.corrected_labelmap_path.exists())
+            self.assertEqual(storage.draft_segmentation_path.read_bytes(), b"reopened segmentation")
+            self.assertEqual(storage.load_draft().to_draft(), state.to_draft())
+            backups = list((storage.case_directory / "reopened").iterdir())
+            self.assertEqual(len(backups), 1)
+            self.assertEqual((backups[0] / "annotations.reopened.json").read_bytes(), original)
+            self.assertEqual(
+                (backups[0] / "corrected_labels.reopened.nii.gz").read_bytes(), b"corrected labels"
+            )
+
+    def test_reopened_case_accepts_edits_and_completes_again(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            storage = completed_storage(root)
+            state = storage.reopen_complete()
+            new_id = state.add_lesion((3, 3, 3), (2, 2, 2))
+            self.assertEqual(new_id, "M03")
+            state.set_figo(new_id, {"kind": "standard", "type": 2})
+            state.set_figo("M01", {"kind": "standard", "type": 4})
+            storage.save_draft(state)
+            storage.publish_complete(state.complete(), b"second labels")
+            saved = storage.load_annotation()
+            self.assertEqual(saved["ai_revealed_at"], STAMP)
+            self.assertEqual(saved["blinded_snapshot"]["lesions"][0]["figo"]["type"], 3)
+            self.assertEqual([item["lesion_id"] for item in saved["lesions"]], ["M01", "M02", "M03"])
+            self.assertEqual(saved["lesions"][0]["figo"]["type"], 4)
+
+    def test_reopen_refuses_early_stop_and_incomplete_cases(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            storage = CaseStorage(root, "case")
+            with self.assertRaises(StorageError):
+                storage.reopen_complete()
+            state = ReviewState.new("study", "reader", "case", started_at=STAMP)
+            storage.publish_early_stop(state.early_stop("wrong_image", completed_at=LATER))
+            with self.assertRaises(ImmutableCaseError):
+                storage.reopen_complete()
+            self.assertTrue(storage.is_complete)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -609,6 +609,24 @@ class ReviewState:
         state.validate()
         return state
 
+    @classmethod
+    def reopen_from_annotation(cls, value: Mapping[str, Any]) -> "ReviewState":
+        """Turn a completed annotation back into an editable post-reveal state.
+
+        The blinded snapshot and reveal timestamp carry over unchanged, so the
+        reopened case still records what the reader said before seeing AI.
+        """
+
+        if value.get("status") != "complete":
+            raise ValidationError("only completed reviews can be reopened")
+        payload = dict(value)
+        payload["phase"] = ReviewPhase.AI_REVEALED.value
+        payload["completed_at"] = None
+        state = cls.from_draft(payload)
+        if state.ai_revealed_at is None or state.blinded_snapshot is None:
+            raise ValidationError("completed review has no AI reveal record")
+        return state
+
     @property
     def active_lesions(self) -> list[Lesion]:
         return sorted(self.lesions.values(), key=lambda item: int(item.lesion_id[1:]))
