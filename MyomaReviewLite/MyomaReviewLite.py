@@ -130,6 +130,11 @@ ROI_PICK_TOLERANCE_MM = 1.0
 # A revealed box keeps its selection when a handle just outside it is clicked.
 ROI_ACTIVE_PICK_TOLERANCE_MM = 6.0
 
+# The Annotation tab's post-reveal tabs, and the page_stack page each shows
+# (page 0 is the myoma/FIGO page, page 1 the Segment Editor correction page).
+PAGE_TAB_TITLES = ("Segmentation", "FIGO")
+PAGE_FOR_TAB = (1, 0)
+
 # Case-browser filter/search, ported from the sibling BratsReviewLite
 # pilot's "Subjects" tab pattern so both pilots pick a case the same way.
 CASE_FILTERS = (
@@ -857,7 +862,10 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
                 except Exception:
                     actor.SetVisibility(False)
                     continue
-                visible = slice_cuts_bounds(slice_node, bounds)
+                # A box hidden while another myoma is selected takes its label along.
+                visible = slice_cuts_bounds(slice_node, bounds) and not self.widget._roi_hidden_by_focus(
+                    entry["public_id"]
+                )
                 actor.SetVisibility(bool(visible and self.enabled))
                 if visible:
                     actor.SetDisplayPosition(8, 12 + row * 22)
@@ -1828,18 +1836,18 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # window/level now, see AltDragWindowLevel), so there is nothing of
         # its to add to the layout here.
 
-        # --- Annotation tab: step indicator, case comment, then the page ---
-        self.step_labels: list[Any] = []
-        step_row = qt.QHBoxLayout()
-        step_row.setSpacing(8)
-        for number, text_value in ((1, "Annotate"), (2, "Correct AI")):
-            if number > 1:
-                step_row.addWidget(theme.set_role(qt.QFrame(), "divider"), 1)
-            label = qt.QLabel()
-            label.textFormat = qt.Qt.RichText
-            step_row.addWidget(label)
-            self.step_labels.append((label, number, text_value))
-        annotation_layout.addLayout(step_row)
+        # --- Annotation tab: page tabs, case comment, then the page ---
+        # Once AI is revealed the two pages are two views of one step, so they
+        # get plain tabs; switching leaves the slice views (and mask) alone.
+        # Before reveal there is only the annotation page and no tab bar.
+        self.page_tabs = qt.QTabBar()
+        self.page_tabs.drawBase = False
+        self.page_tabs.expanding = False
+        for text_value in PAGE_TAB_TITLES:
+            self.page_tabs.addTab(text_value)
+        self.page_tabs.visible = False
+        self.page_tabs.connect("currentChanged(int)", self._on_page_tab_changed)
+        annotation_layout.addWidget(self.page_tabs)
 
         self.reopen_button = qt.QPushButton("Reopen case for editing")
         self.reopen_button.toolTip = (
@@ -1884,6 +1892,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.lesion_list.setMouseTracking(True)
         self.lesion_list.connect("currentRowChanged(int)", self._on_lesion_row_changed)
         self.lesion_list.connect("itemClicked(QListWidgetItem*)", self._on_lesion_item_clicked)
+        self._press_hit_current_row = False
+        self._lesion_list_filter = self._make_lesion_list_filter()
+        self.lesion_list.viewport().installEventFilter(self._lesion_list_filter)
+        list_escape = qt.QShortcut(qt.QKeySequence("Esc"), self.lesion_list)
+        list_escape.context = qt.Qt.WidgetShortcut
+        list_escape.connect("activated()", self.clear_lesion_selection)
         blind_layout.addWidget(self.lesion_list, 1)
         actions = qt.QHBoxLayout()
         self.add_button = theme.set_role(qt.QPushButton("＋  Add myoma box"), "ghost")
@@ -1908,10 +1922,16 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         roi_transaction_actions.addWidget(self.cancel_roi_button)
         blind_layout.addWidget(self.roi_edit_bar)
         self._set_roi_edit_buttons(False)
-        blind_layout.addWidget(theme.set_role(qt.QLabel("NOTHING TO BOX?"), "section"))
+        # Only asked before reveal; once AI is shown the answer is settled.
+        self.nothing_to_box_section = qt.QWidget()
+        nothing_layout = qt.QVBoxLayout(self.nothing_to_box_section)
+        nothing_layout.setContentsMargins(0, 0, 0, 0)
+        nothing_layout.setSpacing(6)
+        blind_layout.addWidget(self.nothing_to_box_section)
+        nothing_layout.addWidget(theme.set_role(qt.QLabel("NOTHING TO BOX?"), "section"))
         self.zero_check = qt.QCheckBox("Confirm zero myomas")
         self.zero_check.connect("toggled(bool)", self.on_zero_toggled)
-        blind_layout.addWidget(self.zero_check)
+        nothing_layout.addWidget(self.zero_check)
         # Early stops answer "is there anything to box at all", so they sit
         # with the zero-myoma confirmation.
         stops = qt.QHBoxLayout()
@@ -1922,7 +1942,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             button.connect("clicked()", lambda _checked=False, value=status: self.on_early_stop(value))
             stops.addWidget(button, 1)
             self.early_stop_buttons.append(button)
-        blind_layout.addLayout(stops)
+        nothing_layout.addLayout(stops)
         blind_layout.addWidget(theme.set_role(qt.QFrame(), "divider"))
         self.reveal_hint = theme.set_role(qt.QLabel(""), "warning")
         self.reveal_hint.wordWrap = True
@@ -1933,12 +1953,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.save_draft_button.connect("clicked()", self.on_save_draft)
         self.reveal_button = theme.set_role(qt.QPushButton("Reveal AI  →"), "primary")
         self.reveal_button.connect("clicked()", self.on_reveal_ai)
-        self.return_correction_button = theme.set_role(qt.QPushButton("Return to segmentation  →"), "primary")
-        self.return_correction_button.connect("clicked()", lambda: self._show_page(1))
-        self.return_correction_button.visible = False
         lower.addWidget(self.save_draft_button)
         lower.addWidget(self.reveal_button, 1)
-        lower.addWidget(self.return_correction_button, 1)
         blind_layout.addLayout(lower)
         self.page_stack.addWidget(blind)
 
@@ -1947,11 +1963,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         correction_layout.setContentsMargins(0, 0, 0, 0)
         correction_layout.setSpacing(6)
         correction_actions = qt.QHBoxLayout()
-        self.edit_annotations_button = qt.QPushButton("←  Myomas / FIGO / Ddx")
-        self.edit_annotations_button.connect("clicked()", lambda: self._show_page(0))
-        correction_actions.addWidget(self.edit_annotations_button, 1)
         self.correction_save_button = qt.QPushButton("Save draft")
         self.correction_save_button.connect("clicked()", self.on_save_draft)
+        correction_actions.addStretch(1)
         correction_actions.addWidget(self.correction_save_button)
         correction_layout.addLayout(correction_actions)
         self.correction_comment_slot = qt.QVBoxLayout()
@@ -1970,7 +1984,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.complete_button.connect("clicked()", self.on_complete)
         correction_layout.addWidget(self.complete_button)
         self.page_stack.addWidget(correction)
-        self.figo_card = FigoCard(self._on_card_figo, self._on_card_text, self._on_card_closed)
+        self.figo_card = FigoCard(
+            self._on_card_figo, self._on_card_text, self._on_card_closed, self._position_figo_card
+        )
         # The card lives on a slice view, outside this panel's stylesheet.
         self.figo_card.widget.setStyleSheet(theme.CARD_QSS)
         # The per-view Esc shortcuts (_bind_card_escape_shortcuts) overlap the
@@ -1999,8 +2015,26 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.myoma_section_label.text = f"MYOMAS · {count}" if count else "MYOMAS"
 
     def _on_page_changed(self) -> None:
-        self._refresh_steps()
+        self._refresh_page_tabs()
         self._place_comment_bar()
+
+    def _refresh_page_tabs(self) -> None:
+        """Show the Segmentation / FIGO tabs once AI is revealed, on the current page."""
+
+        if not hasattr(self, "page_tabs"):
+            return
+        self.page_tabs.visible = self.logic.segmentation_node is not None
+        tab = PAGE_FOR_TAB.index(self.page_stack.currentIndex)
+        if self.page_tabs.currentIndex != tab:
+            self.page_tabs.blockSignals(True)
+            self.page_tabs.setCurrentIndex(tab)
+            self.page_tabs.blockSignals(False)
+
+    def _on_page_tab_changed(self, tab: int) -> None:
+        if 0 <= tab < len(PAGE_FOR_TAB):
+            self._show_page(PAGE_FOR_TAB[tab])
+        # A refused switch (a box still being placed) puts the tab back.
+        self._refresh_page_tabs()
 
     def _place_comment_bar(self) -> None:
         """Put the case comment bar under the visible page's main actions."""
@@ -2065,22 +2099,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 return False
 
         return _CommentOverlayFilter()
-
-    def _refresh_steps(self) -> None:
-        """Highlight the current step: 1 Annotate, 2 Correct AI."""
-
-        if not hasattr(self, "step_labels"):
-            return
-        current = 2 if self.page_stack.currentIndex == 1 else 1
-        for label, number, text_value in self.step_labels:
-            active = number == current
-            dot_bg = theme.ACCENT if active else theme.SURFACE
-            dot_fg = "white" if active else theme.MUTED
-            text_colour = theme.TEXT if active else theme.MUTED
-            label.text = (
-                f"<span style='background:{dot_bg}; color:{dot_fg};'>&nbsp;{number}&nbsp;</span>"
-                f"&nbsp;<span style='color:{text_colour};'>{text_value}</span>"
-            )
 
     def _focus_annotation_tab(self) -> None:
         """Switch to the Annotation tab once a case is loaded and ready.
@@ -2170,7 +2188,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.close_figo_card()
         if self.segment_editor_widget is not None:
             self.segment_editor_widget.setActiveEffectByName("")
+        changed = index != self.page_stack.currentIndex
         self.page_stack.setCurrentIndex(index)
+        if changed and index == 0:
+            # The FIGO page opens on every box; picking one narrows to it.
+            self.clear_lesion_selection()
         self._set_roi_visibility(index == 0 or bool(self.show_roi_check.checked))
 
     def _remember_annotation(self) -> None:
@@ -2464,10 +2486,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.reopen_button.visible = bool(
             read_only and (self.logic.final_annotation or {}).get("status") == "complete"
         )
+        # Whether there is anything to box is settled once AI is shown.
+        self.nothing_to_box_section.visible = self.logic.segmentation_node is None
+        self._refresh_page_tabs()
         if state is None:
             if not self.logic.read_only or self.logic.final_annotation is None:
                 return
-            # Filled on load: picking row 0 here must not pull the views anywhere.
+            # Filled on load; keeping the row here must not pull the views anywhere.
+            selected_id = self._selected_lesion_id()
             self.lesion_list.blockSignals(True)
             self.lesion_list.clear()
             for lesion in self.logic.final_annotation.get("lesions", []):
@@ -2477,8 +2503,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 self._style_lesion_item(item, lesion_id, lesion.get("figo"))
                 self.lesion_list.addItem(item)
             self._refresh_myoma_count()
-            if self.lesion_list.count:
-                self.lesion_list.setCurrentRow(0)
+            self.lesion_list.setCurrentRow(self._lesion_row(selected_id) if selected_id else -1)
             self.lesion_list.blockSignals(False)
             for control in (
                 self.add_button,
@@ -2491,7 +2516,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             ):
                 control.enabled = False
             self.reveal_button.toolTip = ""
-            self.return_correction_button.visible = self.logic.segmentation_node is not None
             self._refresh_roi_arming()
             if self.roi_overlay is not None:
                 self.roi_overlay.refresh()
@@ -2509,9 +2533,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._style_lesion_item(item, lesion.lesion_id, lesion.to_dict().get("figo"))
             self.lesion_list.addItem(item)
         self._refresh_myoma_count()
-        if self.lesion_list.count:
-            selected_index = self._lesion_row(selected_id) if selected_id else 0
-            self.lesion_list.setCurrentRow(max(0, selected_index))
+        # Nothing is picked for the reader: with no myoma selected every box shows.
+        self.lesion_list.setCurrentRow(self._lesion_row(selected_id) if selected_id else -1)
         self.lesion_list.blockSignals(False)
         locked = read_only or state.phase not in (ReviewPhase.BLIND.value, ReviewPhase.AI_REVEALED.value)
         # One page before and after reveal: boxes can still be added, redrawn
@@ -2528,7 +2551,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.reveal_button.visible = state.phase == ReviewPhase.BLIND.value
         self.reveal_hint.text = self.reveal_button.toolTip
         self.reveal_hint.visible = bool(missing) and self.reveal_button.visible
-        self.return_correction_button.visible = state.phase != ReviewPhase.BLIND.value
         self.save_draft_button.enabled = not self.logic.read_only
         self.complete_button.enabled = state.phase == ReviewPhase.AI_REVEALED.value
         for button in self.early_stop_buttons:
@@ -2581,6 +2603,42 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.lesion_list.setCurrentRow(row)
         self.lesion_list.blockSignals(False)
 
+    def clear_lesion_selection(self) -> None:
+        """Select no myoma: no row, no box in hand, no card; every box shows again."""
+
+        if self._has_unresolved_roi():
+            return
+        self.close_figo_card()
+        self.lesion_list.blockSignals(True)
+        self.lesion_list.setCurrentRow(-1)
+        self.lesion_list.clearSelection()
+        self.lesion_list.blockSignals(False)
+        self.set_active_roi(None)
+
+    def _make_lesion_list_filter(self) -> Any:
+        """Note, before Qt moves the current row, whether a press hit that row.
+
+        A click on the row that is already selected (with its card up), or on
+        the empty list below the rows, deselects. itemClicked alone cannot
+        tell a click on the current row from one that just made it current.
+        """
+
+        widget = self
+
+        class _LesionListFilter(qt.QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == qt.QEvent.MouseButtonPress:
+                    item = widget.lesion_list.itemAt(event.pos())
+                    widget._press_hit_current_row = (
+                        item is not None and widget.lesion_list.row(item) == widget.lesion_list.currentRow
+                    )
+                    if item is None and widget._lesions_pickable():
+                        widget.clear_lesion_selection()
+                        return True
+                return False
+
+        return _LesionListFilter()
+
     def _lesions_pickable(self) -> bool:
         """Whether a list pick may select a box: a case is open and no box is being placed."""
 
@@ -2600,17 +2658,22 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.open_figo_card(lesion_id)
 
     def _on_lesion_item_clicked(self, item: Any) -> None:
-        """Reopen the card when the reader clicks the row that is already current.
+        """A click on the row that was already current toggles it.
 
-        currentRowChanged does not fire then, so a card closed with Esc could
-        otherwise not be brought back from the list.
+        With its card up, the click deselects (every box shows again). With
+        the card closed by Esc it reopens the card: currentRowChanged does not
+        fire then, so the card could otherwise not be brought back.
         """
 
+        hit_current = self._press_hit_current_row
+        self._press_hit_current_row = False
         if item is None or not self._lesions_pickable():
             return
         lesion_id = str(item.data(qt.Qt.UserRole))
         card = self.figo_card
         if card is not None and card.is_open and card.lesion_id == lesion_id:
+            if hit_current:
+                self.clear_lesion_selection()
             return
         self._reveal_lesion(lesion_id)
         self.open_figo_card(lesion_id)
@@ -3330,13 +3393,23 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             outline = self.roi_outline_nodes.get(identifier)
             if outline is not None:
                 self._style_outline_display(outline, bold=selected)
-                outline.SetDisplayVisibility(bool(self.roi_boxes_visible and not hide_all))
+                outline.SetDisplayVisibility(
+                    bool(self.roi_boxes_visible and not hide_all and not self._roi_hidden_by_focus(identifier))
+                )
+        if self.roi_overlay is not None:
+            self.roi_overlay.refresh()
         # The cursor is the corner-drag affordance, so it only holds for the
         # initial drag; once the square is set and handle fine-tuning takes
         # over (roi_draft_node exists, draw_tool is no longer active) the
         # normal cursor comes back even though the other boxes stay hidden.
         self._update_box_edit_cursor(bool(self.draw_tool is not None and self.draw_tool.active))
         self._position_figo_card()
+
+    def _roi_hidden_by_focus(self, identifier: str) -> bool:
+        """On the FIGO page a selected myoma is shown alone; with none selected, all show."""
+
+        on_figo_page = hasattr(self, "page_stack") and self.page_stack.currentIndex == 0
+        return bool(on_figo_page and self.active_roi_id is not None and identifier != self.active_roi_id)
 
     def _box_placement_cursor(self) -> Any:
         """A small filled yellow dot: shown while placing or redrawing a box."""
@@ -3480,6 +3553,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         for lesion_id, node in self.roi_nodes.items():
             if node.GetScene() is not slicer.mrmlScene:
                 continue
+            # A box hidden behind the selected one cannot be clicked: a click
+            # beside the selected box deselects, and every box shows again.
+            if self._roi_hidden_by_focus(lesion_id):
+                continue
             geometry = self._roi_geometry_or_none(node)
             if geometry is not None:
                 candidates.append((lesion_id, geometry))
@@ -3501,8 +3578,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 return
         self.set_active_roi(lesion_id)
         if lesion_id is None:
-            # Empty image: the deselected box takes its card with it.
-            self.close_figo_card()
+            # Empty image: the deselected box takes its card and row with it.
+            self.clear_lesion_selection()
             return
         self._select_lesion_row(lesion_id)
         self.open_figo_card(lesion_id, view_name)
@@ -3972,6 +4049,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.exit()
             if hasattr(self, "comment_toggle"):
                 self._set_comment_overlay_tracking(False)
+            if hasattr(self, "_lesion_list_filter"):
+                try:
+                    self.lesion_list.viewport().removeEventFilter(self._lesion_list_filter)
+                except Exception:
+                    pass
             for shortcut in self.shortcuts:
                 shortcut.deleteLater()
             self.shortcuts = []

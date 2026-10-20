@@ -88,6 +88,7 @@ QCheckBox {{ color: {TEXT}; spacing: 8px; }}
 """
 
 CARD_QSS = f"""
+QFrame#MyomaFigoCard, QFrame#MyomaFigoCard QWidget {{ font-family: "Segoe UI"; }}
 QFrame#MyomaFigoCard {{ background: {SURFACE}; border: 1px solid #454b54; border-radius: 8px; }}
 QFrame#MyomaFigoCard QLabel {{ color: {TEXT}; font-weight: 600; background: transparent; }}
 QFrame#MyomaFigoCard QToolButton {{ background: #363b42; color: {TEXT}; border: none;
@@ -100,7 +101,10 @@ QFrame#MyomaFigoCard QToolButton#figo_close:hover {{ color: {TEXT}; }}
 QFrame#MyomaFigoCard QToolButton:disabled {{ color: #6b717a; }}
 QFrame#MyomaFigoCard QLineEdit, QFrame#MyomaFigoCard QComboBox {{ background: {FIELD};
     color: {TEXT}; border: 1px solid {BORDER}; border-radius: 5px; padding: 4px 6px; }}
-QFrame#MyomaFigoCard QLineEdit:focus {{ border-color: {ACCENT}; }}
+QFrame#MyomaFigoCard QLineEdit:focus, QFrame#MyomaFigoCard QComboBox:focus {{ border-color: {ACCENT}; }}
+QFrame#MyomaFigoCard QComboBox QAbstractItemView {{ background: {FIELD}; color: {TEXT};
+    border: 1px solid {BORDER}; selection-background-color: {ACCENT}; selection-color: white;
+    outline: none; }}
 """
 
 

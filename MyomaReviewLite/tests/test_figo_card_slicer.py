@@ -167,7 +167,29 @@ def test_reclicking_the_selected_kind_keeps_its_choices():
     assert figo == [], figo
 
 
+def test_extra_rows_grow_the_card_instead_of_squashing_the_buttons():
+    resizes = []
+    card = FigoCard(lambda *a: None, lambda *a: None, lambda: None, on_resize=lambda: resizes.append(1))
+    parent = qt.QWidget()
+    parent.resize(400, 400)
+    parent.show()
+    card.open(parent, "M01", None, "", "", False)
+    slicer.app.processEvents()
+    button = _child(card, qt.QToolButton, "figo_type_3")
+    button_height = button.sizeHint.height()
+    closed_height = card.widget.height
+    _child(card, qt.QToolButton, "figo_hybrid").click()
+    slicer.app.processEvents()
+    assert card.widget.height > closed_height, "the card did not grow for the hybrid rows"
+    assert button.height >= button_height, f"type buttons squashed to {button.height}px"
+    assert resizes, "the owner was not told to re-place the grown card"
+    _child(card, qt.QToolButton, "figo_type_3").click()
+    slicer.app.processEvents()
+    assert card.widget.height == closed_height, "the card did not shrink back"
+
+
 TESTS = (
+    test_extra_rows_grow_the_card_instead_of_squashing_the_buttons,
     test_wheel_over_an_unfocused_list_does_not_save,
     test_close_hides_even_when_saving_text_fails,
     test_reclicking_the_selected_kind_keeps_its_choices,

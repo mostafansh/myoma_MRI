@@ -129,11 +129,7 @@ def test_clicking_a_box_reveals_only_that_box() -> None:
         assert not quiet.GetDisplayNode().GetHandlesInteractive()
         assert quiet.GetLocked()
         quiet_outline = widget.roi_outline_nodes[first]
-        assert quiet_outline.GetDisplayVisibility()
-        assert (
-            quiet_outline.GetDisplayNode().GetSliceIntersectionThickness()
-            == ROI_OUTLINE_THICKNESS_PX
-        )
+        assert not quiet_outline.GetDisplayVisibility(), "a selected myoma must show alone"
         assert widget._selected_lesion_id() == second, "the click did not select the row"
 
         # A click outside every box clears the selection again.
@@ -209,7 +205,7 @@ def test_after_reveal_the_annotation_page_keeps_click_to_edit() -> None:
         widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
         assert widget.active_roi_id == second, "a box can no longer be picked after reveal"
         assert widget.roi_nodes[second].GetDisplayNode().GetHandlesInteractive()
-        assert widget.roi_outline_nodes[first].GetDisplayVisibility()
+        assert not widget.roi_outline_nodes[first].GetDisplayVisibility()
     finally:
         widget.cleanup()
 
@@ -273,13 +269,18 @@ def test_saving_while_a_box_is_in_hand_keeps_it_bold() -> None:
         widget.cleanup()
 
 
-def test_a_click_still_switches_to_a_box_nested_in_the_revealed_one() -> None:
+def test_a_box_nested_in_the_revealed_one_is_reached_by_deselecting_first() -> None:
     widget, first, second = _build_case("sub-00016")
     try:
         widget.on_view_clicked("MyomaLiteAxial", BIG_BOX_INSIDE)
         assert widget.active_roi_id == first
-        # M02 lies wholly inside M01, so the keep-the-selection guard must not
-        # swallow an ordinary click on it.
+        # M02 lies wholly inside M01 and is hidden while M01 is selected, so a
+        # click on where it would be stays on M01 ...
+        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
+        assert widget.active_roi_id == first, "a hidden box was picked"
+        # ... until empty image clears the selection and every box shows again.
+        widget.on_view_clicked("MyomaLiteAxial", FAR_OUTSIDE)
+        assert widget.active_roi_id is None
         widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
         assert widget.active_roi_id == second, "a nested box could never be selected"
 
@@ -290,13 +291,11 @@ def test_a_click_still_switches_to_a_box_nested_in_the_revealed_one() -> None:
         widget.on_view_clicked("MyomaLiteAxial", just_outside)
         assert widget.active_roi_id == second, "the drag released onto the outer box"
 
-        # A later, ordinary click must not inherit that earlier, still-unsaved
-        # drag. This point sits inside the 6 mm halo that the guard uses, so it
-        # only reaches M01 when the press has re-baselined.
+        # A later, ordinary click must not inherit that earlier, still-unsaved drag.
         widget.begin_view_click()
         assert widget.roi_click_baseline is not None, "the press did not re-baseline"
-        widget.on_view_clicked("MyomaLiteAxial", just_outside)
-        assert widget.active_roi_id == first, "an unsaved drag froze the selection"
+        widget.on_view_clicked("MyomaLiteAxial", FAR_OUTSIDE)
+        assert widget.active_roi_id is None, "an unsaved drag froze the selection"
         assert widget.roi_click_baseline is None, "the baseline outlived the click"
     finally:
         widget.cleanup()
@@ -382,6 +381,8 @@ def test_switching_to_the_correction_page_disarms_the_revealed_box() -> None:
         assert not widget.roi_nodes[second].GetDisplayNode().GetHandlesInteractive()
 
         widget._show_page(0)
+        assert widget.active_roi_id is None, "the FIGO page should open with no myoma selected"
+        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
         assert not widget.roi_nodes[second].GetLocked(), "the box never became editable again"
     finally:
         widget.cleanup()
@@ -644,7 +645,7 @@ def test_early_stops_sit_with_zero_myomas_on_the_annotation_page() -> None:
             assert page.isAncestorOf(button), f"{button.text} is not on the annotation page"
             assert button.enabled, f"{button.text} is disabled before reveal"
         for control in (widget.zero_check, widget.save_draft_button, widget.reveal_button,
-                        widget.return_correction_button, widget.lesion_list):
+                        widget.lesion_list):
             assert page.isAncestorOf(control), f"{control} is not on the annotation page"
         for lesion_id in (first, second):
             widget._on_card_figo(lesion_id, {"kind": "standard", "type": 0})
@@ -1190,7 +1191,134 @@ def test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r() -> Non
         widget.cleanup()
 
 
+def _outlines_shown(widget: MyomaReviewLiteWidget) -> set[str]:
+    return {lid for lid, node in widget.roi_outline_nodes.items() if node.GetDisplayVisibility()}
+
+
+def _click_list(widget: MyomaReviewLiteWidget, row: int | None) -> None:
+    """A real mouse click on a list row, or on the empty list below the rows."""
+
+    view = widget.lesion_list
+    if row is None:
+        last = view.visualItemRect(view.item(view.count - 1))
+        pos = qt.QPoint(last.center().x(), min(last.bottom() + 20, view.viewport().height - 2))
+        assert view.itemAt(pos) is None, "the empty-list point hit a row"
+    else:
+        pos = view.visualItemRect(view.item(row)).center()
+    for kind in (qt.QEvent.MouseButtonPress, qt.QEvent.MouseButtonRelease):
+        event = qt.QMouseEvent(kind, qt.QPointF(pos), qt.Qt.LeftButton, qt.Qt.LeftButton, qt.Qt.NoModifier)
+        qt.QApplication.sendEvent(view.viewport(), event)
+    slicer.app.processEvents()
+
+
+def test_a_selected_myoma_shows_alone_and_no_selection_shows_all() -> None:
+    widget, first, second = _build_case("sub-00090")
+    try:
+        widget.logic.activate_layout()
+        widget.roi_overlay.bind_views()
+        _center_views_on(SMALL_BOX_INSIDE)
+        assert widget._selected_lesion_id() is None, "a row was picked for the reader"
+        assert _outlines_shown(widget) == {first, second}
+
+        def labels_shown() -> set[str]:
+            return {
+                e["public_id"] for e in widget.roi_overlay.entries.values()
+                if e["actors"]["MyomaLiteAxial"].GetVisibility()
+            }
+
+        assert labels_shown() == {first, second}
+        widget.lesion_list.setCurrentRow(_row(widget, second))
+        assert _outlines_shown(widget) == {second}, _outlines_shown(widget)
+        assert labels_shown() == {second}, "the hidden box kept its label"
+        widget.clear_lesion_selection()
+        assert widget.active_roi_id is None and widget._selected_lesion_id() is None
+        assert not widget.figo_card.is_open
+        assert _outlines_shown(widget) == {first, second}
+        assert labels_shown() == {first, second}
+        # Esc in the list does the same.
+        widget.lesion_list.setCurrentRow(_row(widget, first))
+        assert _outlines_shown(widget) == {first}
+        widget.lesion_list.findChild(qt.QShortcut).activated()
+        assert _outlines_shown(widget) == {first, second}, "Esc in the list did not deselect"
+    finally:
+        widget.cleanup()
+
+
+def test_clicking_the_selected_row_or_the_empty_list_deselects() -> None:
+    widget, first, second = _build_case("sub-00091")
+    try:
+        widget.logic.activate_layout()
+        widget.parent.show()
+        slicer.app.processEvents()
+        _click_list(widget, _row(widget, second))
+        assert widget.active_roi_id == second and widget.figo_card.is_open, "the first click did not select"
+        _click_list(widget, _row(widget, second))
+        assert widget.active_roi_id is None, "clicking the selected row did not deselect"
+        assert widget._selected_lesion_id() is None and not widget.figo_card.is_open
+        assert _outlines_shown(widget) == {first, second}
+
+        _click_list(widget, _row(widget, first))
+        assert widget.active_roi_id == first
+        widget.close_figo_card()
+        _click_list(widget, _row(widget, first))
+        assert widget.active_roi_id == first and widget.figo_card.is_open, (
+            "a row whose card was closed with Esc should bring the card back"
+        )
+        _click_list(widget, None)
+        assert widget.active_roi_id is None, "clicking the empty list did not deselect"
+    finally:
+        widget.parent.hide()
+        widget.cleanup()
+
+
+def _slice_offsets() -> list[float]:
+    manager = slicer.app.layoutManager()
+    return [manager.sliceWidget(name).mrmlSliceNode().GetSliceOffset() for name in VIEW_NAMES.values()]
+
+
+def test_tabs_appear_after_reveal_and_switch_pages_without_moving_the_views() -> None:
+    widget, first, second = _revealed_case("sub-00092")
+    try:
+        widget.logic.activate_layout()
+        assert widget.page_tabs.isHidden(), "the tabs show before AI is revealed"
+        assert not widget.nothing_to_box_section.isHidden()
+        widget.logic.segmentation_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+        widget.page_stack.setCurrentIndex(1)
+        widget.refresh_ui()
+        assert not widget.page_tabs.isHidden(), "the tabs are missing after reveal"
+        assert widget.nothing_to_box_section.isHidden()
+        assert [widget.page_tabs.tabText(i) for i in range(widget.page_tabs.count)] == ["Segmentation", "FIGO"]
+        assert widget.page_tabs.currentIndex == 0
+
+        _center_views_on(SMALL_BOX_INSIDE)
+        before = _slice_offsets()
+        widget.page_tabs.setCurrentIndex(1)
+        assert widget.page_stack.currentIndex == 0, "the FIGO tab did not show the myoma page"
+        assert widget.active_roi_id is None and _outlines_shown(widget) == {first, second}
+        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
+        assert _outlines_shown(widget) == {second}
+        widget.page_tabs.setCurrentIndex(0)
+        assert widget.page_stack.currentIndex == 1
+        assert not widget.figo_card.is_open
+        widget.page_tabs.setCurrentIndex(1)
+        assert widget.active_roi_id is None, "the FIGO tab kept an old selection"
+        assert _slice_offsets() == before, "switching tabs moved the slice views"
+        assert widget.logic.segmentation_node.GetDisplayNode().GetVisibility(), "switching tabs hid the mask"
+
+        # A box still being placed keeps the reader on the FIGO tab.
+        widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
+        widget.page_tabs.setCurrentIndex(0)
+        assert widget.page_stack.currentIndex == 0 and widget.page_tabs.currentIndex == 1
+        widget.cancel_roi_edit()
+    finally:
+        widget.logic.segmentation_node = None
+        widget.cleanup()
+
+
 TESTS = (
+    test_a_selected_myoma_shows_alone_and_no_selection_shows_all,
+    test_clicking_the_selected_row_or_the_empty_list_deselects,
+    test_tabs_appear_after_reveal_and_switch_pages_without_moving_the_views,
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
     test_selecting_a_row_selects_that_box,
@@ -1200,7 +1328,7 @@ TESTS = (
     test_a_second_drag_of_the_same_box_is_not_lost,
     test_undo_straight_after_a_drag_restores_that_drag,
     test_saving_while_a_box_is_in_hand_keeps_it_bold,
-    test_a_click_still_switches_to_a_box_nested_in_the_revealed_one,
+    test_a_box_nested_in_the_revealed_one_is_reached_by_deselecting_first,
     test_pressing_in_a_view_rebaselines_the_revealed_box,
     test_finalizing_a_case_takes_the_box_out_of_hand,
     test_a_read_only_case_gets_no_handles_at_all,

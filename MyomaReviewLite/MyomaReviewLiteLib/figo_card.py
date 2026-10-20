@@ -60,6 +60,7 @@ class FigoCard:
         on_figo: Callable[[str, dict], None],
         on_text: Callable[[str, str, str], None],
         on_close: Callable[[], None],
+        on_resize: Callable[[], None] | None = None,
     ) -> None:
         import qt
 
@@ -67,6 +68,7 @@ class FigoCard:
         self._on_figo = on_figo
         self._on_text = on_text
         self._on_close = on_close
+        self._on_resize = on_resize
         self.lesion_id: str | None = None
         self.is_open = False
         self._loading = False
@@ -206,6 +208,12 @@ class FigoCard:
         self._endo.visible = key == "hybrid"
         self._sero.visible = key == "hybrid"
         self._reason.visible = key == "uncertain"
+        if self.is_open:
+            # The card sits on a slice view, not in a layout, so nothing grows
+            # it for the extra rows; without this they squash the type buttons.
+            self.widget.adjustSize()
+            if self._on_resize is not None:
+                self._on_resize()
 
     def _reset_combos(self) -> None:
         was_loading, self._loading = self._loading, True
