@@ -97,8 +97,8 @@ def test_reopen_completed_case_and_complete_again() -> None:
             widget.open_case(queue_path)
             state = widget.logic.state
             first = state.add_lesion((0.0, 0.0, 0.0), (20.0, 20.0, 20.0))
-            state.set_figo(first, {"kind": "standard", "type": 3})
             widget.rebuild_roi_nodes()
+            widget._on_card_figo(first, {"kind": "standard", "type": 3})
             widget.on_reveal_ai()
             assert widget.logic.state.phase == "ai_revealed"
 
@@ -127,15 +127,13 @@ def test_reopen_completed_case_and_complete_again() -> None:
             assert _segment_voxel(widget) == corrected, "the earlier correction was lost"
 
             # Add a second myoma after reveal and type its FIGO.
-            widget.on_back_to_boxing()
             assert widget.add_button.enabled
             widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
             widget.save_roi_edit()
             second = "M02"
             assert second in widget.logic.state.lesions
-            widget.on_continue_to_figo()
-            widget.logic.state.set_figo(second, {"kind": "standard", "type": 6})
-            widget.logic.state.set_figo(first, {"kind": "standard", "type": 4})
+            widget._on_card_figo(second, {"kind": "standard", "type": 6})
+            widget._on_card_figo(first, {"kind": "standard", "type": 4})
             widget.on_complete()
 
             saved = json.loads((case_dir / "annotations.json").read_text(encoding="utf-8"))

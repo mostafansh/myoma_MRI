@@ -5,14 +5,19 @@ Run with: Slicer --no-splash --python-script tests/test_roi_handles_slicer.py
 
 from __future__ import annotations
 
+import json
+import re
 import shutil
 import sys
 import tempfile
 import traceback
+import types
 from pathlib import Path
+from typing import Any
 
 import qt
 import slicer
+import vtk
 
 
 MODULE_ROOT = Path(__file__).resolve().parents[1]
@@ -62,10 +67,17 @@ def _build_case(case_id: str) -> tuple[MyomaReviewLiteWidget, str, str]:
     first = widget.logic.state.add_lesion(BIG_BOX_CENTER, (40.0, 40.0, 40.0))
     second = widget.logic.state.add_lesion(SMALL_BOX_INSIDE, (10.0, 10.0, 10.0))
     widget.rebuild_roi_nodes()
-    # Fills lesion_list and figo_lesion_combo; on_delete_box reads the list.
+    # Fills lesion_list; on_delete_box reads the list.
     widget.refresh_ui()
     assert widget.lesion_list.count == 2, "the fixture did not populate the lesion list"
     return widget, first, second
+
+
+def _row(widget: MyomaReviewLiteWidget, lesion_id: str) -> int:
+    for row in range(widget.lesion_list.count):
+        if widget.lesion_list.item(row).data(qt.Qt.UserRole) == lesion_id:
+            return row
+    raise AssertionError(f"{lesion_id} has no row in the myoma list")
 
 
 def test_saved_boxes_are_thin_and_have_no_handle_circles() -> None:
@@ -122,7 +134,7 @@ def test_clicking_a_box_reveals_only_that_box() -> None:
             quiet_outline.GetDisplayNode().GetSliceIntersectionThickness()
             == ROI_OUTLINE_THICKNESS_PX
         )
-        assert widget.figo_lesion_combo.currentData == second, "the click did not select the row"
+        assert widget._selected_lesion_id() == second, "the click did not select the row"
 
         # A click outside every box clears the selection again.
         widget.on_view_clicked("MyomaLiteAxial", FAR_OUTSIDE)
@@ -144,7 +156,7 @@ def test_selecting_a_row_selects_that_box() -> None:
     widget, first, second = _build_case("sub-00002")
     try:
         widget.logic.activate_layout()
-        widget.lesion_list.setCurrentRow(widget.figo_lesion_combo.findData(second))
+        widget.lesion_list.setCurrentRow(_row(widget, second))
         assert widget._selected_lesion_id() == second, "the fixture did not select a row"
         assert widget.active_roi_id == second, "the selected box did not follow the list"
         assert widget.roi_nodes[second].GetDisplayVisibility()
@@ -153,7 +165,7 @@ def test_selecting_a_row_selects_that_box() -> None:
         assert not widget.roi_nodes[first].GetDisplayNode().GetHandlesInteractive()
         assert _views_pass_through(SMALL_BOX_INSIDE), "the views did not follow the list"
 
-        widget.lesion_list.setCurrentRow(widget.figo_lesion_combo.findData(first))
+        widget.lesion_list.setCurrentRow(_row(widget, first))
         assert widget.active_roi_id == first
         assert not widget.roi_nodes[second].GetDisplayVisibility()
         assert _views_pass_through(BIG_BOX_CENTER)
@@ -166,7 +178,7 @@ def test_selecting_a_row_while_drawing_leaves_the_drawing_alone() -> None:
     try:
         widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
         assert widget._has_unresolved_roi()
-        widget.lesion_list.setCurrentRow(widget.figo_lesion_combo.findData(first))
+        widget.lesion_list.setCurrentRow(_row(widget, first))
         assert widget.active_roi_id is None, "a box was selected while another was being placed"
         assert widget._has_unresolved_roi(), "picking a row cancelled the box being placed"
         widget.cancel_roi_edit()
@@ -188,126 +200,12 @@ def _views_pass_through(point: tuple[float, float, float]) -> bool:
     return True
 
 
-def _assert_only_shown(widget: MyomaReviewLiteWidget, lesion_id: str) -> None:
-    """``lesion_id`` is the one box drawn: a thin outline, no handles, no label for the rest."""
-
-    for identifier, node in widget.roi_nodes.items():
-        assert not node.GetDisplayNode().GetHandlesInteractive(), f"{identifier} has handles"
-        assert node.GetLocked(), f"{identifier} could be dragged"
-        assert not node.GetDisplayVisibility(), f"{identifier} markups box is drawn"
-        outline = widget.roi_outline_nodes[identifier]
-        assert bool(outline.GetDisplayVisibility()) == (identifier == lesion_id), (
-            f"{identifier} outline visibility is wrong while only {lesion_id} should show"
-        )
-        assert (
-            outline.GetDisplayNode().GetSliceIntersectionThickness() == ROI_OUTLINE_THICKNESS_PX
-        ), f"{identifier} is not a thin line"
-    assert widget.active_roi_id is None, "a box was left in hand during FIGO typing"
-    assert widget.roi_overlay.only_id == lesion_id, "the other myomas are still labelled"
-
-
-def test_figo_typing_opens_on_the_first_myoma_and_shows_only_its_box() -> None:
-    widget, first, second = _build_case("sub-00019")
-    try:
-        widget.logic.activate_layout()
-        # The reader drew M02 last, so it is the selected row when boxing ends.
-        widget.lesion_list.setCurrentRow(widget.figo_lesion_combo.findData(second))
-        assert widget._selected_lesion_id() == second
-
-        widget.on_continue_to_figo()
-        assert widget.blind_stack.currentIndex == 1, "FIGO typing did not open"
-        assert widget.figo_lesion_combo.currentData == first, "FIGO typing did not start at M01"
-        assert widget._selected_lesion_id() == first
-        _assert_only_shown(widget, first)
-        assert _views_pass_through(BIG_BOX_CENTER), "the views were not brought to the first box"
-    finally:
-        widget.cleanup()
-
-
-def test_choosing_a_myoma_in_figo_typing_shows_only_that_box() -> None:
-    widget, first, second = _build_case("sub-00020")
-    try:
-        widget.logic.activate_layout()
-        widget.on_continue_to_figo()
-        _assert_only_shown(widget, first)
-
-        widget.figo_lesion_combo.setCurrentIndex(widget.figo_lesion_combo.findData(second))
-        _assert_only_shown(widget, second)
-        assert _views_pass_through(SMALL_BOX_INSIDE), "the views were not brought to the chosen box"
-
-        # A click in a view must not pick a box the reader cannot see.
-        widget.on_view_clicked("MyomaLiteAxial", BIG_BOX_INSIDE)
-        assert widget.figo_lesion_combo.currentData == second
-        _assert_only_shown(widget, second)
-        assert _views_pass_through(SMALL_BOX_INSIDE), "clicking moved the views"
-    finally:
-        widget.cleanup()
-
-
-def test_saving_figo_advances_to_and_shows_only_the_next_myoma() -> None:
-    widget, first, second = _build_case("sub-00021")
-    try:
-        widget.logic.activate_layout()
-        widget.on_continue_to_figo()
-        assert widget.figo_lesion_combo.currentData == first
-
-        widget.on_apply_figo()
-        assert widget.logic.state.lesions[first].figo is not None
-        assert widget.figo_lesion_combo.currentData == second, "saving did not advance"
-        _assert_only_shown(widget, second)
-        assert _views_pass_through(SMALL_BOX_INSIDE)
-    finally:
-        widget.cleanup()
-
-
-def test_continuing_to_figo_puts_a_box_in_hand_down_and_keeps_its_drag() -> None:
-    widget, _first, second = _build_case("sub-00023")
-    try:
-        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
-        assert widget.active_roi_id == second
-        widget.roi_nodes[second].SetCenterWorld(6.0, 5.0, 5.0)
-
-        widget.on_continue_to_figo()
-        assert widget.active_roi_id is None, "the box stayed in hand with its handles"
-        assert not widget.roi_nodes[second].GetDisplayNode().GetHandlesInteractive()
-        assert abs(widget.logic.state.lesions[second].center_ras[0] - 6.0) < 1e-3, (
-            "the drag made before continuing was lost"
-        )
-    finally:
-        widget.cleanup()
-
-
-def test_going_back_to_boxing_shows_every_box_again() -> None:
-    widget, first, second = _build_case("sub-00024")
-    try:
-        widget.on_continue_to_figo()
-        _assert_only_shown(widget, first)
-
-        widget.on_back_to_boxing()
-        assert widget.blind_stack.currentIndex == 0
-        assert widget.roi_overlay.only_id is None, "the labels stayed limited to one myoma"
-        for lesion_id in (first, second):
-            assert widget.roi_outline_nodes[lesion_id].GetDisplayVisibility(), (
-                f"{lesion_id} stayed hidden after leaving FIGO typing"
-            )
-    finally:
-        widget.cleanup()
-
-
 def test_after_reveal_the_annotation_page_keeps_click_to_edit() -> None:
-    # Only the blinded FIGO stage shows a single box. Once AI is revealed the
-    # annotation page is where a box is still adjusted, by clicking it.
-    widget, first, second = _build_case("sub-00025")
+    # Once AI is revealed the annotation page is still where a box is
+    # adjusted, by clicking it.
+    widget, first, second = _revealed_case("sub-00025")
     try:
-        widget.on_continue_to_figo()
-        for lesion_id in (first, second):
-            widget.logic.state.set_figo(lesion_id, {"kind": "standard", "type": 0})
-        widget.logic.state.reveal()
         assert widget.logic.state.phase == ReviewPhase.AI_REVEALED.value
-        widget.refresh_ui()
-        assert not widget._figo_focus_active()
-        assert widget.roi_overlay.only_id is None
-
         widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
         assert widget.active_roi_id == second, "a box can no longer be picked after reveal"
         assert widget.roi_nodes[second].GetDisplayNode().GetHandlesInteractive()
@@ -655,50 +553,29 @@ def test_handles_are_drawn_smaller_than_the_slicer_default() -> None:
 
 def _revealed_case(case_id: str) -> tuple[MyomaReviewLiteWidget, str, str]:
     widget, first, second = _build_case(case_id)
-    widget.on_continue_to_figo()
     for lesion_id in (first, second):
-        widget.logic.state.set_figo(lesion_id, {"kind": "standard", "type": 0})
+        widget._on_card_figo(lesion_id, {"kind": "standard", "type": 0})
     widget.logic.state.reveal()
-    widget._boxing_stage_done = True
     widget.refresh_ui()
     return widget, first, second
 
 
-def test_after_reveal_the_reader_can_go_back_and_add_a_box() -> None:
+def test_after_reveal_the_reader_can_still_add_a_box() -> None:
     widget, first, second = _revealed_case("sub-00040")
     try:
-        assert widget.blind_stack.currentIndex == 1, "a revealed case should open on FIGO"
-        assert not widget.add_button.enabled
-        assert widget.back_to_boxing_button.enabled, "boxes cannot be reached after reveal"
+        assert not hasattr(widget, "blind_stack"), "the annotation page is still split in two"
+        assert widget.add_button.enabled and widget.delete_button.enabled, (
+            "boxes cannot be added or deleted after reveal"
+        )
         blinded = widget.logic.state.blinded_snapshot
-        widget.on_back_to_boxing()
-        assert widget.blind_stack.currentIndex == 0
-        assert widget.add_button.enabled and widget.delete_button.enabled
-
         widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
         widget.save_roi_edit()
         added = [item for item in widget.logic.state.lesions if item not in (first, second)]
         assert added == ["M03"], f"the new box was not added: {sorted(widget.logic.state.lesions)}"
         assert widget.logic.state.lesions["M03"].figo is None
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == "M03"
         assert widget.logic.state.blinded_snapshot == blinded, "the blinded record changed"
         assert len(widget.logic.state.blinded_snapshot["lesions"]) == 2
-
-        widget.on_continue_to_figo()
-        assert widget.blind_stack.currentIndex == 1
-    finally:
-        widget.cleanup()
-
-
-def test_saving_the_last_figo_after_reveal_does_not_offer_reveal() -> None:
-    widget, first, second = _revealed_case("sub-00041")
-    offers = []
-    widget._offer_ai_reveal_after_last_figo = lambda: offers.append(True)
-    try:
-        widget.lesion_list.setCurrentRow(1)
-        widget.figo_kind_combo.setCurrentIndex(widget.figo_kind_combo.findData("standard"))
-        widget.on_apply_figo()
-        assert widget.logic.state.lesions[second].figo is not None
-        assert not offers, "the reveal prompt came back after AI was revealed"
     finally:
         widget.cleanup()
 
@@ -757,20 +634,25 @@ def test_navigation_stays_available_while_placing_a_box() -> None:
         widget.cleanup()
 
 
-def test_early_stops_sit_with_zero_myomas_on_the_boxing_page() -> None:
-    widget, _first, _second = _build_case("sub-00044")
+def test_early_stops_sit_with_zero_myomas_on_the_annotation_page() -> None:
+    widget, first, second = _build_case("sub-00044")
     try:
-        boxing_page = widget.blind_stack.widget(0)
-        figo_page = widget.blind_stack.widget(1)
+        page = widget.page_stack.widget(0)
         texts = [button.text for button in widget.early_stop_buttons]
         assert texts == ["No uterus", "Wrong image", "Cannot assess"], texts
         for button in widget.early_stop_buttons:
-            assert boxing_page.isAncestorOf(button), f"{button.text} is not on the boxing page"
-            assert not figo_page.isAncestorOf(button), f"{button.text} is still on the FIGO page"
-            assert button.enabled, f"{button.text} is disabled while boxing"
-        assert boxing_page.isAncestorOf(widget.zero_check)
-        widget.on_continue_to_figo()
-        assert not any(button.enabled for button in widget.early_stop_buttons)
+            assert page.isAncestorOf(button), f"{button.text} is not on the annotation page"
+            assert button.enabled, f"{button.text} is disabled before reveal"
+        for control in (widget.zero_check, widget.save_draft_button, widget.reveal_button,
+                        widget.return_correction_button, widget.lesion_list):
+            assert page.isAncestorOf(control), f"{control} is not on the annotation page"
+        for lesion_id in (first, second):
+            widget._on_card_figo(lesion_id, {"kind": "standard", "type": 0})
+        widget.logic.state.reveal()
+        widget.refresh_ui()
+        assert not any(button.enabled for button in widget.early_stop_buttons), (
+            "an early stop is still offered after reveal"
+        )
     finally:
         widget.cleanup()
 
@@ -859,22 +741,6 @@ def test_the_case_comment_folds_away_and_is_saved() -> None:
         widget.cleanup()
 
 
-def test_each_myoma_has_its_own_comment() -> None:
-    widget, first, second = _build_case("sub-00049")
-    try:
-        widget.on_continue_to_figo()
-        widget.lesion_list.setCurrentRow(0)
-        widget.lesion_comment_edit.text = "Calcified rim"
-        widget.on_apply_figo()
-        assert widget.logic.state.lesions[first].comment == "Calcified rim"
-        assert widget.logic.state.lesions[second].comment == ""
-        assert widget.lesion_comment_edit.text == "", "the next myoma showed the previous comment"
-        widget.lesion_list.setCurrentRow(0)
-        assert widget.lesion_comment_edit.text == "Calcified rim"
-    finally:
-        widget.cleanup()
-
-
 def test_reload_also_drops_the_helper_package() -> None:
     # Slicer's Reload re-reads only MyomaReviewLite.py; a stale
     # MyomaReviewLiteLib once left ReviewState without its new fields.
@@ -896,16 +762,398 @@ def test_reload_also_drops_the_helper_package() -> None:
         widget.cleanup()
 
 
+def _card_child(widget: MyomaReviewLiteWidget, name: str) -> Any:
+    child = slicer.util.findChild(widget.figo_card.widget, name)
+    assert child is not None, f"the FIGO card has no {name}"
+    return child
+
+
+def _center_views_on(point: tuple[float, float, float]) -> None:
+    manager = slicer.app.layoutManager()
+    for view_name in VIEW_NAMES.values():
+        manager.sliceWidget(view_name).mrmlSliceNode().JumpSliceByCentering(*point)
+    slicer.app.processEvents()
+
+
+def _box_qt_rect(widget: MyomaReviewLiteWidget, lesion_id: str, view_name: str) -> Any:
+    """The box's on-screen rectangle in the view's logical Qt pixels (top-left origin)."""
+
+    slice_widget = slicer.app.layoutManager().sliceWidget(view_name)
+    view = slice_widget.sliceView()
+    inverse = vtk.vtkMatrix4x4()
+    vtk.vtkMatrix4x4.Invert(slice_widget.mrmlSliceNode().GetXYToRAS(), inverse)
+    bounds = [0.0] * 6
+    widget.roi_nodes[lesion_id].GetRASBounds(bounds)
+    xs, ys = [], []
+    for r in bounds[0:2]:
+        for a in bounds[2:4]:
+            for s in bounds[4:6]:
+                x, y, _z, _w = inverse.MultiplyPoint([r, a, s, 1.0])
+                xs.append(x)
+                ys.append(y)
+    ratio = float(view.devicePixelRatioF())
+    height = int(view.height)
+    left, right = min(xs) / ratio, max(xs) / ratio
+    top, bottom = height - max(ys) / ratio, height - min(ys) / ratio
+    return qt.QRect(int(left), int(top), max(1, int(right - left)), max(1, int(bottom - top)))
+
+
+def test_saving_a_new_box_opens_its_card() -> None:
+    widget, _first, _second = _build_case("sub-00060")
+    try:
+        widget.logic.activate_layout()
+        widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
+        widget.save_roi_edit()
+        assert widget.figo_card.is_open, "saving a new box did not open its FIGO card"
+        assert widget.figo_card.lesion_id == "M03"
+        assert widget.active_roi_id == "M03", widget.active_roi_id
+        assert widget.roi_nodes["M03"].GetDisplayNode().GetHandlesInteractive(), "the saved box has no handles"
+    finally:
+        widget.cleanup()
+
+
+def test_clicking_a_box_opens_its_card_and_empty_image_closes_it() -> None:
+    widget, _first, second = _build_case("sub-00061")
+    try:
+        widget.logic.activate_layout()
+        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == second
+        widget.on_view_clicked("MyomaLiteAxial", FAR_OUTSIDE)
+        assert not widget.figo_card.is_open, "clicking empty image left the card open"
+    finally:
+        widget.cleanup()
+
+
+def test_picking_a_row_opens_that_card() -> None:
+    widget, first, second = _build_case("sub-00062")
+    try:
+        widget.logic.activate_layout()
+        # The fixture already has row 0 current, so pick the other row first.
+        widget.lesion_list.setCurrentRow(1)
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == second
+        widget.lesion_list.setCurrentRow(0)
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == first
+    finally:
+        widget.cleanup()
+
+
+def test_a_card_choice_is_saved_and_undoable() -> None:
+    widget, first, _second = _build_case("sub-00063")
+    try:
+        widget.logic.activate_layout()
+        widget.open_figo_card(first)
+        _card_child(widget, "figo_type_4").click()
+        figo = widget.logic.state.lesions[first].figo
+        assert figo is not None and figo.type == 4, f"the card choice was not saved: {figo}"
+        draft = widget.logic.storage.load_draft()
+        assert draft is not None and draft.lesions[first].figo.type == 4, "the draft lacks the choice"
+        widget.on_undo()
+        assert widget.logic.state.lesions[first].figo is None, "Ctrl+Z did not undo the card choice"
+    finally:
+        widget.cleanup()
+
+
+def test_card_sits_beside_the_box_not_on_it() -> None:
+    widget, _first, second = _build_case("sub-00064")
+    try:
+        widget.logic.activate_layout()
+        _center_views_on(SMALL_BOX_INSIDE)
+        widget.open_figo_card(second, "MyomaLiteAxial")
+        slicer.app.processEvents()
+        assert widget.figo_card.is_open and not widget.figo_card.widget.isHidden()
+        box = _box_qt_rect(widget, second, "MyomaLiteAxial")
+        card = widget.figo_card.widget.geometry
+        assert not box.intersects(card), (
+            f"the card {card.x()},{card.y()} {card.width()}x{card.height()} covers the box "
+            f"{box.x()},{box.y()} {box.width()}x{box.height()}"
+        )
+    finally:
+        widget.cleanup()
+
+
+def test_card_hides_when_the_slice_leaves_the_box() -> None:
+    widget, _first, second = _build_case("sub-00065")
+    try:
+        widget.logic.activate_layout()
+        _center_views_on(SMALL_BOX_INSIDE)
+        widget.open_figo_card(second, "MyomaLiteAxial")
+        assert not widget.figo_card.widget.isHidden()
+        slice_node = slicer.app.layoutManager().sliceWidget("MyomaLiteAxial").mrmlSliceNode()
+        offset = slice_node.GetSliceOffset()
+        slice_node.SetSliceOffset(offset + 100.0)
+        assert widget.figo_card.widget.isHidden(), "the card stayed up off the box's slices"
+        assert widget.figo_card.is_open, "leaving the box closed the card instead of hiding it"
+        slice_node.SetSliceOffset(offset)
+        assert not widget.figo_card.widget.isHidden(), "the card did not come back"
+    finally:
+        widget.cleanup()
+
+
+def test_undo_refreshes_or_closes_the_open_card() -> None:
+    widget, first, _second = _build_case("sub-00066")
+    try:
+        widget.logic.activate_layout()
+        widget.open_figo_card(first)
+        _card_child(widget, "figo_type_4").click()
+        widget.on_undo()
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == first
+        names = [f"figo_type_{n}" for n in range(9)] + ["figo_hybrid", "figo_uncertain"]
+        checked = [name for name in names if _card_child(widget, name).checked]
+        assert not checked, f"the card still shows the undone choice: {checked}"
+
+        widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
+        widget.save_roi_edit()
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == "M03"
+        widget.on_undo()
+        assert "M03" not in widget.logic.state.lesions
+        assert not widget.figo_card.is_open, "the card outlived its undone box"
+    finally:
+        widget.cleanup()
+
+
+def test_reveal_saves_text_typed_on_the_card_into_the_blinded_snapshot() -> None:
+    widget, first, second = _build_case("sub-00067")
+    try:
+        widget.logic.activate_layout()
+        # reveal_ai only needs the manifest for the AI mask path it returns.
+        widget.logic.manifest = types.SimpleNamespace(ai_mask=OUTPUT_ROOT / "ai.nii.gz")
+        widget.logic.load_ai_mask = lambda: None
+        widget._open_correction_page = lambda: None
+        for lesion_id in (first, second):
+            widget.open_figo_card(lesion_id)
+            _card_child(widget, "figo_type_0").click()
+        assert widget.figo_card.lesion_id == second
+        _card_child(widget, "figo_ddx").text = "Leiomyoma"
+        widget.on_reveal_ai()
+        assert widget.logic.state.phase == ReviewPhase.AI_REVEALED.value, "the reveal did not happen"
+        lesions = {item["lesion_id"]: item for item in widget.logic.state.blinded_snapshot["lesions"]}
+        assert lesions[second]["differential_diagnosis"] == "Leiomyoma", (
+            "the Ddx typed on the open card missed the blinded snapshot"
+        )
+        assert not widget.figo_card.is_open
+    finally:
+        widget.cleanup()
+
+
+def test_the_card_never_shows_on_the_correction_page() -> None:
+    widget, first, _second = _build_case("sub-00068")
+    try:
+        widget.logic.activate_layout()
+        widget.open_figo_card(first)
+        assert widget.figo_card.is_open
+        widget._show_page(1)
+        assert not widget.figo_card.is_open, "the card followed the reader to the correction page"
+        widget.open_figo_card(first)
+        assert not widget.figo_card.is_open, "the card opened on the correction page"
+    finally:
+        widget.cleanup()
+
+
+def test_escape_in_a_view_closes_the_card() -> None:
+    widget, first, _second = _build_case("sub-00069")
+    try:
+        widget.logic.activate_layout()
+        widget.open_figo_card(first, "MyomaLiteAxial")
+        assert widget.figo_card.is_open
+        widget._card_escape_shortcuts["MyomaLiteAxial"].activated()
+        assert not widget.figo_card.is_open, "Esc in the view left the card open"
+    finally:
+        widget.cleanup()
+
+
+AMBER = (1.0, 0.6, 0.1)
+LABEL_YELLOW = (1.0, 0.93, 0.2)
+
+
+def _same_colour(actual: Any, expected: tuple[float, float, float]) -> bool:
+    return all(abs(float(a) - b) < 1e-6 for a, b in zip(actual, expected))
+
+
+def test_labels_show_the_figo_status() -> None:
+    widget, first, _second = _build_case("sub-00070")
+    try:
+        widget.logic.activate_layout()
+        widget.roi_overlay.bind_views()
+        text, colour = widget.roi_label(first)
+        assert text == "M01 · FIGO ?" and _same_colour(colour, AMBER), (text, colour)
+        entry = next(e for e in widget.roi_overlay.entries.values() if e["public_id"] == first)
+        actor = next(iter(entry["actors"].values()))
+        assert actor.GetInput() == "M01 · FIGO ?", actor.GetInput()
+        assert _same_colour(actor.GetTextProperty().GetColor(), AMBER)
+
+        widget._on_card_figo(first, {"kind": "standard", "type": 3})
+        text, colour = widget.roi_label(first)
+        assert text == "M01 · FIGO 3" and _same_colour(colour, LABEL_YELLOW), (text, colour)
+        assert actor.GetInput() == "M01 · FIGO 3", "the on-image label did not refresh"
+        assert _same_colour(actor.GetTextProperty().GetColor(), LABEL_YELLOW)
+        row_text = widget.lesion_list.item(_row(widget, first)).text()
+        assert row_text == "M01 · FIGO 3", row_text
+    finally:
+        widget.cleanup()
+
+
+def _tooltip(control: Any) -> str:
+    """A tooltip's text; Slicer's style wraps plain tooltips in <p> for line wrapping."""
+
+    return re.sub(r"<[^>]+>", "", str(control.toolTip))
+
+
+def test_reveal_is_gated_with_a_tooltip_naming_missing_myomas() -> None:
+    widget, first, second = _build_case("sub-00071")
+    try:
+        assert widget.reveal_button.enabled is False
+        assert _tooltip(widget.reveal_button) == "FIGO missing: M01, M02", widget.reveal_button.toolTip
+        widget._on_card_figo(first, {"kind": "standard", "type": 3})
+        assert widget.reveal_button.enabled is False
+        assert _tooltip(widget.reveal_button) == "FIGO missing: M02", widget.reveal_button.toolTip
+        widget._on_card_figo(second, {"kind": "uncertain", "reason": "otherwise_not_classifiable"})
+        assert widget.reveal_button.enabled is True, "every myoma has FIGO but reveal is off"
+        assert _tooltip(widget.reveal_button) == "", widget.reveal_button.toolTip
+    finally:
+        widget.cleanup()
+
+
+def test_figo_any_order_before_reveal() -> None:
+    widget, first, second = _build_case("sub-00072")
+    try:
+        widget.logic.activate_layout()
+        assert not hasattr(widget, "continue_to_figo_button"), "the boxing stage is still there"
+        widget._on_card_figo(second, {"kind": "standard", "type": 2})
+        widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
+        widget.save_roi_edit()
+        third = widget.figo_card.lesion_id
+        assert third == "M03", third
+        assert not widget.logic.state.can_reveal
+        widget._on_card_figo(first, {"kind": "hybrid", "endometrial": 2, "serosal": 5})
+        assert not widget.logic.state.can_reveal
+        _card_child(widget, "figo_type_6").click()
+        assert widget.logic.state.lesions[third].figo is not None, "the card did not save M03"
+        assert widget.logic.state.can_reveal
+        assert widget.reveal_button.enabled
+    finally:
+        widget.cleanup()
+
+
+def test_the_card_works_after_reveal() -> None:
+    widget, _first, second = _revealed_case("sub-00073")
+    try:
+        widget.logic.activate_layout()
+        blinded = json.dumps(widget.logic.state.blinded_snapshot, sort_keys=True)
+        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == second
+        _card_child(widget, "figo_type_5").click()
+        assert widget.logic.state.lesions[second].figo.type == 5, "the card choice was not saved"
+        assert json.dumps(widget.logic.state.blinded_snapshot, sort_keys=True) == blinded, (
+            "a choice after reveal changed the blinded record"
+        )
+        text, _colour = widget.roi_label(second)
+        assert text == "M02 · FIGO 5", text
+    finally:
+        widget.cleanup()
+
+
+def test_a_refresh_keeps_a_half_made_card_choice() -> None:
+    widget, first, _second = _build_case("sub-00074")
+    try:
+        widget.logic.activate_layout()
+        widget.open_figo_card(first)
+        _card_child(widget, "figo_type_8").click()
+        assert widget.logic.state.lesions[first].figo is None, "8 saved without a location"
+        widget.refresh_ui()
+        assert _card_child(widget, "figo_type_8").checked, "a refresh reset the half-made 8"
+        assert not _card_child(widget, "figo_location").isHidden(), "the location row went away"
+
+        # A FIGO saved some other way still reaches the open card.
+        widget._remember_annotation()
+        widget.logic.state.set_figo(first, {"kind": "standard", "type": 1})
+        widget.refresh_ui()
+        assert _card_child(widget, "figo_type_1").checked, "the card missed the saved FIGO"
+        assert not _card_child(widget, "figo_type_8").checked
+    finally:
+        widget.cleanup()
+
+
+def test_a_no_op_undo_leaves_the_card_alone() -> None:
+    widget, first, _second = _build_case("sub-00075")
+    try:
+        widget.logic.activate_layout()
+        assert not widget.annotation_undo and not widget.annotation_redo
+        widget.open_figo_card(first)
+        _card_child(widget, "figo_hybrid").click()
+        widget.on_undo()
+        widget.on_redo()
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == first
+        assert _card_child(widget, "figo_hybrid").checked, "an empty undo reopened the card"
+    finally:
+        widget.cleanup()
+
+    # The undo stack still holds blind-phase steps after reveal: also a no-op.
+    widget, first, _second = _revealed_case("sub-00076")
+    try:
+        widget.logic.activate_layout()
+        assert widget.annotation_undo, "the fixture left nothing to undo"
+        widget.open_figo_card(first)
+        _card_child(widget, "figo_type_8").click()
+        widget.on_undo()
+        assert widget.logic.state.phase == ReviewPhase.AI_REVEALED.value
+        assert widget.figo_card.is_open
+        assert _card_child(widget, "figo_type_8").checked, "a blocked undo reopened the card"
+    finally:
+        widget.cleanup()
+
+
+def test_the_card_hides_while_its_box_is_not_drawn() -> None:
+    widget, _first, second = _build_case("sub-00077")
+    try:
+        widget.logic.activate_layout()
+        _center_views_on(SMALL_BOX_INSIDE)
+        widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
+        assert widget.figo_card.is_open and not widget.figo_card.widget.isHidden()
+        widget._set_roi_visibility(False)
+        assert widget.figo_card.is_open, "hiding the boxes closed the card"
+        assert widget.figo_card.widget.isHidden(), "the card stayed up without its box"
+        widget._set_roi_visibility(True)
+        assert not widget.figo_card.widget.isHidden(), "the card did not come back with its box"
+    finally:
+        widget.cleanup()
+
+
+def test_a_read_only_list_shows_figo_and_opens_the_card_read_only() -> None:
+    widget, _first, _second = _build_case("sub-00078")
+    try:
+        widget.logic.activate_layout()
+        widget.logic.state = None
+        widget.logic.read_only = True
+        widget.logic.final_annotation = {
+            "status": "complete",
+            "lesions": [
+                {"lesion_id": "M01", "center_ras": [0.0, 0.0, 0.0], "size_mm": [40.0, 40.0, 40.0],
+                 "figo": {"kind": "standard", "type": 3}},
+                {"lesion_id": "M02", "center_ras": [5.0, 5.0, 5.0], "size_mm": [10.0, 10.0, 10.0],
+                 "figo": {"kind": "hybrid", "endometrial": 2, "serosal": 5}},
+            ],
+        }
+        widget.rebuild_roi_nodes()
+        widget.refresh_ui()
+        rows = [widget.lesion_list.item(row).text() for row in range(widget.lesion_list.count)]
+        assert rows == ["M01 · FIGO 3", "M02 · Hybrid 2-5"], rows
+        assert not widget.figo_card.is_open, "filling the read-only list opened a card"
+        assert not any(c.enabled for c in (widget.add_button, widget.delete_button, widget.zero_check,
+                                           widget.reveal_button, *widget.early_stop_buttons))
+        widget.lesion_list.setCurrentRow(1)
+        assert widget.figo_card.is_open and widget.figo_card.lesion_id == "M02"
+        assert _card_child(widget, "figo_hybrid").checked
+        assert not _card_child(widget, "figo_type_3").enabled, "a read-only card can be edited"
+        assert widget.roi_label("M02")[0] == "M02 · Hybrid 2-5"
+    finally:
+        widget.cleanup()
+
+
 TESTS = (
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
     test_selecting_a_row_selects_that_box,
     test_selecting_a_row_while_drawing_leaves_the_drawing_alone,
-    test_figo_typing_opens_on_the_first_myoma_and_shows_only_its_box,
-    test_choosing_a_myoma_in_figo_typing_shows_only_that_box,
-    test_saving_figo_advances_to_and_shows_only_the_next_myoma,
-    test_continuing_to_figo_puts_a_box_in_hand_down_and_keeps_its_drag,
-    test_going_back_to_boxing_shows_every_box_again,
     test_after_reveal_the_annotation_page_keeps_click_to_edit,
     test_dragging_a_revealed_box_is_saved_and_undoable,
     test_a_second_drag_of_the_same_box_is_not_lost,
@@ -923,17 +1171,33 @@ TESTS = (
     test_the_revealed_box_outline_follows_a_handle_drag,
     test_outline_nodes_stay_out_of_the_data_tree_and_saved_scenes,
     test_handles_are_drawn_smaller_than_the_slicer_default,
-    test_after_reveal_the_reader_can_go_back_and_add_a_box,
-    test_saving_the_last_figo_after_reveal_does_not_offer_reveal,
+    test_after_reveal_the_reader_can_still_add_a_box,
     test_only_a_completed_read_only_case_offers_reopen,
     test_navigation_stays_available_while_placing_a_box,
-    test_early_stops_sit_with_zero_myomas_on_the_boxing_page,
+    test_early_stops_sit_with_zero_myomas_on_the_annotation_page,
     test_removed_buttons_are_gone_and_v_shows_the_myomas,
     test_the_redraw_button_is_gone,
     test_undo_and_redo_keys_reach_the_module_while_it_is_open,
     test_the_case_comment_folds_away_and_is_saved,
-    test_each_myoma_has_its_own_comment,
     test_reload_also_drops_the_helper_package,
+    test_saving_a_new_box_opens_its_card,
+    test_clicking_a_box_opens_its_card_and_empty_image_closes_it,
+    test_picking_a_row_opens_that_card,
+    test_a_card_choice_is_saved_and_undoable,
+    test_card_sits_beside_the_box_not_on_it,
+    test_card_hides_when_the_slice_leaves_the_box,
+    test_undo_refreshes_or_closes_the_open_card,
+    test_reveal_saves_text_typed_on_the_card_into_the_blinded_snapshot,
+    test_the_card_never_shows_on_the_correction_page,
+    test_escape_in_a_view_closes_the_card,
+    test_labels_show_the_figo_status,
+    test_reveal_is_gated_with_a_tooltip_naming_missing_myomas,
+    test_figo_any_order_before_reveal,
+    test_the_card_works_after_reveal,
+    test_a_refresh_keeps_a_half_made_card_choice,
+    test_a_no_op_undo_leaves_the_card_alone,
+    test_the_card_hides_while_its_box_is_not_drawn,
+    test_a_read_only_list_shows_figo_and_opens_the_card_read_only,
 )
 
 failures = 0
