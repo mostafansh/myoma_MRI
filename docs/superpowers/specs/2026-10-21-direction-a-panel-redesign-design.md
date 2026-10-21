@@ -37,7 +37,7 @@ The MyomaReviewLite module panel is restyled and restructured. Data formats, the
    - "Manifest: name (N cases)" with a "Change manifest" link at the bottom.
 
    Picking a case closes the drawer. The Cases/Annotation tabs go away.
-3. **Step bar**: "1 Box", "2 FIGO", "3 Reveal AI", "4 Correct", each done / current / to do. After reveal, clicking "2 FIGO" shows the myoma page and "4 Correct" shows the correction page. This replaces the Segmentation/FIGO tabs.
+3. **Box / Segment switch** (replaces the earlier four-step bar): two buttons. "Box" shows the box/FIGO page; "Segment" shows the correction page and stays disabled until AI is revealed. After reveal the Box page lists the blind read's boxes under "BEFORE AI · N" (read-only, "Locked at reveal") above the editable "FINAL · N" boxes.
 4. **Page content**:
    - Myoma page: "MYOMAS · N", the myoma rows with their FIGO tags, Add box and Delete.
    - "Nothing to box?" folds into one line. It opens by itself when the case has no boxes.
@@ -45,7 +45,7 @@ The MyomaReviewLite module panel is restyled and restructured. Data formats, the
 5. **Bottom bar**: one hint line above three controls: a comment icon button, "Save draft", and the page's main button ("Reveal AI  →" or "Export corrected labels and complete").
    - The hint tells the reader what blocks them or what happens next.
    - The case comment opens as a pop-over above the bar; the icon shows a dot when a comment is written.
-6. **Read-only completed case**: a green "Finished / Read-only. Nothing here can be changed." banner, all steps done, and a bottom bar with "Reopen case for editing" and "Next case  →".
+6. **Read-only completed case**: a green "Finished / Read-only. Nothing here can be changed." banner and a bottom bar with "Reopen case for editing" and "Next case  →".
 
 ### Previous / next case
 

@@ -1,12 +1,10 @@
-"""What the panel shows, decided without Qt: step bar, hint line, queue drawer."""
+"""What the panel shows, decided without Qt: hint line, queue drawer."""
 
 from __future__ import annotations
 
 from typing import Mapping, Sequence
 
 from .queue import QueueEntry, QueueStatus
-
-STEP_TITLES = ("Box", "FIGO", "Reveal AI", "Correct")
 
 # Queue-drawer filter pills, in display order, and the one checked on start.
 CASE_FILTERS = (
@@ -28,28 +26,6 @@ CASE_GROUPS = (
     ("NEW", QueueStatus.NEW),
     ("FINISHED", QueueStatus.COMPLETE),
 )
-
-_DONE_PHASES = {"complete", "terminal"}
-
-
-def step_states(
-    phase: str | None, lesion_count: int, zero_confirmed: bool, missing_figo: int
-) -> tuple[str, str, str, str]:
-    """"done" / "now" / "todo" for Box, FIGO, Reveal AI and Correct."""
-
-    if phase is None:
-        return ("todo",) * 4
-    if phase in _DONE_PHASES:
-        return ("done",) * 4
-    if phase == "ai_revealed":
-        return ("done", "done", "done", "now")
-    boxed = lesion_count > 0 or zero_confirmed
-    classified = zero_confirmed or (lesion_count > 0 and missing_figo == 0)
-    done = (boxed, boxed and classified, False, False)
-    states = ["done" if flag else "todo" for flag in done]
-    states[states.index("todo")] = "now"
-    return tuple(states)  # type: ignore[return-value]
-
 
 def bottom_hint(
     phase: str | None, missing_ids: Sequence[str], lesion_count: int, zero_confirmed: bool

@@ -130,13 +130,12 @@ QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
 QPlainTextEdit[role="comment"] {{ border: 1px solid {ACCENT}; border-radius: 8px; background: {FIELD}; }}
 QToolButton[role="bar"]:checked {{ border-color: {ACCENT}; }}
 
-QToolButton[role="step"] {{ background: transparent; color: {MUTED}; border: none;
-    border-top: 3px solid {BORDER}; border-radius: 0px; padding: 6px 0px 2px 0px;
-    text-align: left; font-size: 12px; }}
-QToolButton[role="step"][state="done"] {{ border-top-color: {STATUS_COLOURS["complete"][0]};
-    color: {FIGO_SET_COLOURS[2]}; }}
-QToolButton[role="step"][state="now"] {{ border-top-color: {ACCENT}; color: {TEXT}; font-weight: 600; }}
-QToolButton[role="step"]:enabled:hover {{ color: {TEXT}; }}
+QFrame[role="switch"] {{ background: {FIELD}; border: 1px solid {BORDER}; border-radius: 8px; }}
+QToolButton[role="switch"] {{ background: transparent; color: {MUTED}; border: none;
+    border-radius: 6px; padding: 7px 0px; font-weight: 600; }}
+QToolButton[role="switch"]:enabled:hover {{ color: {TEXT}; }}
+QToolButton[role="switch"]:checked {{ background: {ACCENT}; color: {ON_ACCENT}; }}
+QToolButton[role="switch"]:disabled {{ color: {DISABLED_TEXT}; }}
 QToolButton[role="fold"] {{ background: transparent; color: {MUTED}; border: none; padding: 4px 0px;
     text-align: left; }}
 QToolButton[role="fold"]:hover, QToolButton[role="fold"]:checked {{ color: {TEXT}; }}

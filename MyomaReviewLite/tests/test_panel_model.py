@@ -1,4 +1,4 @@
-"""Pure-Python coverage for the panel's step bar, hint line and queue drawer decisions."""
+"""Pure-Python coverage for the panel's hint line and queue drawer decisions."""
 
 from __future__ import annotations
 
@@ -8,28 +8,11 @@ from MyomaReviewLiteLib.queue import QueueEntry, QueueStatus
 from MyomaReviewLiteLib.panel_model import (
     CASE_FILTERS,
     DEFAULT_CASE_FILTER,
-    STEP_TITLES,
     bottom_hint,
     case_groups,
     matches_case_search,
     queue_strip_text,
-    step_states,
 )
-
-
-class StepStateTests(unittest.TestCase):
-    def test_step_titles(self):
-        self.assertEqual(STEP_TITLES, ("Box", "FIGO", "Reveal AI", "Correct"))
-
-    def test_step_states_follow_the_blind_read(self):
-        self.assertEqual(step_states(None, 0, False, 0), ("todo", "todo", "todo", "todo"))
-        self.assertEqual(step_states("blind", 0, False, 0), ("now", "todo", "todo", "todo"))
-        self.assertEqual(step_states("blind", 3, False, 1), ("done", "now", "todo", "todo"))
-        self.assertEqual(step_states("blind", 3, False, 0), ("done", "done", "now", "todo"))
-        self.assertEqual(step_states("blind", 0, True, 0), ("done", "done", "now", "todo"))
-        self.assertEqual(step_states("ai_revealed", 3, False, 0), ("done", "done", "done", "now"))
-        self.assertEqual(step_states("complete", 3, False, 0), ("done",) * 4)
-        self.assertEqual(step_states("terminal", 0, False, 0), ("done",) * 4)
 
 
 class BottomHintTests(unittest.TestCase):

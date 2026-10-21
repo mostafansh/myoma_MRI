@@ -1278,24 +1278,25 @@ def _slice_offsets() -> list[float]:
     return [manager.sliceWidget(name).mrmlSliceNode().GetSliceOffset() for name in VIEW_NAMES.values()]
 
 
-def test_steps_switch_pages_after_reveal_without_moving_the_views() -> None:
+def test_box_segment_switch_pages_after_reveal_without_moving_the_views() -> None:
     widget, first, second = _revealed_case("sub-00092")
     try:
         widget.logic.activate_layout()
-        assert not any(button.enabled for button in widget.step_buttons), "a step switches pages before AI is shown"
+        assert not widget.segment_mode_button.enabled, "Segment opens before AI is shown"
         assert not widget.nothing_to_box_section.isHidden()
         widget.logic.segmentation_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
         widget.page_stack.setCurrentIndex(1)
         widget.refresh_ui()
-        figo_step, correct_step = widget.step_buttons[1], widget.step_buttons[3]
-        assert figo_step.enabled and correct_step.enabled, "the FIGO / Correct steps do not switch pages"
-        assert not widget.step_buttons[0].enabled and not widget.step_buttons[2].enabled
+        figo_step, correct_step = widget.box_mode_button, widget.segment_mode_button
+        assert figo_step.enabled and correct_step.enabled, "Box / Segment do not switch pages"
+        assert correct_step.checked and not figo_step.checked
         assert widget.nothing_to_box_section.isHidden()
 
         _center_views_on(SMALL_BOX_INSIDE)
         before = _slice_offsets()
         figo_step.click()
-        assert widget.page_stack.currentIndex == 0, "the FIGO step did not show the myoma page"
+        assert widget.page_stack.currentIndex == 0, "Box did not show the box page"
+        assert figo_step.checked and not correct_step.checked
         assert widget.active_roi_id is None and _outlines_shown(widget) == {first, second}
         widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
         assert _outlines_shown(widget) == {second}
@@ -1390,7 +1391,7 @@ def test_q_is_not_taken_elsewhere() -> None:
 TESTS = (
     test_a_selected_myoma_shows_alone_and_no_selection_shows_all,
     test_clicking_the_selected_row_or_the_empty_list_deselects,
-    test_steps_switch_pages_after_reveal_without_moving_the_views,
+    test_box_segment_switch_pages_after_reveal_without_moving_the_views,
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
     test_selecting_a_row_selects_that_box,

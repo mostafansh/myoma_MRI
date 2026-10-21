@@ -97,12 +97,10 @@ from MyomaReviewLiteLib.panel_model import (
     CASE_FILTER_STATUSES,
     CASE_FILTERS,
     DEFAULT_CASE_FILTER,
-    STEP_TITLES,
     bottom_hint,
     case_groups,
     matches_case_search,
     queue_strip_text,
-    step_states,
 )
 
 ICON_DIR = Path(__file__).resolve().parent / "Resources" / "Icons"
@@ -149,9 +147,9 @@ ROI_PICK_TOLERANCE_MM = 1.0
 # A revealed box keeps its selection when a handle just outside it is clicked.
 ROI_ACTIVE_PICK_TOLERANCE_MM = 6.0
 
-# page_stack pages: 0 is the myoma/FIGO page, 1 the Segment Editor correction
-# page. After reveal the step bar's "2 FIGO" and "4 Correct" switch between them.
-STEP_FOR_PAGE = {1: 0, 3: 1}
+# page_stack pages: 0 is the box/FIGO page, 1 the segment correction page.
+# The Box / Segment switch above them flips between the two once AI is shown.
+BOX_PAGE, SEGMENT_PAGE = 0, 1
 
 # The reviewer-configurable keyboard shortcut panel. Each row is
 # (action id, label shown in the shortcut dialog, factory-default key
@@ -1745,22 +1743,25 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # window/level now, see AltDragWindowLevel), so there is nothing of
         # its to add to the layout here.
 
-        # --- Annotation: step bar, read-only banner, the page, the action bar ---
-        self.step_bar = qt.QWidget()
-        step_layout = qt.QHBoxLayout(self.step_bar)
-        step_layout.setContentsMargins(0, 0, 0, 0)
-        step_layout.setSpacing(4)
-        self.step_buttons: list[Any] = []
-        for number, title in enumerate(STEP_TITLES, start=1):
-            button = theme.set_role(qt.QToolButton(), "step")
-            button.text = f"{number} {title}"
-            button.setProperty("state", "todo")
+        # --- Annotation: Box / Segment switch, read-only banner, the page, the action bar ---
+        # Segment stays off until AI is revealed; from then on both pages are open.
+        self.mode_bar = theme.set_role(qt.QFrame(), "switch")
+        mode_layout = qt.QHBoxLayout(self.mode_bar)
+        mode_layout.setContentsMargins(3, 3, 3, 3)
+        mode_layout.setSpacing(3)
+        self.mode_buttons: dict[int, Any] = {}
+        for page, title in ((BOX_PAGE, "Box"), (SEGMENT_PAGE, "Segment")):
+            button = theme.set_role(qt.QToolButton(), "switch")
+            button.text = title
+            button.checkable = True
             button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
-            button.enabled = False
-            button.connect("clicked()", lambda _checked=False, index=number - 1: self._on_step_clicked(index))
-            step_layout.addWidget(button)
-            self.step_buttons.append(button)
-        annotation_layout.addWidget(self.step_bar)
+            button.connect("clicked()", lambda page=page: self._on_mode_clicked(page))
+            mode_layout.addWidget(button)
+            self.mode_buttons[page] = button
+        self.box_mode_button = self.mode_buttons[BOX_PAGE]
+        self.segment_mode_button = self.mode_buttons[SEGMENT_PAGE]
+        self.segment_mode_button.toolTip = "Opens once AI is revealed"
+        annotation_layout.addWidget(self.mode_bar)
 
         self.readonly_banner = theme.set_role(qt.QFrame(), "banner")
         banner_layout = qt.QVBoxLayout(self.readonly_banner)
@@ -1809,6 +1810,27 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         blind_layout = qt.QVBoxLayout(blind)
         blind_layout.setContentsMargins(0, 0, 0, 0)
         blind_layout.setSpacing(6)
+        # After reveal: the boxes of the blind read, frozen at reveal, kept
+        # apart from the final boxes the reader may still change.
+        self.blind_section = qt.QWidget()
+        blind_section_layout = qt.QVBoxLayout(self.blind_section)
+        blind_section_layout.setContentsMargins(0, 0, 0, 0)
+        blind_section_layout.setSpacing(6)
+        blind_header = qt.QHBoxLayout()
+        self.blind_section_label = theme.set_role(qt.QLabel("BEFORE AI · 0"), "section")
+        blind_header.addWidget(self.blind_section_label)
+        blind_header.addStretch(1)
+        blind_header.addWidget(theme.set_role(qt.QLabel("Locked at reveal"), "hint-muted"), 0, qt.Qt.AlignBottom)
+        blind_section_layout.addLayout(blind_header)
+        self.blind_list = theme.set_role(qt.QListWidget(), "rows")
+        self.blind_list.setItemDelegate(theme.make_row_delegate(self.blind_list))
+        self.blind_list.setSelectionMode(qt.QAbstractItemView.NoSelection)
+        self.blind_list.setFocusPolicy(qt.Qt.NoFocus)
+        self.blind_list.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        self.blind_list.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
+        blind_section_layout.addWidget(self.blind_list)
+        self.blind_section.visible = False
+        blind_layout.addWidget(self.blind_section)
         myoma_header = qt.QHBoxLayout()
         self.myoma_section_label = theme.set_role(qt.QLabel("MYOMAS · 0"), "section")
         myoma_header.addWidget(self.myoma_section_label)
@@ -2007,8 +2029,33 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def _refresh_myoma_count(self) -> None:
         count = self.lesion_list.count
-        self.myoma_section_label.text = f"MYOMAS · {count}"
+        title = "FINAL" if not self.blind_section.isHidden() else "MYOMAS"
+        self.myoma_section_label.text = f"{title} · {count}"
         self._refresh_empty_state()
+
+    def _refresh_blind_list(self, snapshot: Any) -> None:
+        """Fill the BEFORE AI rows from the blinded snapshot (None before reveal)."""
+
+        self.blind_list.clear()
+        if not isinstance(snapshot, dict):
+            self.blind_section.visible = False
+            return
+        lesions = list(snapshot.get("lesions", []))
+        for lesion in lesions:
+            lesion_id = str(lesion.get("lesion_id", ""))
+            item = qt.QListWidgetItem(f"{lesion_id} · {figo_label(lesion.get('figo'))}")
+            item.setData(qt.Qt.UserRole, lesion_id)
+            item.setFlags(qt.Qt.ItemIsEnabled)
+            self._style_lesion_item(item, lesion_id, lesion.get("figo"))
+            self.blind_list.addItem(item)
+        if not lesions:
+            item = qt.QListWidgetItem("No myomas (zero confirmed)")
+            item.setFlags(qt.Qt.ItemIsEnabled)
+            item.setData(theme.ROW_TITLE, "No myomas (zero confirmed)")
+            self.blind_list.addItem(item)
+        self.blind_section_label.text = f"BEFORE AI · {len(lesions)}"
+        self.blind_list.setFixedHeight(self.blind_list.count * 34 + 4)
+        self.blind_section.visible = True
 
     def _refresh_empty_state(self) -> None:
         """No boxes and still free to draw one: the empty card replaces the list."""
@@ -2026,12 +2073,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._refresh_action_bar()
         self._position_comment_overlay()
 
-    def _on_step_clicked(self, index: int) -> None:
-        """After reveal, "2 FIGO" shows the myoma page and "4 Correct" the correction page."""
-        page = STEP_FOR_PAGE.get(index)
-        if page is not None:
-            # A refused switch (a box still being placed) leaves the page as it is.
-            self._show_page(page)
+    def _on_mode_clicked(self, page: int) -> None:
+        """Box shows the box/FIGO page, Segment the correction page (after reveal)."""
+        if page == SEGMENT_PAGE and self.logic.segmentation_node is None:
+            self._refresh_action_bar()
+            return
+        # A refused switch (a box still being placed) leaves the page as it is.
+        self._show_page(page)
         self._refresh_action_bar()
 
     def _set_hint(self, text_value: str, tone: str) -> None:
@@ -2064,19 +2112,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             read_only and (self.logic.final_annotation or {}).get("status") == "complete"
         )
         on_correction = self.page_stack.currentIndex == 1
-        if read_only:
-            steps = ("done",) * 4
-        elif state is None:
-            steps = step_states(None, 0, False, 0)
-        else:
-            steps = step_states(
-                state.phase, state.lesion_count, state.zero_myomas, len(missing_figo_ids(state))
-            )
         revealed = self.logic.segmentation_node is not None
-        for index, (button, step) in enumerate(zip(self.step_buttons, steps)):
-            self._set_role_state(button, "state", step)
-            button.enabled = revealed and index in STEP_FOR_PAGE
-            button.checked = False
+        self.box_mode_button.enabled = state is not None or read_only
+        self.segment_mode_button.enabled = revealed
+        for page, button in self.mode_buttons.items():
+            button.checked = page == self.page_stack.currentIndex
         self.readonly_banner.visible = complete_record
         blind = state is not None and state.phase == ReviewPhase.BLIND.value
         self.reveal_button.visible = not read_only and blind and not on_correction
@@ -2554,6 +2594,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if state is None:
             if not self.logic.read_only or self.logic.final_annotation is None:
                 return
+            self._refresh_blind_list(self.logic.final_annotation.get("blinded_snapshot"))
             # Filled on load; keeping the row here must not pull the views anywhere.
             selected_id = self._selected_lesion_id()
             self.lesion_list.blockSignals(True)
@@ -2592,6 +2633,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._refresh_progress()
             self._refresh_action_bar()
             return
+        self._refresh_blind_list(state.blinded_snapshot)
         selected_id = self._selected_lesion_id()
         self.lesion_list.blockSignals(True)
         self.lesion_list.clear()

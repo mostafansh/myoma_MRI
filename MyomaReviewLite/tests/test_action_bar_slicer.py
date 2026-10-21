@@ -58,16 +58,17 @@ def _rect_in(widget: MyomaReviewLiteWidget, control) -> qt.QRect:
     return qt.QRect(corner.x(), corner.y(), control.width, control.height)
 
 
-def test_step_bar_and_hint_follow_the_blind_read() -> None:
+def test_mode_switch_and_hint_follow_the_blind_read() -> None:
     widget = _build_case("sub-00101", 2)
     try:
         first, second = sorted(widget.logic.state.lesions)
         widget._on_card_figo(first, {"kind": "standard", "type": 0})
-        assert [button.text for button in widget.step_buttons] == ["1 Box", "2 FIGO", "3 Reveal AI", "4 Correct"]
-        assert [button.property("state") for button in widget.step_buttons] == ["done", "now", "todo", "todo"]
+        assert [button.text for button in widget.mode_buttons.values()] == ["Box", "Segment"]
+        assert widget.box_mode_button.enabled and widget.box_mode_button.checked
+        assert widget.blind_section.isHidden(), "blind boxes listed apart before reveal"
         assert widget.status_label.text == f"{second} needs a FIGO type before you can reveal"
         assert widget.status_label.property("role") == "hint-warning"
-        assert not any(button.enabled for button in widget.step_buttons), "a step is clickable before reveal"
+        assert not widget.segment_mode_button.enabled, "Segment is clickable before reveal"
         assert widget.action_bar.isAncestorOf(widget.reveal_button)
         assert widget.action_bar.isAncestorOf(widget.save_draft_button)
         assert not widget.page_stack.isAncestorOf(widget.reveal_button)
@@ -135,7 +136,7 @@ def test_a_completed_read_only_case_shows_the_banner_and_next_case() -> None:
         widget.logic.final_annotation = {"status": "complete", "lesions": []}
         widget.refresh_ui()
         assert not widget.readonly_banner.isHidden()
-        assert [button.property("state") for button in widget.step_buttons] == ["done"] * 4
+        assert not widget.segment_mode_button.enabled
         assert not widget.reopen_button.isHidden()
         assert not widget.footer_next_button.isHidden()
         assert widget.footer_next_button.text == "Next case  →"
@@ -175,7 +176,7 @@ def test_the_panel_is_painted_in_the_warm_background() -> None:
 
 
 TESTS = (
-    test_step_bar_and_hint_follow_the_blind_read,
+    test_mode_switch_and_hint_follow_the_blind_read,
     test_comment_popover_sits_above_the_action_bar,
     test_nothing_to_box_opens_for_an_empty_case_and_stays_as_the_reader_leaves_it,
     test_a_completed_read_only_case_shows_the_banner_and_next_case,
