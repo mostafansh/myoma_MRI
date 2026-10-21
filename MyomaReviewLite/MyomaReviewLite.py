@@ -164,6 +164,7 @@ SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] 
     ("save_draft", "Save draft", "", "on_save_draft", "save_draft_button", "Save draft"),
     ("show_myomas", "Show segmented myomas", "V", "on_show_myomas", None, None),
     ("toggle_roi_boxes", "Show ROI boxes", "Q", "on_toggle_roi_boxes", "show_roi_check", "Show ROI boxes"),
+    ("toggle_ai_mask", "Show / hide AI mask", "A", "on_toggle_ai_mask", None, None),
     ("segment_1", "Pick uterine wall", "1", "on_pick_segment_1", None, None),
     ("segment_2", "Pick uterine cavity", "2", "on_pick_segment_2", None, None),
     ("segment_3", "Pick myoma", "3", "on_pick_segment_3", None, None),
@@ -1258,7 +1259,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             hint = ", ".join(text for text in (key_text, mouse_text) if text)
             button.text = f"{base_text} ({hint})" if hint else base_text
         if getattr(self, "correction_panel", None) is not None:
-            keys = (("show_myomas", "jump to myomas"), ("toggle_roi_boxes", "show boxes"))
+            keys = (("toggle_ai_mask", "mask"), ("show_myomas", "myomas"), ("toggle_roi_boxes", "boxes"))
             bound = [
                 (self.shortcut_bindings[action_id].key.toString(), text)
                 for action_id, text in keys
@@ -1349,6 +1350,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 pass
 
     # Slicer's own chrome around the module: the menu bar, the toolbars, the
+    # status bar (only its error-log button lives there), the
     # logo above the module panel and the panel's "Help & Acknowledgement"
     # box. The panel shows the help box again every time a module is
     # selected, so all of it is hidden on every enter and given back on exit,
@@ -1365,7 +1367,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             return []
         if main_window is None:
             return []
-        widgets = [main_window.menuBar()]
+        widgets = [main_window.menuBar(), main_window.statusBar()]
         widgets += [bar for bar in main_window.findChildren(qt.QToolBar) if bar.parent() is main_window]
         for name in self.PANEL_CHROME_NAMES:
             widget = main_window.findChild(qt.QWidget, name)
@@ -4012,6 +4014,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def on_pick_segment_4(self) -> None:
         self._pick_segment(4)
+
+    def on_toggle_ai_mask(self) -> None:
+        """The "Show / hide AI mask" key: once AI is revealed, on either page."""
+        if self.logic.segmentation_node is None:
+            return
+        shown = self.correction_tools.toggle_mask()
+        self._set_status("AI mask shown." if shown else "AI mask hidden. Press the key again to show it.")
 
     def on_show_roi_toggled(self, checked: bool) -> None:
         if self.logic.segmentation_node is not None:

@@ -133,6 +133,16 @@ def test_correction_panel_drives_the_segment_editor() -> None:
             assert panel.segment_buttons["uterine_wall"].checked
             assert not panel.segment_buttons["myoma"].checked
 
+            # A hides and shows the whole AI mask; V brings it back too.
+            display = widget.logic.segmentation_node.GetDisplayNode()
+            assert display.GetVisibility()
+            widget.on_toggle_ai_mask()
+            assert not display.GetVisibility(), "A did not hide the AI mask"
+            widget.correction_tools.refresh()
+            assert not display.GetVisibility(), "a refresh showed the hidden mask again"
+            widget.on_toggle_ai_mask()
+            assert display.GetVisibility(), "A did not show the AI mask again"
+
             # Keys 1-4 pick the label with that value.
             widget.on_pick_segment_2()
             assert editor.currentSegmentID() == "uterine_cavity"
@@ -153,7 +163,7 @@ def test_correction_panel_drives_the_segment_editor() -> None:
             editor.setCurrentSegmentID("myoma")
             assert panel.segment_buttons["myoma"].checked
 
-            assert panel.key_hint.text == "" or "show boxes" in panel.key_hint.text
+            assert panel.key_hint.text == "" or "boxes" in panel.key_hint.text
 
             shot = os.environ.get("MYOMA_TEST_SCREENSHOT", "").strip()
             if shot:

@@ -7,14 +7,15 @@ from typing import Any
 class ReviewCorrectionTools:
     """Segmentation overlay handling owned by one MyomaReviewLite widget.
 
-    The mask is always drawn at a fixed fill opacity; there are no panel
-    controls for it (V centres the views on the myomas).
+    The mask is drawn at a fixed fill opacity; there are no panel controls
+    for it (V centres the views on the myomas, A shows or hides the mask).
     """
 
     FILL_OPACITY = 0.35
 
     def __init__(self, owner: Any) -> None:
         self.owner = owner
+        self.mask_visible = True
         self.refresh()
 
     @property
@@ -22,7 +23,14 @@ class ReviewCorrectionTools:
         return self.owner.logic
 
     def cleanup(self) -> None:
-        """Nothing case-specific is held; kept for the widget's teardown call."""
+        """Each case opens with its mask shown."""
+        self.mask_visible = True
+
+    def toggle_mask(self) -> bool:
+        """Show or hide the whole AI mask; returns whether it is now shown."""
+        self.mask_visible = not self.mask_visible
+        self.update_overlays()
+        return self.mask_visible
 
     def refresh(self) -> None:
         self.update_overlays()
@@ -33,7 +41,7 @@ class ReviewCorrectionTools:
             return
         node.CreateDefaultDisplayNodes()
         display = node.GetDisplayNode()
-        display.SetVisibility(True)
+        display.SetVisibility(self.mask_visible)
         display.SetOpacity2DFill(self.FILL_OPACITY)
         display.SetOpacity2DOutline(1.0)
 
@@ -57,6 +65,8 @@ class ReviewCorrectionTools:
             reference = self.logic.volume_nodes["sagittal"]
             mask = slicer.util.arrayFromSegmentBinaryLabelmap(node, self.logic.segment_ids[3], reference)
             positions = np.argwhere(mask > 0)
+            # Jumping to the myomas is pointless with the mask hidden.
+            self.mask_visible = True
             self.update_overlays()
             node.GetDisplayNode().SetSegmentVisibility(self.logic.segment_ids[3], True)
             if not len(positions):

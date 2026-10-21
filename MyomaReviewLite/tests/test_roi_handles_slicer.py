@@ -1338,30 +1338,38 @@ def _slice_view_state(view_name: str) -> tuple:
 
 
 def test_q_is_not_taken_elsewhere() -> None:
+    _assert_key_is_free("Q", "toggle_roi_boxes", "sub-00094")
+
+
+def test_a_is_not_taken_elsewhere() -> None:
+    _assert_key_is_free("A", "toggle_ai_mask", "sub-00095")
+
+
+def _assert_key_is_free(key: str, action_id: str, case_id: str) -> None:
     # cleanup() of earlier tests only queued their shortcuts for deletion.
     qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
-    assert not _menu_actions_with("Q"), "a Slicer menu action already uses Q"
-    widget, _first, _second = _build_case("sub-00094")
+    assert not _menu_actions_with(key), f"a Slicer menu action already uses {key}"
+    widget, _first, _second = _build_case(case_id)
     try:
         widget.logic.activate_layout()
-        # Below Qt: the slice views' own key bindings must ignore Q too.
+        # Below Qt: the slice views' own key bindings must ignore the key too.
         for view_name in VIEW_NAMES.values():
             before_state = _slice_view_state(view_name)
             interactor = slicer.app.layoutManager().sliceWidget(view_name).sliceView().interactor()
-            for key_sym in ("q", "Q"):
+            for key_sym in (key.lower(), key):
                 interactor.SetKeySym(key_sym)
                 interactor.SetKeyCode(key_sym)
                 interactor.InvokeEvent(vtk.vtkCommand.KeyPressEvent)
                 interactor.InvokeEvent(vtk.vtkCommand.CharEvent)
                 interactor.InvokeEvent(vtk.vtkCommand.KeyReleaseEvent)
             slicer.app.processEvents()
-            assert _slice_view_state(view_name) == before_state, f"Q changed the {view_name} view"
-        before = _shortcuts_on("Q")
+            assert _slice_view_state(view_name) == before_state, f"{key} changed the {view_name} view"
+        before = _shortcuts_on(key)
         widget._install_shortcuts()
-        ours = widget.shortcut_bindings["toggle_roi_boxes"]
-        others = [shortcut for shortcut in _shortcuts_on("Q") if shortcut not in before and shortcut is not ours]
-        assert not before, f"{len(before)} other shortcut(s) already use Q"
-        assert not others, "a second shortcut was bound to Q"
+        ours = widget.shortcut_bindings[action_id]
+        others = [shortcut for shortcut in _shortcuts_on(key) if shortcut not in before and shortcut is not ours]
+        assert not before, f"{len(before)} other shortcut(s) already use {key}"
+        assert not others, f"a second shortcut was bound to {key}"
     finally:
         widget.cleanup()
 
@@ -1421,6 +1429,7 @@ TESTS = (
     test_card_shows_in_a_sagittal_view_whose_normal_is_minus_r,
     test_q_toggles_the_roi_boxes_only_on_the_correction_page,
     test_q_is_not_taken_elsewhere,
+    test_a_is_not_taken_elsewhere,
 )
 
 failures = 0
