@@ -58,7 +58,7 @@ Everything runs in Docker Desktop (WSL2 backend) on Windows 11 Pro, from one `do
 
 A small Python web service, about 200 lines, with no database.
 
-- `readers.json` (server-only, outside git): reader id, display name, bcrypt password hash, and an admin flag.
+- `readers.json` (server-only, outside git): reader id, display name, password hash (stdlib `hashlib.scrypt`, so the portal needs no third-party packages), and an admin flag.
 - `GET/POST /login`: a form. On success it sets a signed, HttpOnly, Secure session cookie (12 h) and redirects to `/<reader>/`. After 5 failed attempts in 10 minutes, it locks that username for 10 minutes.
 - `GET /auth` (used by Caddy `forward_auth`): returns 200 only if the cookie is valid and its reader id matches the first path segment, or the user is an admin. Otherwise it returns a redirect to `/login`. This covers the noVNC WebSocket upgrade too.
 - `GET /logout` clears the cookie. The reader's Slicer keeps running, and the next login lands in the same session.
@@ -71,7 +71,7 @@ A small Python web service, about 200 lines, with no database.
 One image, `myoma-studio-slicer`, used by every reader:
 
 - Linux Slicer 5.10 and the `MyomaReviewLite` module folder.
-- Xvfb (virtual display, 1920×1080), a minimal window manager running Slicer full-screen, and noVNC/websockify on an internal port.
+- Xvfb (virtual display, 1920×1080) with no window manager, so there is no desktop or menu to escape to; Slicer runs full-screen. x11vnc serves the display, and noVNC/websockify serves x11vnc to the browser on an internal port.
 - noVNC: clipboard off, no file transfer, scaling to the browser window, and adaptive quality (lower quality while moving, sharp at rest) so WiFi stays usable.
 - `start-studio.sh` replaces `Start-MyomaReviewLite.ps1` inside the container. It does the following:
   - sets `MYOMA_REVIEW_LITE_CASE=/review/queue.json`, `MYOMA_REVIEW_LITE_DATA_ROOT=/data` and `MYOMA_REVIEW_LITE_STUDIO=1`
@@ -79,17 +79,16 @@ One image, `myoma-studio-slicer`, used by every reader:
   - restarts Slicer if it exits.
 - Rendering is in software (Mesa llvmpipe). The views are 2D slices, so GPU passthrough is not needed.
 
-Per reader, in compose:
+Per reader, in compose. `docker-compose.yml` and the `Caddyfile` are generated from `readers.json` by `studio_config.py render`, so they never drift apart and no drive-letter path is committed to git:
 
 | Service | Mounts |
 |---|---|
-| `slicer-<reader>` | dataset `M:\projects\myoma\myoma\fibroma-figo classification` → `/data` (read-only); `studio\readers\<reader>` → `/review` (read-write) |
+| `slicer-<reader>` | dataset root (`dataset_root` in `review-config.json`) → `/data` (read-only); `studio\readers\<reader>` → `/review` (read-write) |
 
-Adding a reader takes four steps:
+Adding a reader takes three steps:
 1. `reader_queue.py create` into `studio\readers\<reader>`
-2. Add a compose block.
-3. Add a Caddy route.
-4. Run `set-password`.
+2. Run `set-password`, which adds the reader to `readers.json`.
+3. Run `studio_config.py render`, then `docker compose up -d`.
 
 ### 4. Studio mode in the module (Level 1 lockdown)
 
@@ -122,7 +121,7 @@ Studio mode turns on only when `MYOMA_REVIEW_LITE_STUDIO=1` is set. Without it, 
 | Reader's browser or WiFi drops | Slicer keeps running. Reconnecting and logging in again lands in the same view. |
 | Slicer crashes | `start-studio.sh` restarts it. The module reopens the reader's queue and its last draft loads. |
 | Server reboots | Docker Desktop starts at login, and the containers restart. The server is set to log in automatically, or Docker runs as a service. |
-| `M:` SSD unplugged | The reader container's health check (dataset root readable) fails, and the reader sees a "Data drive unavailable, tell the study admin" page instead of a broken Slicer. Reconnecting the drive restores it. |
+| `M:` SSD unplugged | studio-portal also mounts the dataset read-only and checks it on every `/auth`. While it is unreadable, readers get a "Data drive unavailable, tell the study admin" page instead of a broken Slicer. After reconnecting the drive, the admin runs `docker compose restart`, because Docker's mount of a replugged USB drive goes stale. |
 | Wrong password 5 times | The username is locked for 10 minutes, and the attempt is logged. |
 | Two people log in as the same reader | Both see the same Slicer (noVNC shared session). This is documented, not prevented. |
 
