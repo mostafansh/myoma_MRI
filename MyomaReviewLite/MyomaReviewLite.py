@@ -513,6 +513,8 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         layout_manager.setLayout(CUSTOM_LAYOUT_ID)
         for plane, view_name in VIEW_NAMES.items():
             widget = layout_manager.sliceWidget(view_name)
+            if widget is not None:
+                theme.style_slice_bar(widget)
             node = self.volume_nodes.get(plane)
             if widget is None or node is None:
                 continue
@@ -1746,9 +1748,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         body_layout = qt.QVBoxLayout(self.nothing_to_box_body)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(6)
-        self.zero_check = qt.QCheckBox("Confirm zero myomas")
+        self.zero_check = theme.set_role(qt.QPushButton(), "choice")
+        self.zero_check.checkable = True
         self.zero_check.connect("toggled(bool)", self.on_zero_toggled)
         body_layout.addWidget(self.zero_check)
+        self._refresh_zero_text()
         body_layout.addWidget(theme.set_role(qt.QLabel("Or stop this case early:"), "hint-muted"))
         # Early stops answer "is there anything to box at all", so they sit
         # with the zero-myoma confirmation.
@@ -1761,6 +1765,30 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             stops.addWidget(button, 1)
             self.early_stop_buttons.append(button)
         body_layout.addLayout(stops)
+        self.early_stop_confirm = theme.set_role(qt.QFrame(), "confirm")
+        confirm_layout = qt.QVBoxLayout(self.early_stop_confirm)
+        confirm_layout.setContentsMargins(10, 8, 10, 8)
+        confirm_layout.setSpacing(6)
+        self.early_stop_question = theme.set_role(qt.QLabel(""), "strong")
+        self.early_stop_question.wordWrap = True
+        confirm_layout.addWidget(self.early_stop_question)
+        confirm_note = theme.set_role(
+            qt.QLabel("This is saved as the case's final outcome and the case is closed."), "hint-muted"
+        )
+        confirm_note.wordWrap = True
+        confirm_layout.addWidget(confirm_note)
+        confirm_row = qt.QHBoxLayout()
+        confirm_row.addStretch(1)
+        self.early_stop_cancel_button = qt.QPushButton("Cancel")
+        self.early_stop_cancel_button.connect("clicked()", self.cancel_early_stop)
+        confirm_row.addWidget(self.early_stop_cancel_button)
+        self.early_stop_confirm_button = theme.set_role(qt.QPushButton("End case"), "primary")
+        self.early_stop_confirm_button.connect("clicked()", self.on_confirm_early_stop)
+        confirm_row.addWidget(self.early_stop_confirm_button)
+        confirm_layout.addLayout(confirm_row)
+        self.early_stop_confirm.visible = False
+        self._pending_early_stop: str | None = None
+        body_layout.addWidget(self.early_stop_confirm)
         self.nothing_to_box_body.visible = False
         nothing_layout.addWidget(self.nothing_to_box_body)
         self._nothing_to_box_case: str | None = None
@@ -2460,6 +2488,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.zero_check.checked = state.zero_myomas
         self.zero_check.enabled = not locked and not state.lesions
         self.zero_check.blockSignals(False)
+        self._refresh_zero_text()
         self.reveal_button.enabled = bool(state.can_reveal)
         missing = missing_figo_ids(state)
         self.reveal_button.toolTip = f"FIGO missing: {', '.join(missing)}" if missing else ""
@@ -2467,6 +2496,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.complete_button.enabled = state.phase == ReviewPhase.AI_REVEALED.value
         for button in self.early_stop_buttons:
             button.enabled = not locked and state.phase == ReviewPhase.BLIND.value
+        if not self.early_stop_buttons[0].enabled:
+            self.cancel_early_stop()
         self._refresh_roi_arming()
         # A new case opens "Nothing to box?" when it has no boxes; after that
         # it stays however the reader leaves it.
@@ -2663,7 +2694,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.zero_check.blockSignals(True)
             self.zero_check.checked = False
             self.zero_check.blockSignals(False)
+            self._refresh_zero_text()
             self._show_error(str(exc))
+
+    def _refresh_zero_text(self) -> None:
+        self.zero_check.text = (
+            "✓  No myomas in this case — confirmed" if self.zero_check.checked
+            else "No myomas in this case"
+        )
 
     def on_show_myomas(self) -> None:
         if self.logic.segmentation_node is None:
@@ -2925,11 +2963,29 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._observe_segmentation()
         self.correction_tools.refresh()
 
+    EARLY_STOP_TITLES = {"no_uterus": "No uterus", "wrong_image": "Wrong image", "cannot_assess": "Cannot assess"}
+
     def on_early_stop(self, status: str) -> None:
+        """Ask in the panel before an early stop ends the case."""
         if self.logic.state is None:
             return
-        answer = qt.QMessageBox.question(slicer.util.mainWindow(), "Confirm early stop", f"Save {status.replace('_', ' ')} as the final outcome?")
-        if answer != qt.QMessageBox.Yes:
+        self._pending_early_stop = status
+        self.early_stop_question.text = f"End this case as \u201c{self.EARLY_STOP_TITLES.get(status, status)}\u201d?"
+        self.early_stop_confirm_button.text = f"End case: {self.EARLY_STOP_TITLES.get(status, status)}"
+        self.early_stop_confirm.visible = True
+        for button, value in zip(self.early_stop_buttons, self.EARLY_STOP_TITLES):
+            self._set_role_state(button, "role", "primary" if value == status else "")
+
+    def cancel_early_stop(self) -> None:
+        self._pending_early_stop = None
+        self.early_stop_confirm.visible = False
+        for button in self.early_stop_buttons:
+            self._set_role_state(button, "role", "")
+
+    def on_confirm_early_stop(self) -> None:
+        status = self._pending_early_stop
+        self.cancel_early_stop()
+        if status is None or self.logic.state is None:
             return
         try:
             self._flush_pending_roi_drag()

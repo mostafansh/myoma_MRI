@@ -643,6 +643,13 @@ def test_early_stops_sit_with_zero_myomas_on_the_annotation_page() -> None:
             assert page.isAncestorOf(control), f"{control} is not on the annotation page"
         for control in (widget.save_draft_button, widget.reveal_button):
             assert widget.action_bar.isAncestorOf(control), f"{control.text} is not in the action bar"
+        # An early stop asks in the panel first; Cancel leaves the case open.
+        widget.early_stop_buttons[1].click()
+        assert not widget.early_stop_confirm.isHidden(), "the early stop was not confirmed in the panel"
+        assert "Wrong image" in widget.early_stop_question.text
+        widget.early_stop_cancel_button.click()
+        assert widget.early_stop_confirm.isHidden()
+        assert widget.logic.state is not None and not widget.logic.read_only
         for lesion_id in (first, second):
             widget._on_card_figo(lesion_id, {"kind": "standard", "type": 0})
         widget.logic.state.reveal()

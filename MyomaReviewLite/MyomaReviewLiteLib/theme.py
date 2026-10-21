@@ -164,6 +164,13 @@ QToolButton[role="tool"]:checked {{ background: {ACCENT}; color: {ON_ACCENT}; fo
 QToolButton[role="tool"]:disabled {{ color: {DISABLED_TEXT}; }}
 QFrame[role="card"] {{ background: {SURFACE}; border: none; border-radius: 8px; }}
 QFrame[role="card"] QLabel {{ background: transparent; }}
+QPushButton[role="choice"] {{ background: {BG}; color: {TEXT}; border: 1px solid {BORDER};
+    border-radius: 8px; padding: 9px 12px; text-align: left; }}
+QPushButton[role="choice"]:hover {{ background: {SURFACE_HOVER}; }}
+QPushButton[role="choice"]:checked {{ background: {ACCENT_SOFT}; border-color: {ACCENT}; font-weight: 600; }}
+QPushButton[role="choice"]:disabled {{ color: {DISABLED_TEXT}; background: transparent; }}
+QFrame[role="confirm"] {{ background: {BG}; border: 1px solid {AMBER}; border-radius: 8px; }}
+QFrame[role="confirm"] QLabel {{ background: transparent; border: none; }}
 QLabel[role="key"] {{ color: #d6d0c8; border: 1px solid {BORDER}; border-bottom-width: 2px;
     border-radius: 4px; padding: 0px 6px; font-size: 11px; background: transparent; }}
 QLabel[role="strong"] {{ color: {TEXT}; font-weight: 600; background: transparent; }}
@@ -203,6 +210,50 @@ QFrame#MyomaFigoCard QToolButton#figo_type_collapsed {{ background: {BG}; color:
     border: 1px solid {BORDER}; border-radius: 6px; padding: 6px 8px; text-align: left; font-size: 12px; }}
 QFrame#MyomaFigoCard QToolButton#figo_type_collapsed:hover {{ color: {TEXT}; }}
 """
+
+
+# The slice views' own bar: just the view name and a thin slider.
+SLICE_BAR_QSS = f"""
+QWidget#BarWidget {{ background: {BG}; border: none; }}
+QLabel#ViewLabel {{ color: {MUTED}; background: transparent; font-family: {FONT_STACK};
+    font-size: 11px; font-weight: 600; padding: 0px 10px 0px 8px; }}
+QSlider::groove:horizontal {{ background: {BORDER}; height: 2px; border-radius: 1px; }}
+QSlider::sub-page:horizontal {{ background: {MUTED}; height: 2px; border-radius: 1px; }}
+QSlider::add-page:horizontal {{ background: {BORDER}; height: 2px; border-radius: 1px; }}
+QSlider::handle:horizontal {{ background: {ACCENT}; width: 10px; height: 10px;
+    margin: -4px 0px; border-radius: 5px; }}
+QSlider::handle:horizontal:hover {{ background: #ffffff; }}
+"""
+SLICE_BAR_HIDDEN_PARTS = ("PinButton", "MaximizeViewButton", "FitToWindowToolButton")
+
+
+def style_slice_bar(slice_widget: Any) -> None:
+    """Strip a slice view's bar down to its name and a thin slider, in our colours."""
+
+    import qt
+
+    controller = slice_widget.sliceController()
+    if controller is None:
+        return
+    for name in SLICE_BAR_HIDDEN_PARTS:
+        part = controller.findChild(qt.QWidget, name)
+        if part is not None:
+            # Slicer shows some of these again on layout changes; no size keeps them gone.
+            part.hide()
+            part.setFixedSize(0, 0)
+    slider = controller.findChild(qt.QWidget, "SliceOffsetSlider")
+    if slider is not None:
+        # The slice position in mm is not something the reader needs.
+        slider.spinBoxVisible = False
+    bar = controller.findChild(qt.QWidget, "BarWidget")
+    if bar is not None:
+        bar.setStyleSheet(SLICE_BAR_QSS)
+        bar.setFixedHeight(26)
+    try:
+        # Slicer paints the bar (and the view's frame) in the view's red/yellow/green.
+        controller.setSliceViewColor(qt.QColor(BG))
+    except Exception:
+        pass
 
 
 def status_key(status: Any) -> str:
