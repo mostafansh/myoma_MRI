@@ -24,7 +24,6 @@ import MyomaReviewLite as bundled_module  # noqa: E402
 from MyomaReviewLite import (  # noqa: E402
     LiteRectangleDrawTool,
     LiteRoiClickSelector,
-    LiteRoiLabelOverlay,
     MyomaReviewLiteWidget,
 )
 from MyomaReviewLiteLib import CaseStorage, ReviewState  # noqa: E402
@@ -41,7 +40,6 @@ def _build_case(case_id: str, boxes: int) -> MyomaReviewLiteWidget:
     parent.setMRMLScene(slicer.mrmlScene)
     widget = MyomaReviewLiteWidget(parent)
     widget._build_ui()
-    widget.roi_overlay = LiteRoiLabelOverlay(widget)
     widget.draw_tool = LiteRectangleDrawTool(widget)
     widget.click_selector = LiteRoiClickSelector(widget)
     widget.logic.state = ReviewState.new("STUDY", "reader", case_id)

@@ -34,7 +34,6 @@ sys.path.insert(0, str(MODULE_ROOT))
 import MyomaReviewLite as bundled_module  # noqa: E402
 from MyomaReviewLite import (  # noqa: E402
     LiteRectangleDrawTool,
-    LiteRoiLabelOverlay,
     MyomaReviewLiteWidget,
 )
 from MyomaReviewLiteLib import DatasetManifest  # noqa: E402
@@ -91,7 +90,6 @@ def test_effect_preview_does_not_survive_case_switch() -> None:
         parent.setMRMLScene(slicer.mrmlScene)
         widget = MyomaReviewLiteWidget(parent)
         widget._build_ui()
-        widget.roi_overlay = LiteRoiLabelOverlay(widget)
         widget.draw_tool = LiteRectangleDrawTool(widget)
         try:
             widget.open_case(queue_path, first_case_id)

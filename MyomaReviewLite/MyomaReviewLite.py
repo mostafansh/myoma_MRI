@@ -137,9 +137,6 @@ ROI_OUTLINE_THICKNESS_PX = 1
 # one currently being drawn or edited, draws at the thinnest possible line.
 ROI_ACTIVE_OUTLINE_THICKNESS_PX = 1
 ROI_OUTLINE_COLOR = (1.0, 0.85, 0.15)
-# On-image M## labels: yellow once FIGO is set, amber while it is missing.
-ROI_LABEL_COLOR = (1.0, 0.93, 0.2)
-ROI_LABEL_MISSING_COLOR = (1.0, 0.6, 0.1)
 # Interaction handles stay hidden until a box is clicked, and are drawn smaller
 # than the 3.0 % default so they cover less of the T2 underneath.
 ROI_HANDLE_SCALE_PERCENT = 1.5
@@ -765,130 +762,6 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
 
 if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
 
-    class LiteRoiLabelOverlay:
-        """Display each box's M## label and FIGO status on every view whose slice
-        intersects it; the text and colour come from ``widget.roi_label``."""
-
-        def __init__(self, widget: "MyomaReviewLiteWidget") -> None:
-            self.widget = widget
-            self.entries: dict[int, dict[str, Any]] = {}
-            self.views: dict[str, dict[str, Any]] = {}
-            self.enabled = True
-
-        def set_enabled(self, enabled: bool) -> None:
-            self.enabled = bool(enabled)
-            self.refresh()
-
-        def bind_views(self) -> None:
-            self.unbind_views()
-            manager = slicer.app.layoutManager()
-            for view_name in VIEW_NAMES.values():
-                slice_widget = manager.sliceWidget(view_name)
-                if slice_widget is None:
-                    continue
-                slice_view = slice_widget.sliceView()
-                renderer = slice_view.renderWindow().GetRenderers().GetFirstRenderer()
-                if renderer is None:
-                    continue
-                slice_node = slice_widget.sliceLogic().GetSliceNode()
-                observer = slice_node.AddObserver(
-                    vtk.vtkCommand.ModifiedEvent,
-                    lambda _caller, _event, name=view_name: self.refresh_view(name),
-                )
-                self.views[view_name] = {"view": slice_view, "renderer": renderer, "slice_node": slice_node, "observer": observer}
-            for entry in self.entries.values():
-                self._create_actors(entry)
-            self.refresh()
-
-        def unbind_views(self) -> None:
-            for entry in self.entries.values():
-                for view_name, actor in list(entry["actors"].items()):
-                    binding = self.views.get(view_name)
-                    if binding:
-                        binding["renderer"].RemoveActor2D(actor)
-                entry["actors"].clear()
-            for binding in self.views.values():
-                try:
-                    binding["slice_node"].RemoveObserver(binding["observer"])
-                except Exception:
-                    pass
-            self.views.clear()
-
-        def clear(self) -> None:
-            self.unbind_views()
-            for entry in self.entries.values():
-                node = entry["node"]
-                if entry.get("node_observer") is not None:
-                    node.RemoveObserver(entry["node_observer"])
-            self.entries.clear()
-
-        def track(self, node: Any, public_id: str) -> None:
-            self.untrack(node)
-            observer = node.AddObserver(vtk.vtkCommand.ModifiedEvent, lambda *_: self.refresh())
-            entry = {"node": node, "public_id": public_id, "actors": {}, "node_observer": observer}
-            self.entries[id(node)] = entry
-            self._create_actors(entry)
-            self.refresh()
-
-        def untrack(self, node: Any) -> None:
-            entry = self.entries.pop(id(node), None)
-            if not entry:
-                return
-            for view_name, actor in entry["actors"].items():
-                binding = self.views.get(view_name)
-                if binding:
-                    binding["renderer"].RemoveActor2D(actor)
-            try:
-                node.RemoveObserver(entry["node_observer"])
-            except Exception:
-                pass
-
-        def _create_actors(self, entry: dict[str, Any]) -> None:
-            for view_name, binding in self.views.items():
-                if view_name in entry["actors"]:
-                    continue
-                text, colour = self.widget.roi_label(entry["public_id"])
-                actor = vtk.vtkTextActor()
-                actor.SetInput(text)
-                actor.PickableOff()
-                prop = actor.GetTextProperty()
-                prop.SetFontSize(16)
-                prop.BoldOn()
-                prop.SetColor(*colour)
-                binding["renderer"].AddActor2D(actor)
-                entry["actors"][view_name] = actor
-
-        def refresh(self) -> None:
-            for view_name in tuple(self.views):
-                self.refresh_view(view_name)
-
-        def refresh_view(self, view_name: str) -> None:
-            binding = self.views.get(view_name)
-            if binding is None:
-                return
-            slice_node = binding["slice_node"]
-            for row, entry in enumerate(sorted(self.entries.values(), key=lambda item: item["public_id"])):
-                actor = entry["actors"].get(view_name)
-                node = entry["node"]
-                text, colour = self.widget.roi_label(entry["public_id"])
-                actor.SetInput(text)
-                actor.GetTextProperty().SetColor(*colour)
-                bounds = [0.0] * 6
-                try:
-                    node.GetRASBounds(bounds)
-                except Exception:
-                    actor.SetVisibility(False)
-                    continue
-                # A box hidden while another myoma is selected takes its label along.
-                visible = slice_cuts_bounds(slice_node, bounds) and not self.widget._roi_hidden_by_focus(
-                    entry["public_id"]
-                )
-                actor.SetVisibility(bool(visible and self.enabled))
-                if visible:
-                    actor.SetDisplayPosition(8, 12 + row * 22)
-            binding["view"].scheduleRender()
-
-
     class LiteRoiClickSelector:
         """Reveal one myoma box's handles when the reader clicks that box.
 
@@ -1188,32 +1061,6 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
 
 else:
 
-    class LiteRoiLabelOverlay:  # pragma: no cover - only a fallback symbol
-        def __init__(self, widget: Any) -> None:
-            self.widget = widget
-
-        def bind_views(self) -> None:
-            pass
-
-        def unbind_views(self) -> None:
-            pass
-
-        def clear(self) -> None:
-            pass
-
-        def track(self, node: Any, public_id: str) -> None:
-            pass
-
-        def untrack(self, node: Any) -> None:
-            pass
-
-        def refresh(self) -> None:
-            pass
-
-        def set_enabled(self, enabled: bool) -> None:
-            pass
-
-
     class LiteRoiClickSelector:  # pragma: no cover - only a fallback symbol
         def __init__(self, widget: Any) -> None:
             self.widget = widget
@@ -1270,7 +1117,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.roi_transaction = RoiTransaction()
         self.roi_draft_node: Any = None
         self.roi_draft_update_id: str | None = None
-        self.roi_overlay: LiteRoiLabelOverlay | None = None
         self.draw_tool: LiteRectangleDrawTool | None = None
         self.click_selector: LiteRoiClickSelector | None = None
         self.segment_editor_widget: Any = None
@@ -1333,7 +1179,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._build_ui()
         self._install_shortcuts()
         self._install_mouse_bindings()
-        self.roi_overlay = LiteRoiLabelOverlay(self)
         self.draw_tool = LiteRectangleDrawTool(self)
         self.click_selector = LiteRoiClickSelector(self)
         self._enable_synced_crosshair()
@@ -2582,8 +2427,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 control.enabled = False
             self.reveal_button.toolTip = ""
             self._refresh_roi_arming()
-            if self.roi_overlay is not None:
-                self.roi_overlay.refresh()
             status = str(self.logic.final_annotation.get("status", "complete")).replace("_", " ")
             if status == "complete":
                 self._set_hint(
@@ -2599,8 +2442,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.lesion_list.blockSignals(True)
         self.lesion_list.clear()
         for lesion in state.active_lesions:
-            text, _colour = self.roi_label(lesion.lesion_id)
-            item = qt.QListWidgetItem(text)
+            item = qt.QListWidgetItem(self.roi_label(lesion.lesion_id))
             item.setData(qt.Qt.UserRole, lesion.lesion_id)
             self._style_lesion_item(item, lesion.lesion_id, lesion.to_dict().get("figo"))
             self.lesion_list.addItem(item)
@@ -2626,8 +2468,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         for button in self.early_stop_buttons:
             button.enabled = not locked and state.phase == ReviewPhase.BLIND.value
         self._refresh_roi_arming()
-        if self.roi_overlay is not None:
-            self.roi_overlay.refresh()
         # A new case opens "Nothing to box?" when it has no boxes; after that
         # it stays however the reader leaves it.
         if self._nothing_to_box_case != state.case_id:
@@ -2804,8 +2644,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 self.active_roi_geometry = None
             node = self.roi_nodes.pop(lesion_id, None)
             if node is not None:
-                if self.roi_overlay is not None:
-                    self.roi_overlay.untrack(node)
                 slicer.mrmlScene.RemoveNode(node)
             self._remove_roi_outline(lesion_id)
             self._write_current_draft()
@@ -3022,8 +2860,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._update_box_edit_cursor(False)
         if self.click_selector is not None:
             self.click_selector.unbind_views()
-        if self.roi_overlay is not None:
-            self.roi_overlay.clear()
         self.active_roi_id = None
         self.active_roi_geometry = None
         self.roi_click_baseline = None
@@ -3082,8 +2918,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             )
             self.correction_panel.set_read_only(self.logic.read_only)
         self.view_tools.restore_views(reset_orientation=False, fit=False)
-        if self.roi_overlay is not None:
-            self.roi_overlay.bind_views()
         if self.click_selector is not None:
             self.click_selector.bind_views()
         self._set_roi_visibility(False)
@@ -3476,8 +3310,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 outline.SetDisplayVisibility(
                     bool(self.roi_boxes_visible and not hide_all and not self._roi_hidden_by_focus(identifier))
                 )
-        if self.roi_overlay is not None:
-            self.roi_overlay.refresh()
         # The cursor is the corner-drag affordance, so it only holds for the
         # initial drag; once the square is set and handle fine-tuning takes
         # over (roi_draft_node exists, draw_tool is no longer active) the
@@ -3681,12 +3513,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         lesion = state.lesions.get(lesion_id)
         return lesion.to_dict() if lesion is not None else None
 
-    def roi_label(self, lesion_id: str) -> tuple[str, tuple[float, float, float]]:
-        """The on-image label of one box and its colour: amber while FIGO is missing."""
+    def roi_label(self, lesion_id: str) -> str:
+        """A box's row text: its ID and FIGO status."""
 
         figo = (self._card_payload(lesion_id) or {}).get("figo")
-        colour = ROI_LABEL_COLOR if figo is not None else ROI_LABEL_MISSING_COLOR
-        return f"{lesion_id} · {figo_label(figo)}", colour
+        return f"{lesion_id} · {figo_label(figo)}"
 
     def open_figo_card(self, lesion_id: str, view_name: str | None = None) -> None:
         """Show one box's FIGO card beside it, in the view the reader is working in."""
@@ -3793,7 +3624,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         bounds = [0.0] * 6
         node.GetRASBounds(bounds)
         slice_node = slice_widget.mrmlSliceNode()
-        # Same rule as LiteRoiLabelOverlay.refresh_view.
+        # Only on slices that cut the box.
         if not slice_cuts_bounds(slice_node, bounds):
             self._keep_figo_card_up(slice_widget)
             return
@@ -4014,8 +3845,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             node.SetLocked(True)
             old_node = self.roi_nodes.get(lesion_id)
             if old_node is not None and old_node is not node:
-                if self.roi_overlay is not None:
-                    self.roi_overlay.untrack(old_node)
                 slicer.mrmlScene.RemoveNode(old_node)
             self.roi_nodes[lesion_id] = node
             self._stop_live_outline_sync()
@@ -4028,8 +3857,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._set_roi_edit_buttons(False)
             self.roi_transaction.save()
             self._write_current_draft()
-            if self.roi_overlay is not None:
-                self.roi_overlay.track(node, lesion_id)
             self.refresh_ui()
             self._select_lesion_row(lesion_id)
         except Exception:
@@ -4055,9 +3882,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def rebuild_roi_nodes(self) -> None:
         self.cancel_roi_edit()
-        overlay_was_bound = bool(getattr(self.roi_overlay, "views", None))
-        if self.roi_overlay is not None:
-            self.roi_overlay.clear()
         self.active_roi_id = None
         self.active_roi_geometry = None
         self._stop_live_outline_sync()
@@ -4095,12 +3919,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 traceback.print_exc()
             else:
                 outline.SetDisplayVisibility(self.roi_boxes_visible)
-            if self.roi_overlay is not None:
-                self.roi_overlay.track(node, lesion_id)
-        # clear() dropped every renderer binding, so the labels tracked above
-        # would have no actors until the next case was opened.
-        if overlay_was_bound and self.roi_overlay is not None:
-            self.roi_overlay.bind_views()
         self._release_place_mode()
 
     def _set_roi_visibility(self, visible: bool) -> None:
@@ -4112,8 +3930,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # box was still draggable before the new page re-locks it.
             self._commit_active_roi_geometry()
         self._apply_roi_selection()
-        if self.roi_overlay is not None:
-            self.roi_overlay.set_enabled(bool(visible))
         if self.roi_draft_node is not None:
             self.roi_draft_node.SetDisplayVisibility(True)
 

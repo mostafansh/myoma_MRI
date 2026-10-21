@@ -35,7 +35,6 @@ from MyomaReviewLite import (  # noqa: E402
     VIEW_NAMES,
     LiteRectangleDrawTool,
     LiteRoiClickSelector,
-    LiteRoiLabelOverlay,
     MyomaReviewLiteWidget,
 )
 from MyomaReviewLiteLib import BoxGeometry, CaseStorage, ReviewPhase, ReviewState  # noqa: E402
@@ -58,7 +57,6 @@ def _build_case(case_id: str) -> tuple[MyomaReviewLiteWidget, str, str]:
     parent.setMRMLScene(slicer.mrmlScene)
     widget = MyomaReviewLiteWidget(parent)
     widget._build_ui()
-    widget.roi_overlay = LiteRoiLabelOverlay(widget)
     widget.draw_tool = LiteRectangleDrawTool(widget)
     widget.click_selector = LiteRoiClickSelector(widget)
     widget.logic.state = ReviewState.new("STUDY", "reader", case_id)
@@ -455,9 +453,6 @@ def test_deleting_a_revealed_box_removes_its_outline_and_label() -> None:
         assert slicer.mrmlScene.GetNodeByID(outline_id) is None
         assert second not in widget.roi_outline_nodes, "a deleted box left its outline behind"
         assert widget.active_roi_id != second
-        assert id(deleted_node) not in widget.roi_overlay.entries, (
-            "the deleted box keeps its M## label drawn in every view"
-        )
     finally:
         widget.cleanup()
 
@@ -973,31 +968,13 @@ def test_escape_in_a_view_closes_the_card() -> None:
         widget.cleanup()
 
 
-AMBER = (1.0, 0.6, 0.1)
-LABEL_YELLOW = (1.0, 0.93, 0.2)
-
-
-def _same_colour(actual: Any, expected: tuple[float, float, float]) -> bool:
-    return all(abs(float(a) - b) < 1e-6 for a, b in zip(actual, expected))
-
-
-def test_labels_show_the_figo_status() -> None:
+def test_rows_show_the_figo_status() -> None:
     widget, first, _second = _build_case("sub-00070")
     try:
         widget.logic.activate_layout()
-        widget.roi_overlay.bind_views()
-        text, colour = widget.roi_label(first)
-        assert text == "M01 · FIGO ?" and _same_colour(colour, AMBER), (text, colour)
-        entry = next(e for e in widget.roi_overlay.entries.values() if e["public_id"] == first)
-        actor = next(iter(entry["actors"].values()))
-        assert actor.GetInput() == "M01 · FIGO ?", actor.GetInput()
-        assert _same_colour(actor.GetTextProperty().GetColor(), AMBER)
-
+        assert widget.roi_label(first) == "M01 · FIGO ?"
         widget._on_card_figo(first, {"kind": "standard", "type": 3})
-        text, colour = widget.roi_label(first)
-        assert text == "M01 · FIGO 3" and _same_colour(colour, LABEL_YELLOW), (text, colour)
-        assert actor.GetInput() == "M01 · FIGO 3", "the on-image label did not refresh"
-        assert _same_colour(actor.GetTextProperty().GetColor(), LABEL_YELLOW)
+        assert widget.roi_label(first) == "M01 · FIGO 3"
         row_text = widget.lesion_list.item(_row(widget, first)).text()
         assert row_text == "M01 · FIGO 3", row_text
     finally:
@@ -1058,7 +1035,7 @@ def test_the_card_works_after_reveal() -> None:
         assert json.dumps(widget.logic.state.blinded_snapshot, sort_keys=True) == blinded, (
             "a choice after reveal changed the blinded record"
         )
-        text, _colour = widget.roi_label(second)
+        text = widget.roi_label(second)
         assert text == "M02 · FIGO 5", text
     finally:
         widget.cleanup()
@@ -1156,12 +1133,12 @@ def test_a_read_only_list_shows_figo_and_opens_the_card_read_only() -> None:
         assert widget.figo_card.is_open and widget.figo_card.lesion_id == "M02"
         assert _card_child(widget, "figo_hybrid").checked
         assert not _card_child(widget, "figo_type_3").enabled, "a read-only card can be edited"
-        assert widget.roi_label("M02")[0] == "M02 · Hybrid 2-5"
+        assert widget.roi_label("M02") == "M02 · Hybrid 2-5"
     finally:
         widget.cleanup()
 
 
-def test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r() -> None:
+def test_card_shows_in_a_sagittal_view_whose_normal_is_minus_r() -> None:
     """The sagittal slice normal is -R, so GetSliceOffset() is -R: compare positions, not offsets."""
 
     widget, _first, _second = _build_case("sub-00079")
@@ -1170,7 +1147,6 @@ def test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r() -> Non
         widget.rebuild_roi_nodes()
         widget.refresh_ui()
         widget.logic.activate_layout()
-        widget.roi_overlay.bind_views()
         view_name = VIEW_NAMES["sagittal"]
         slice_node = slicer.app.layoutManager().sliceWidget(view_name).mrmlSliceNode()
         slice_to_ras = vtk.vtkMatrix4x4()
@@ -1189,15 +1165,12 @@ def test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r() -> Non
         slicer.app.processEvents()
         assert widget.figo_card.is_open and widget.figo_card.lesion_id == off_midline
         assert not widget.figo_card.widget.isHidden(), "the card hid on a sagittal slice through its box"
-        entry = next(e for e in widget.roi_overlay.entries.values() if e["public_id"] == off_midline)
-        assert entry["actors"][view_name].GetVisibility(), "the box's label is not drawn in sagittal"
 
         # The mirrored slice (R = +41.44, offset -41.44) misses the box.
         slice_node.GetSliceToRAS().SetElement(0, 3, 41.44)
         slice_node.UpdateMatrices()
         slicer.app.processEvents()
         assert not widget.figo_card.widget.isHidden(), "the card went away on the mirrored sagittal slice"
-        assert not entry["actors"][view_name].GetVisibility(), "the label showed on the mirrored slice"
     finally:
         widget.cleanup()
 
@@ -1226,26 +1199,15 @@ def test_a_selected_myoma_shows_alone_and_no_selection_shows_all() -> None:
     widget, first, second = _build_case("sub-00090")
     try:
         widget.logic.activate_layout()
-        widget.roi_overlay.bind_views()
         _center_views_on(SMALL_BOX_INSIDE)
         assert widget._selected_lesion_id() is None, "a row was picked for the reader"
         assert _outlines_shown(widget) == {first, second}
-
-        def labels_shown() -> set[str]:
-            return {
-                e["public_id"] for e in widget.roi_overlay.entries.values()
-                if e["actors"]["MyomaLiteAxial"].GetVisibility()
-            }
-
-        assert labels_shown() == {first, second}
         widget.lesion_list.setCurrentRow(_row(widget, second))
         assert _outlines_shown(widget) == {second}, _outlines_shown(widget)
-        assert labels_shown() == {second}, "the hidden box kept its label"
         widget.clear_lesion_selection()
         assert widget.active_roi_id is None and widget._selected_lesion_id() is None
         assert not widget.figo_card.is_open
         assert _outlines_shown(widget) == {first, second}
-        assert labels_shown() == {first, second}
         # Esc in the list does the same.
         widget.lesion_list.setCurrentRow(_row(widget, first))
         assert _outlines_shown(widget) == {first}
@@ -1441,7 +1403,7 @@ TESTS = (
     test_reveal_saves_text_typed_on_the_card_into_the_blinded_snapshot,
     test_the_card_never_shows_on_the_correction_page,
     test_escape_in_a_view_closes_the_card,
-    test_labels_show_the_figo_status,
+    test_rows_show_the_figo_status,
     test_reveal_is_gated_with_a_tooltip_naming_missing_myomas,
     test_figo_any_order_before_reveal,
     test_the_card_works_after_reveal,
@@ -1449,7 +1411,7 @@ TESTS = (
     test_a_no_op_undo_leaves_the_card_alone,
     test_the_card_stays_up_while_its_box_is_not_drawn,
     test_a_read_only_list_shows_figo_and_opens_the_card_read_only,
-    test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r,
+    test_card_shows_in_a_sagittal_view_whose_normal_is_minus_r,
     test_q_toggles_the_roi_boxes_only_on_the_correction_page,
     test_q_is_not_taken_elsewhere,
 )

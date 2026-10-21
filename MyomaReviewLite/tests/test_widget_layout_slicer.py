@@ -24,7 +24,6 @@ sys.path.insert(0, str(MODULE_ROOT))
 import MyomaReviewLite as bundled_module  # noqa: E402
 from MyomaReviewLite import (  # noqa: E402
     LiteRectangleDrawTool,
-    LiteRoiLabelOverlay,
     MyomaReviewLiteWidget,
 )
 from MyomaReviewLiteLib import DatasetManifest  # noqa: E402
@@ -102,7 +101,6 @@ def test_panel_has_header_drawer_and_annotation() -> None:
 
 def test_drawer_shows_empty_state(queue_path: Path, case_ids: list[str]) -> None:
     widget = _new_widget()
-    widget.roi_overlay = LiteRoiLabelOverlay(widget)
     widget.draw_tool = LiteRectangleDrawTool(widget)
     try:
         widget.open_case(queue_path)
@@ -125,7 +123,6 @@ def test_next_case_uses_the_guarded_open_path(queue_path: Path, case_ids: list[s
     (queue_path.parent / attention).mkdir(exist_ok=True)
     (queue_path.parent / attention / "draft.seg.nrrd").write_bytes(b"")
     widget = _new_widget()
-    widget.roi_overlay = LiteRoiLabelOverlay(widget)
     widget.draw_tool = LiteRectangleDrawTool(widget)
     try:
         widget.open_case(queue_path, first)
