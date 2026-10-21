@@ -228,10 +228,16 @@ SLICE_BAR_HIDDEN_PARTS = ("PinButton", "MaximizeViewButton", "FitToWindowToolBut
 
 
 def style_slice_bar(slice_widget: Any) -> None:
-    """Strip a slice view's bar down to its name and a thin slider, in our colours."""
+    """Strip a slice view down: its bar to the name and a thin slider, in our
+    colours, and no "B: volume name" text in the corners."""
 
     import qt
 
+    # DataProbe keeps rewriting the corner text but never shows or hides the
+    # actor, so switching it off here holds for these views only.
+    view = slice_widget.sliceView()
+    view.cornerAnnotation().SetVisibility(False)
+    view.scheduleRender()
     controller = slice_widget.sliceController()
     if controller is None:
         return

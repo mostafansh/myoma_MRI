@@ -35,6 +35,17 @@ def test_true_planes_sources_and_contrast() -> None:
     controller.refresh()
     assert controller.alt_drag.bound
 
+    # The module's views are stripped down: no corner text, no extra bar buttons.
+    for name in VIEW_NAMES.values():
+        slice_widget = slicer.app.layoutManager().sliceWidget(name)
+        assert not slice_widget.sliceView().cornerAnnotation().GetVisibility(), f"{name} shows corner text"
+        bar = slice_widget.sliceController()
+        for part in ("PinButton", "MaximizeViewButton", "FitToWindowToolButton"):
+            button = bar.findChild(qt.QWidget, part)
+            # Slicer may show it again on layout changes; it stays zero-sized.
+            assert not button.isVisible() or button.width == 0, f"{name} shows {part}"
+        assert not bar.findChild(qt.QWidget, "SliceOffsetSlider").spinBoxVisible
+
     # Restore an incorrectly selected source and a genuinely oblique slice.
     for plane, name in VIEW_NAMES.items():
         view = slicer.app.layoutManager().sliceWidget(name)
