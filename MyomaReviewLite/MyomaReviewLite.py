@@ -562,7 +562,14 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             composite.SetBackgroundVolumeID(node.GetID())
             composite.SetForegroundVolumeID(None)
             widget.sliceLogic().GetSliceNode().SetOrientation(VIEW_ORIENTATIONS[plane])
-            widget.sliceLogic().FitSliceToAll()
+        # The slice bars catch up with the new volumes from Qt's event queue
+        # and write their stale slice position back (0, outside e.g. an axial
+        # series); fitting after they have settled keeps each view in its series.
+        slicer.app.processEvents()
+        for plane, view_name in VIEW_NAMES.items():
+            widget = layout_manager.sliceWidget(view_name)
+            if widget is not None and self.volume_nodes.get(plane) is not None:
+                widget.sliceLogic().FitSliceToAll()
 
     def load_ai_mask(self) -> Any:
         """Load AI data only after ``reveal_ai`` has durably saved the phase."""
