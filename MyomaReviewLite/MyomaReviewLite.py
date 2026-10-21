@@ -1288,6 +1288,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._case_filter = DEFAULT_CASE_FILTER
         # Slicer turns dark while this module is shown; see theme.DarkAppStyle.
         self.app_style = theme.DarkAppStyle()
+        # ...and shows our name and logo instead of Slicer's; see theme.AppBranding.
+        self.app_branding = theme.AppBranding(
+            str(Path(__file__).resolve().parent / "Resources" / "Icons" / "MyomaReviewLite.svg")
+        )
         self._hidden_panel_chrome: list[Any] = []
         self._close_filter: Any = None
         # Placing/redrawing a box swaps the slice-view cursor for a small
@@ -1488,7 +1492,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     # where other modules expect it. Slicer saves which toolbars are shown when
     # its window closes, so they also come back just before that (see
     # _make_close_filter); otherwise plain Slicer would start without them.
-    PANEL_CHROME_NAMES = ("LogoLabel", "HelpCollapsibleButton")
+    # The logo spot stays: theme.AppBranding shows our name and logo there.
+    PANEL_CHROME_NAMES = ("HelpCollapsibleButton",)
 
     def _panel_chrome_widgets(self) -> list[Any]:
         try:
@@ -2115,6 +2120,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._hide_panel_chrome()
         # The module panel re-shows its help box after enter() runs.
         qt.QTimer.singleShot(0, self._hide_panel_chrome)
+        self.app_branding.enter()
         # Slicer's module panel resets its layout margins after setup; put ours back.
         self.layout.setContentsMargins(10, 8, 10, 8)
         for shortcut in self.shortcuts:
@@ -2132,6 +2138,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def exit(self) -> None:
         self.app_style.exit()
+        self.app_branding.exit()
         self._restore_panel_chrome()
         # The card belongs to the module's views; leaving the module saves
         # and closes it rather than leaving it floating over another module.
