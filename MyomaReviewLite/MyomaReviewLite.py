@@ -535,8 +535,10 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         if self.state.phase != ReviewPhase.AI_REVEALED.value:
             raise StorageError("AI mask cannot be loaded before reveal")
         if self.ai_mask_node is None:
+            # Hidden: shown, Slicer re-aims every view along an oblique
+            # series' axes; the segmentation below is what the reader sees.
             self.ai_mask_node = slicer.util.loadLabelVolume(
-                str(self.manifest.ai_mask), {"name": "AI mask (hidden source)", "singleFile": True}
+                str(self.manifest.ai_mask), {"name": "AI mask (hidden source)", "singleFile": True, "show": False}
             )
             if self.ai_mask_node is None:
                 raise RuntimeError("Slicer could not load the AI mask")
@@ -570,7 +572,8 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         if (self.final_annotation or {}).get("status") != "complete":
             return
         self.ai_mask_node = slicer.util.loadLabelVolume(
-            str(self.storage.corrected_labelmap_path), {"name": "Saved corrected labels", "singleFile": True}
+            str(self.storage.corrected_labelmap_path),
+            {"name": "Saved corrected labels", "singleFile": True, "show": False},
         )
         if self.ai_mask_node is None:
             raise StorageError("saved corrected labels could not be loaded")
