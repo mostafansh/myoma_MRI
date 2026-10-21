@@ -1810,27 +1810,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         blind_layout = qt.QVBoxLayout(blind)
         blind_layout.setContentsMargins(0, 0, 0, 0)
         blind_layout.setSpacing(6)
-        # After reveal: the boxes of the blind read, frozen at reveal, kept
-        # apart from the final boxes the reader may still change.
-        self.blind_section = qt.QWidget()
-        blind_section_layout = qt.QVBoxLayout(self.blind_section)
-        blind_section_layout.setContentsMargins(0, 0, 0, 0)
-        blind_section_layout.setSpacing(6)
-        blind_header = qt.QHBoxLayout()
-        self.blind_section_label = theme.set_role(qt.QLabel("BEFORE AI · 0"), "section")
-        blind_header.addWidget(self.blind_section_label)
-        blind_header.addStretch(1)
-        blind_header.addWidget(theme.set_role(qt.QLabel("Locked at reveal"), "hint-muted"), 0, qt.Qt.AlignBottom)
-        blind_section_layout.addLayout(blind_header)
-        self.blind_list = theme.set_role(qt.QListWidget(), "rows")
-        self.blind_list.setItemDelegate(theme.make_row_delegate(self.blind_list))
-        self.blind_list.setSelectionMode(qt.QAbstractItemView.NoSelection)
-        self.blind_list.setFocusPolicy(qt.Qt.NoFocus)
-        self.blind_list.setVerticalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
-        self.blind_list.setHorizontalScrollBarPolicy(qt.Qt.ScrollBarAlwaysOff)
-        blind_section_layout.addWidget(self.blind_list)
-        self.blind_section.visible = False
-        blind_layout.addWidget(self.blind_section)
         myoma_header = qt.QHBoxLayout()
         self.myoma_section_label = theme.set_role(qt.QLabel("MYOMAS · 0"), "section")
         myoma_header.addWidget(self.myoma_section_label)
@@ -2029,33 +2008,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def _refresh_myoma_count(self) -> None:
         count = self.lesion_list.count
-        title = "FINAL" if not self.blind_section.isHidden() else "MYOMAS"
-        self.myoma_section_label.text = f"{title} · {count}"
+        self.myoma_section_label.text = f"MYOMAS · {count}"
         self._refresh_empty_state()
-
-    def _refresh_blind_list(self, snapshot: Any) -> None:
-        """Fill the BEFORE AI rows from the blinded snapshot (None before reveal)."""
-
-        self.blind_list.clear()
-        if not isinstance(snapshot, dict):
-            self.blind_section.visible = False
-            return
-        lesions = list(snapshot.get("lesions", []))
-        for lesion in lesions:
-            lesion_id = str(lesion.get("lesion_id", ""))
-            item = qt.QListWidgetItem(f"{lesion_id} · {figo_label(lesion.get('figo'))}")
-            item.setData(qt.Qt.UserRole, lesion_id)
-            item.setFlags(qt.Qt.ItemIsEnabled)
-            self._style_lesion_item(item, lesion_id, lesion.get("figo"))
-            self.blind_list.addItem(item)
-        if not lesions:
-            item = qt.QListWidgetItem("No myomas (zero confirmed)")
-            item.setFlags(qt.Qt.ItemIsEnabled)
-            item.setData(theme.ROW_TITLE, "No myomas (zero confirmed)")
-            self.blind_list.addItem(item)
-        self.blind_section_label.text = f"BEFORE AI · {len(lesions)}"
-        self.blind_list.setFixedHeight(self.blind_list.count * 34 + 4)
-        self.blind_section.visible = True
 
     def _refresh_empty_state(self) -> None:
         """No boxes and still free to draw one: the empty card replaces the list."""
@@ -2594,7 +2548,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if state is None:
             if not self.logic.read_only or self.logic.final_annotation is None:
                 return
-            self._refresh_blind_list(self.logic.final_annotation.get("blinded_snapshot"))
             # Filled on load; keeping the row here must not pull the views anywhere.
             selected_id = self._selected_lesion_id()
             self.lesion_list.blockSignals(True)
@@ -2633,7 +2586,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._refresh_progress()
             self._refresh_action_bar()
             return
-        self._refresh_blind_list(state.blinded_snapshot)
         selected_id = self._selected_lesion_id()
         self.lesion_list.blockSignals(True)
         self.lesion_list.clear()

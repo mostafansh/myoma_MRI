@@ -86,10 +86,11 @@ def test_correction_panel_drives_the_segment_editor() -> None:
             assert editor is not None and panel.editor is editor
             assert widget.page_stack.currentIndex == 1
             assert widget.segment_mode_button.enabled and widget.segment_mode_button.checked
-            # The blind read's answer is listed apart from the final boxes.
-            assert not widget.blind_section.isHidden()
-            assert widget.blind_section_label.text == "BEFORE AI · 0"
-            assert widget.myoma_section_label.text == "FINAL · 0"
+            # The blind read is saved to disk at reveal, without being shown.
+            draft = json.loads(widget.logic.storage.draft_path.read_text(encoding="utf-8"))
+            assert draft["phase"] == "ai_revealed" and draft["ai_revealed_at"]
+            assert draft["blinded_snapshot"] == {"zero_myomas": True, "lesions": []}
+            assert widget.myoma_section_label.text == "MYOMAS · 0"
 
             # Slicer's own buttons and segment table stay out of sight.
             for name in HIDDEN_EDITOR_PARTS:

@@ -37,7 +37,7 @@ The MyomaReviewLite module panel is restyled and restructured. Data formats, the
    - "Manifest: name (N cases)" with a "Change manifest" link at the bottom.
 
    Picking a case closes the drawer. The Cases/Annotation tabs go away.
-3. **Box / Segment switch** (replaces the earlier four-step bar): two buttons. "Box" shows the box/FIGO page; "Segment" shows the correction page and stays disabled until AI is revealed. After reveal the Box page lists the blind read's boxes under "BEFORE AI · N" (read-only, "Locked at reveal") above the editable "FINAL · N" boxes.
+3. **Box / Segment switch** (replaces the earlier four-step bar): two buttons. "Box" shows the box/FIGO page; "Segment" shows the correction page and stays disabled until AI is revealed. The blind read's boxes are saved silently at reveal (`blinded_snapshot` in the draft and the final annotation) so the AI mask's effect on the reader can be measured; the panel does not show them separately.
 4. **Page content**:
    - Myoma page: "MYOMAS · N", the myoma rows with their FIGO tags, Add box and Delete.
    - "Nothing to box?" folds into one line. It opens by itself when the case has no boxes.

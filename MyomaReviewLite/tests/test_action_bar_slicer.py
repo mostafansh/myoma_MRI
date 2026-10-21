@@ -65,7 +65,6 @@ def test_mode_switch_and_hint_follow_the_blind_read() -> None:
         widget._on_card_figo(first, {"kind": "standard", "type": 0})
         assert [button.text for button in widget.mode_buttons.values()] == ["Box", "Segment"]
         assert widget.box_mode_button.enabled and widget.box_mode_button.checked
-        assert widget.blind_section.isHidden(), "blind boxes listed apart before reveal"
         assert widget.status_label.text == f"{second} needs a FIGO type before you can reveal"
         assert widget.status_label.property("role") == "hint-warning"
         assert not widget.segment_mode_button.enabled, "Segment is clickable before reveal"
