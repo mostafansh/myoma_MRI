@@ -204,17 +204,20 @@ def _validate_case_images(case_id: str, paths: dict[str, Path]) -> None:
     reference = images["sagittal"]
     reference_shape = tuple(int(value) for value in reference.shape)
     reference_affine = np.asarray(reference.affine, dtype=float)
-    if len(reference_shape) != 3:
-        raise QueueCreationError(f"case {case_id} source images must be three-dimensional")
     for name, image in images.items():
-        shape = tuple(int(value) for value in image.shape)
-        affine = np.asarray(image.affine, dtype=float)
-        if shape != reference_shape or not np.allclose(
-            affine, reference_affine, rtol=0.0, atol=1e-5
-        ):
-            raise QueueCreationError(
-                f"case {case_id} {name} geometry does not match the sagittal reference"
-            )
+        if len(image.shape) != 3:
+            raise QueueCreationError(f"case {case_id} source images must be three-dimensional")
+    # The mask is edited on the acquired sagittal grid, so it must match it
+    # exactly. Axial and coronal keep their own acquired grids, already
+    # registered into the sagittal's world space, and are only resliced for
+    # display.
+    mask = images["mask"]
+    if tuple(int(value) for value in mask.shape) != reference_shape or not np.allclose(
+        np.asarray(mask.affine, dtype=float), reference_affine, rtol=0.0, atol=1e-5
+    ):
+        raise QueueCreationError(
+            f"case {case_id} mask geometry does not match the sagittal reference"
+        )
     try:
         mask_values = np.unique(np.asanyarray(images["mask"].dataobj))
     except Exception as exc:
