@@ -90,6 +90,7 @@ QCheckBox {{ color: {TEXT}; spacing: 8px; }}
 """
 
 CARD_QSS = f"""
+QFrame#MyomaFigoCard, QFrame#MyomaFigoCard QWidget {{ font-family: "Segoe UI"; }}
 QFrame#MyomaFigoCard {{ background: {SURFACE}; border: 1px solid #454b54; border-radius: 8px; }}
 QFrame#MyomaFigoCard QLabel {{ color: {TEXT}; font-weight: 600; background: transparent; }}
 QFrame#MyomaFigoCard QToolButton {{ background: #363b42; color: {TEXT}; border: none;
@@ -102,7 +103,10 @@ QFrame#MyomaFigoCard QToolButton#figo_close:hover {{ color: {TEXT}; }}
 QFrame#MyomaFigoCard QToolButton:disabled {{ color: #6b717a; }}
 QFrame#MyomaFigoCard QLineEdit, QFrame#MyomaFigoCard QComboBox {{ background: {FIELD};
     color: {TEXT}; border: 1px solid {BORDER}; border-radius: 5px; padding: 4px 6px; }}
-QFrame#MyomaFigoCard QLineEdit:focus {{ border-color: {ACCENT}; }}
+QFrame#MyomaFigoCard QLineEdit:focus, QFrame#MyomaFigoCard QComboBox:focus {{ border-color: {ACCENT}; }}
+QFrame#MyomaFigoCard QComboBox QAbstractItemView {{ background: {FIELD}; color: {TEXT};
+    border: 1px solid {BORDER}; selection-background-color: {ACCENT}; selection-color: white;
+    outline: none; }}
 """
 
 
@@ -252,8 +256,7 @@ class AppBranding:
     """Swap Slicer's logo, window title and icon for ours while the module is shown.
 
     ``enter`` remembers what Slicer showed and ``exit`` puts it back, so other
-    modules still look like plain Slicer. Slicer's "Help & Acknowledgement"
-    section is hidden for the same time.
+    modules still look like plain Slicer.
     """
 
     def __init__(self, logo_path: str) -> None:
@@ -268,13 +271,11 @@ class AppBranding:
         if window is None or self._saved is not None:
             return
         logo = window.findChild(qt.QLabel, "LogoLabel")
-        help_button = window.findChild(qt.QWidget, "HelpCollapsibleButton")
         self._saved = {
             "title": window.windowTitle,
             "icon": window.windowIcon,
             "app_icon": slicer.app.windowIcon,
             "logo_pixmap": qt.QPixmap(logo.pixmap) if logo is not None and logo.pixmap is not None else None,
-            "help_visible": bool(help_button.visible) if help_button is not None else None,
         }
         icon = qt.QIcon(self._logo_path)
         window.windowTitle = BRAND_NAME
@@ -284,8 +285,6 @@ class AppBranding:
         slicer.app.setWindowIcon(icon)
         if logo is not None:
             logo.setPixmap(self._logo_pixmap(icon))
-        if help_button is not None:
-            help_button.visible = False
 
     def exit(self) -> None:
         import qt
@@ -302,9 +301,6 @@ class AppBranding:
         logo = window.findChild(qt.QLabel, "LogoLabel")
         if logo is not None and saved["logo_pixmap"] is not None:
             logo.setPixmap(saved["logo_pixmap"])
-        help_button = window.findChild(qt.QWidget, "HelpCollapsibleButton")
-        if help_button is not None and saved["help_visible"] is not None:
-            help_button.visible = saved["help_visible"]
 
     def _keep_title(self, title: str) -> None:
         import slicer
