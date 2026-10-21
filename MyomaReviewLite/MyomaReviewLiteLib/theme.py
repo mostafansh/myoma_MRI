@@ -80,6 +80,8 @@ QLineEdit, QPlainTextEdit {{ background: {FIELD}; color: {TEXT}; border: 1px sol
 QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
 QPlainTextEdit[role="comment"] {{ border-top-left-radius: 0px; border-top-right-radius: 0px;
     border: 1px solid {ACCENT}; border-top: none; background: {FIELD}; }}
+QPlainTextEdit[role="comment"][opens="up"] {{ border-radius: 6px; border-bottom-left-radius: 0px;
+    border-bottom-right-radius: 0px; border: 1px solid {ACCENT}; border-bottom: none; }}
 QToolButton[role="bar"]:checked {{ border-color: {ACCENT}; }}
 
 QListWidget[role="rows"] {{ background: transparent; border: none; outline: none; }}

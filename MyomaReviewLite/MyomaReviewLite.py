@@ -1954,8 +1954,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.correction_save_button.connect("clicked()", self.on_save_draft)
         correction_actions.addWidget(self.correction_save_button)
         correction_layout.addLayout(correction_actions)
-        self.correction_comment_slot = qt.QVBoxLayout()
-        correction_layout.addLayout(self.correction_comment_slot)
         self.show_roi_check = qt.QCheckBox("Show ROI boxes")
         self.show_roi_check.checked = False
         self.show_roi_check.connect("toggled(bool)", self.on_show_roi_toggled)
@@ -1966,6 +1964,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.segment_editor_host_layout = qt.QVBoxLayout(self.segment_editor_host)
         self.segment_editor_host_layout.setContentsMargins(0, 0, 0, 0)
         correction_layout.addWidget(self.segment_editor_host, 1)
+        # The comment bar sits at the bottom here, above the final action.
+        self.correction_comment_slot = qt.QVBoxLayout()
+        correction_layout.addLayout(self.correction_comment_slot)
         self.complete_button = theme.set_role(qt.QPushButton("Export corrected labels and complete"), "primary")
         self.complete_button.connect("clicked()", self.on_complete)
         correction_layout.addWidget(self.complete_button)
@@ -2014,14 +2015,21 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._position_comment_overlay()
 
     def _position_comment_overlay(self) -> None:
-        """Lay the open comment box right under its bar, over whatever is below."""
+        """Lay the open comment box right under its bar, over whatever is below;
+        above the bar instead when it would run off the bottom of the tab."""
 
         edit = self.case_comment_edit
         if edit.isHidden():
             return
         bar = self.comment_toggle
-        corner = bar.mapTo(self.annotation_tab, qt.QPoint(0, bar.height))
-        edit.setGeometry(corner.x(), corner.y(), bar.width, edit.height)
+        corner = bar.mapTo(self.annotation_tab, qt.QPoint(0, 0))
+        below = corner.y() + bar.height
+        upward = below + edit.height > self.annotation_tab.height
+        top = corner.y() - edit.height if upward else below
+        edit.setProperty("opens", "up" if upward else "down")
+        edit.style().unpolish(edit)
+        edit.style().polish(edit)
+        edit.setGeometry(corner.x(), top, bar.width, edit.height)
         edit.raise_()
 
     def _set_comment_overlay_tracking(self, on: bool) -> None:
