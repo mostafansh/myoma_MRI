@@ -252,6 +252,24 @@ class QueueSummary:
                 return entry
         return None
 
+    def neighbour(self, case_id: str, step: int) -> QueueEntry | None:
+        """The nearest openable case before (step -1) or after (+1) ``case_id``.
+
+        Attention cases cannot be opened, so they are skipped; the list does
+        not wrap, and an unknown ``case_id`` has no neighbour.
+        """
+        index = next(
+            (i for i, entry in enumerate(self.entries) if entry.case_id == case_id), None
+        )
+        if index is None:
+            return None
+        index += step
+        while 0 <= index < len(self.entries):
+            if self.entries[index].status is not QueueStatus.ATTENTION:
+                return self.entries[index]
+            index += step
+        return None
+
     def next_unfinished(self, after_case_id: str) -> QueueEntry | None:
         if not self.entries:
             return None

@@ -42,10 +42,12 @@ def _child(card, cls, name):
     return found
 
 
-def _choose(combo, value):
-    index = combo.findData(value)
-    assert index >= 0, value
-    combo.setCurrentIndex(index)
+def _click(card, name):
+    _child(card, qt.QAbstractButton, name).click()
+
+
+def _shown(card, name):
+    return _child(card, qt.QWidget, name).isVisibleTo(card.widget)
 
 
 def test_a_type_button_saves_at_once():
@@ -54,36 +56,51 @@ def test_a_type_button_saves_at_once():
     button.click()
     assert figo == [("M01", {"kind": "standard", "type": 3})], figo
     assert button.checked
+    assert _child(card, qt.QGroupBox, "figo_type_group").title == "FIGO type"
 
 
 def test_type_8_waits_for_a_location():
     card, _p, figo, _t, _c = _card()
-    _child(card, qt.QToolButton, "figo_type_8").click()
+    assert not _shown(card, "figo_location_group")
+    _click(card, "figo_type_8")
     assert figo == []
-    combo = _child(card, qt.QComboBox, "figo_location")
-    assert combo.isVisibleTo(card.widget)
-    _choose(combo, "cervical")
+    assert _shown(card, "figo_location_group")
+    _click(card, "figo_location_cervical")
     assert figo == [("M01", {"kind": "standard", "type": 8, "location": "cervical"})], figo
 
 
-def test_hybrid_waits_for_both_parts():
+def test_hybrid_waits_for_both_sides_and_collapses_the_type_row():
     card, _p, figo, _t, _c = _card()
-    _child(card, qt.QToolButton, "figo_hybrid").click()
-    _choose(_child(card, qt.QComboBox, "figo_endometrial"), 2)
+    _click(card, "figo_hybrid")
+    assert not _shown(card, "figo_type_group"), "the type row stayed open under Hybrid"
+    bar = _child(card, qt.QToolButton, "figo_type_collapsed")
+    assert bar.isVisibleTo(card.widget)
+    assert bar.text == "FIGO type 0–8 · hidden while Hybrid is picked"
+    assert _child(card, qt.QGroupBox, "figo_endo_group").title == "Endometrial side"
+    assert _child(card, qt.QGroupBox, "figo_sero_group").title == "Serosal side"
+    _click(card, "figo_endo_1")
     assert figo == []
-    serosal = _child(card, qt.QComboBox, "figo_serosal")
-    _choose(serosal, 5)
-    assert figo == [("M01", {"kind": "hybrid", "endometrial": 2, "serosal": 5})], figo
-    _choose(serosal, 6)
-    assert len(figo) == 2 and figo[1][1]["serosal"] == 6, figo
+    _click(card, "figo_sero_6")
+    assert figo == [("M01", {"kind": "hybrid", "endometrial": 1, "serosal": 6})], figo
+    _click(card, "figo_sero_5")
+    assert len(figo) == 2 and figo[1][1]["serosal"] == 5, figo
+    bar.click()
+    assert _shown(card, "figo_type_group") and not bar.isVisibleTo(card.widget)
+    assert _child(card, qt.QToolButton, "figo_hybrid").checked, "expanding changed the kind"
 
 
 def test_uncertain_saves_after_a_reason():
     card, _p, figo, _t, _c = _card()
-    _child(card, qt.QToolButton, "figo_uncertain").click()
+    _click(card, "figo_uncertain")
     assert figo == []
-    _choose(_child(card, qt.QComboBox, "figo_reason"), "both_interfaces_unclear")
+    assert _child(card, qt.QGroupBox, "figo_reason_group").title == "Reason"
+    _click(card, "figo_reason_both_interfaces_unclear")
     assert figo == [("M01", {"kind": "uncertain", "reason": "both_interfaces_unclear"})], figo
+
+
+def test_no_dropdowns_remain():
+    card, _p, _f, _t, _c = _card()
+    assert len(card.widget.findChildren(qt.QComboBox)) == 0
 
 
 def test_text_is_flushed_on_close_only_when_changed():
@@ -104,35 +121,39 @@ def test_set_figo_updates_without_firing():
     assert figo == []
     card.set_figo(None)
     assert not _child(card, qt.QToolButton, "figo_type_5").checked
+    card.set_figo({"kind": "hybrid", "endometrial": 2, "serosal": 5})
+    for name in ("figo_hybrid", "figo_endo_2", "figo_sero_5"):
+        assert _child(card, qt.QToolButton, name).checked, name
+    assert not _shown(card, "figo_type_group"), "a loaded Hybrid left the type row open"
+    assert figo == []
 
 
 def test_read_only_disables_every_control():
     card, _p, _f, _t, _c = _card(read_only=True)
-    for cls in (qt.QToolButton, qt.QComboBox, qt.QLineEdit):
+    for cls in (qt.QAbstractButton, qt.QLineEdit):
         for w in card.widget.findChildren(cls):
-            if w.objectName == "figo_close":
+            if w.objectName in ("figo_close", "figo_type_collapsed"):
                 assert w.enabled
             else:
                 assert not w.enabled, w.objectName
 
 
-def test_wheel_over_an_unfocused_list_does_not_save():
-    card, parent, figo, _t, _c = _card()
-    parent.show()
-    _child(card, qt.QToolButton, "figo_hybrid").click()
-    _choose(_child(card, qt.QComboBox, "figo_endometrial"), 2)
-    serosal = _child(card, qt.QComboBox, "figo_serosal")
-    _choose(serosal, 5)
-    assert len(figo) == 1, figo
-    serosal.clearFocus()
-    assert not serosal.hasFocus()
-    event = qt.QWheelEvent(
-        qt.QPointF(5, 5), qt.QPointF(5, 5), qt.QPoint(0, 0), qt.QPoint(0, -120),
-        0, qt.Qt.Vertical, qt.Qt.NoButton, qt.Qt.NoModifier,
-    )
-    qt.QApplication.sendEvent(serosal, event)
-    assert len(figo) == 1, ("wheel changed a saved FIGO", figo)
-    assert serosal.currentIndex == serosal.findData(5)
+def test_read_only_card_can_expand_but_not_change():
+    figo_calls = []
+    card = FigoCard(lambda lid, f: figo_calls.append(f), lambda *a: None, lambda: None)
+    parent = qt.QWidget()
+    parent.resize(400, 300)
+    card.open(parent, "M01", {"kind": "hybrid", "endometrial": 2, "serosal": 5}, "", "", True)
+    bar = _child(card, qt.QToolButton, "figo_type_collapsed")
+    assert bar.enabled and bar.isVisibleTo(card.widget)
+    bar.click()
+    assert _shown(card, "figo_type_group")
+    for prefix in ("figo_type_", "figo_endo_", "figo_sero_", "figo_reason_", "figo_location_"):
+        for button in card.widget.findChildren(qt.QAbstractButton):
+            if button.objectName.startswith(prefix) and button.objectName != "figo_type_collapsed":
+                assert not button.enabled, button.objectName
+                button.click()
+    assert figo_calls == [], figo_calls
 
 
 def test_close_hides_even_when_saving_text_fails():
@@ -161,9 +182,8 @@ def test_reclicking_the_selected_kind_keeps_its_choices():
     card, _p, figo, _t, _c = _card()
     card.set_figo({"kind": "hybrid", "endometrial": 2, "serosal": 5})
     _child(card, qt.QToolButton, "figo_hybrid").click()
-    endo = _child(card, qt.QComboBox, "figo_endometrial")
-    sero = _child(card, qt.QComboBox, "figo_serosal")
-    assert endo.itemData(endo.currentIndex) == 2 and sero.itemData(sero.currentIndex) == 5
+    assert _child(card, qt.QToolButton, "figo_endo_2").checked
+    assert _child(card, qt.QToolButton, "figo_sero_5").checked
     assert figo == [], figo
 
 
@@ -181,8 +201,12 @@ def test_extra_rows_grow_the_card_instead_of_squashing_the_buttons():
     _child(card, qt.QToolButton, "figo_hybrid").click()
     slicer.app.processEvents()
     assert card.widget.height > closed_height, "the card did not grow for the hybrid rows"
-    assert button.height >= button_height, f"type buttons squashed to {button.height}px"
+    side = _child(card, qt.QToolButton, "figo_endo_3")
+    assert side.height >= button_height, f"side buttons squashed to {side.height}px"
     assert resizes, "the owner was not told to re-place the grown card"
+    _child(card, qt.QToolButton, "figo_type_collapsed").click()
+    slicer.app.processEvents()
+    assert button.height >= button_height, f"type buttons squashed to {button.height}px"
     _child(card, qt.QToolButton, "figo_type_3").click()
     slicer.app.processEvents()
     assert card.widget.height == closed_height, "the card did not shrink back"
@@ -190,12 +214,13 @@ def test_extra_rows_grow_the_card_instead_of_squashing_the_buttons():
 
 TESTS = (
     test_extra_rows_grow_the_card_instead_of_squashing_the_buttons,
-    test_wheel_over_an_unfocused_list_does_not_save,
+    test_no_dropdowns_remain,
+    test_read_only_card_can_expand_but_not_change,
     test_close_hides_even_when_saving_text_fails,
     test_reclicking_the_selected_kind_keeps_its_choices,
     test_a_type_button_saves_at_once,
     test_type_8_waits_for_a_location,
-    test_hybrid_waits_for_both_parts,
+    test_hybrid_waits_for_both_sides_and_collapses_the_type_row,
     test_uncertain_saves_after_a_reason,
     test_text_is_flushed_on_close_only_when_changed,
     test_set_figo_updates_without_firing,

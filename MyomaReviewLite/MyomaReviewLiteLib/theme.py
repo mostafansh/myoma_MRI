@@ -10,19 +10,28 @@ from __future__ import annotations
 
 from typing import Any
 
-# Colour tokens. Neutral surfaces are a touch cooler than Slicer's own dark
-# grey so the panel reads as one piece; status colours match the case tags.
-BG = "#24272c"
-SURFACE = "#2c3036"
-SURFACE_HOVER = "#33383f"
-FIELD = "#1b1d21"
-BORDER = "#3b4048"
-TEXT = "#e6e8eb"
-MUTED = "#9aa1aa"
-ACCENT = "#4f86d1"
-ACCENT_HOVER = "#6197e0"
-ACCENT_SOFT = "#2c3a50"
+# Colour tokens: "Warm monochrome". Neutral warm greys with a cream
+# highlight; the status colours below are the only real hues on the panel.
+BG = "#1b1917"
+SURFACE = "#24211f"
+SURFACE_HOVER = "#2a2724"
+BUTTON = "#2f2b28"
+FIELD = "#141210"
+BORDER = "#3a3532"
+GHOST_BORDER = "#5a534c"
+TEXT = "#efebe6"
+MUTED = "#a9a199"
+DISABLED_TEXT = "#8a8178"
+ACCENT = "#e8e2d9"
+ON_ACCENT = "#1b1917"
+ACCENT_SOFT = "#363230"
 AMBER = "#f0b85a"
+
+# The module panel's own object name, so only it (not Slicer around it) is painted.
+PANEL_OBJECT_NAME = "MyomaReviewLitePanel"
+
+FONT_FAMILY = "Hanken Grotesk"
+FONT_STACK = f'"{FONT_FAMILY}", "Segoe UI"'
 
 # Per status: (bar / dot colour, tag background, tag text).
 STATUS_COLOURS = {
@@ -34,8 +43,42 @@ STATUS_COLOURS = {
 FIGO_SET_COLOURS = ("#4fae72", "#2b4a36", "#9fe0b3")
 FIGO_MISSING_COLOURS = (AMBER, "#52401f", AMBER)
 
+
+def contrast_ratio(fg: str, bg: str) -> float:
+    """WCAG 2.x contrast ratio between two ``#rrggbb`` colours."""
+
+    def luminance(colour: str) -> float:
+        channels = [int(colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        r, g, b = (c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels)
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+    high, low = sorted((luminance(fg), luminance(bg)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+# Every text-on-background pair the panel draws; each must stay readable.
+CHECKED_PAIRS = (
+    ("text on background", TEXT, BG),
+    ("text on surface", TEXT, SURFACE),
+    ("muted on background", MUTED, BG),
+    ("muted on surface", MUTED, SURFACE),
+    ("muted on selected row", MUTED, ACCENT_SOFT),
+    ("primary button", ON_ACCENT, ACCENT),
+    ("text on button", TEXT, BUTTON),
+    ("text in field", TEXT, FIELD),
+    ("warning hint on surface", AMBER, SURFACE),
+    ("ok hint on surface", FIGO_SET_COLOURS[2], SURFACE),
+    ("banner text", "#c9ebd3", FIGO_SET_COLOURS[1]),
+    ("done step on background", FIGO_SET_COLOURS[2], BG),
+    ("FIGO set tag", FIGO_SET_COLOURS[2], FIGO_SET_COLOURS[1]),
+    ("FIGO missing tag", FIGO_MISSING_COLOURS[2], FIGO_MISSING_COLOURS[1]),
+    *((f"{key} tag", tag_fg, tag_bg) for key, (_dot, tag_bg, tag_fg) in STATUS_COLOURS.items()),
+)
+
 PANEL_QSS = f"""
-QWidget {{ font-family: "Segoe UI"; }}
+QWidget {{ font-family: {FONT_STACK}; }}
+QWidget#{PANEL_OBJECT_NAME} {{ background: {BG}; }}
+QStackedWidget, QStackedWidget > QWidget {{ background: transparent; }}
 QLabel[role="title"] {{ font-size: 15px; font-weight: bold; color: {TEXT}; }}
 QLabel[role="muted"] {{ color: {MUTED}; }}
 QLabel[role="section"] {{ color: {MUTED}; font-size: 11px; font-weight: 600;
@@ -49,38 +92,61 @@ QTabBar::tab {{ background: transparent; color: {MUTED}; padding: 8px 4px;
 QTabBar::tab:selected {{ color: {TEXT}; border-bottom: 2px solid {ACCENT}; }}
 QTabBar::tab:hover:!selected {{ color: {TEXT}; }}
 
-QPushButton {{ background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER};
+QPushButton {{ background: {BUTTON}; color: {TEXT}; border: 1px solid {BORDER};
     border-radius: 6px; padding: 7px 12px; }}
 QPushButton:hover {{ background: {SURFACE_HOVER}; }}
-QPushButton:disabled {{ color: #6b717a; background: #282b30; border-color: #30343a; }}
+QPushButton:disabled {{ color: {DISABLED_TEXT}; background: {SURFACE}; border-color: {BORDER}; }}
 QPushButton[role="primary"] {{ background: {ACCENT}; border: 1px solid {ACCENT};
-    color: white; font-weight: 600; }}
-QPushButton[role="primary"]:hover {{ background: {ACCENT_HOVER}; }}
-QPushButton[role="primary"]:disabled {{ background: #303a48; border-color: #303a48; color: #7d8794; }}
-QPushButton[role="ghost"] {{ background: transparent; border: 1px dashed #4a505a; color: {TEXT}; }}
+    color: {ON_ACCENT}; font-weight: 600; }}
+QPushButton[role="primary"]:hover {{ background: #f4efe7; }}
+QPushButton[role="primary"]:disabled {{ background: {BUTTON}; border-color: {BUTTON}; color: {DISABLED_TEXT}; }}
+QPushButton[role="ghost"] {{ background: transparent; border: 1px dashed {GHOST_BORDER}; color: {TEXT}; }}
 QPushButton[role="ghost"]:hover {{ background: {SURFACE}; }}
-QPushButton[role="ghost"]:disabled {{ color: #6b717a; border-color: #3a3e45; background: transparent; }}
-QPushButton[role="link"] {{ background: transparent; border: none; color: {ACCENT_HOVER};
-    padding: 0px; text-align: left; }}
-QPushButton[role="link"]:hover {{ color: #8ab4ee; }}
+QPushButton[role="ghost"]:disabled {{ color: {DISABLED_TEXT}; border-color: {BORDER}; background: transparent; }}
+QPushButton[role="link"] {{ background: transparent; border: none; color: {TEXT};
+    padding: 0px; text-align: left; text-decoration: underline; }}
+QPushButton[role="link"]:hover {{ color: #ffffff; }}
 
 QToolButton[role="pill"] {{ background: {SURFACE}; color: {MUTED}; border: none;
     border-radius: 12px; padding: 4px 11px; }}
 QToolButton[role="pill"]:hover {{ color: {TEXT}; }}
-QToolButton[role="pill"]:checked {{ background: {ACCENT}; color: white; }}
+QToolButton[role="pill"]:checked {{ background: {ACCENT}; color: {ON_ACCENT}; }}
 QToolButton[role="icon"] {{ background: {SURFACE}; color: {MUTED}; border: none;
     border-radius: 6px; padding: 4px 9px; }}
 QToolButton[role="icon"]:hover {{ background: {SURFACE_HOVER}; color: {TEXT}; }}
+QToolButton[role="strip"] {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 8px; }}
+QToolButton[role="strip"]:hover {{ background: {SURFACE_HOVER}; }}
+QToolButton[role="strip"]:checked {{ border-color: {ACCENT}; }}
+QToolButton[role="icon"]:disabled {{ background: transparent; }}
 QToolButton[role="bar"] {{ background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER};
     border-radius: 6px; padding: 6px 8px; text-align: left; }}
 QToolButton[role="bar"]:checked {{ border-bottom-left-radius: 0px; border-bottom-right-radius: 0px; }}
 
 QLineEdit, QPlainTextEdit {{ background: {FIELD}; color: {TEXT}; border: 1px solid {BORDER};
-    border-radius: 6px; padding: 6px 8px; selection-background-color: {ACCENT}; }}
+    border-radius: 6px; padding: 6px 8px; selection-background-color: {ACCENT};
+    selection-color: {ON_ACCENT}; }}
 QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
-QPlainTextEdit[role="comment"] {{ border-top-left-radius: 0px; border-top-right-radius: 0px;
-    border: 1px solid {ACCENT}; border-top: none; background: {FIELD}; }}
+QPlainTextEdit[role="comment"] {{ border: 1px solid {ACCENT}; border-radius: 8px; background: {FIELD}; }}
 QToolButton[role="bar"]:checked {{ border-color: {ACCENT}; }}
+
+QToolButton[role="step"] {{ background: transparent; color: {MUTED}; border: none;
+    border-top: 3px solid {BORDER}; border-radius: 0px; padding: 6px 0px 2px 0px;
+    text-align: left; font-size: 12px; }}
+QToolButton[role="step"][state="done"] {{ border-top-color: {STATUS_COLOURS["complete"][0]};
+    color: {FIGO_SET_COLOURS[2]}; }}
+QToolButton[role="step"][state="now"] {{ border-top-color: {ACCENT}; color: {TEXT}; font-weight: 600; }}
+QToolButton[role="step"]:enabled:hover {{ color: {TEXT}; }}
+QToolButton[role="fold"] {{ background: transparent; color: {MUTED}; border: none; padding: 4px 0px;
+    text-align: left; }}
+QToolButton[role="fold"]:hover, QToolButton[role="fold"]:checked {{ color: {TEXT}; }}
+QToolButton[role="icon"]:checked {{ background: {ACCENT}; color: {ON_ACCENT}; }}
+QFrame[role="footer"] {{ background: {SURFACE}; border: none; border-top: 1px solid {BORDER}; }}
+QFrame[role="banner"] {{ background: {FIGO_SET_COLOURS[1]}; border: none; border-radius: 8px; }}
+QLabel[role="banner-title"] {{ color: {FIGO_SET_COLOURS[2]}; font-weight: 600; }}
+QLabel[role="banner-text"] {{ color: #c9ebd3; font-size: 12px; }}
+QLabel[role="hint-muted"] {{ color: {MUTED}; font-size: 12px; }}
+QLabel[role="hint-warning"] {{ color: {AMBER}; font-size: 12px; }}
+QLabel[role="hint-ok"] {{ color: {FIGO_SET_COLOURS[2]}; font-size: 12px; }}
 
 QListWidget[role="rows"] {{ background: transparent; border: none; outline: none; }}
 
@@ -88,23 +154,27 @@ QCheckBox {{ color: {TEXT}; spacing: 8px; }}
 """
 
 CARD_QSS = f"""
-QFrame#MyomaFigoCard, QFrame#MyomaFigoCard QWidget {{ font-family: "Segoe UI"; }}
-QFrame#MyomaFigoCard {{ background: {SURFACE}; border: 1px solid #454b54; border-radius: 8px; }}
+QFrame#MyomaFigoCard, QFrame#MyomaFigoCard QWidget {{ font-family: {FONT_STACK}; }}
+QFrame#MyomaFigoCard {{ background: {SURFACE}; border: 1px solid {GHOST_BORDER}; border-radius: 8px; }}
 QFrame#MyomaFigoCard QLabel {{ color: {TEXT}; font-weight: 600; background: transparent; }}
-QFrame#MyomaFigoCard QToolButton {{ background: #363b42; color: {TEXT}; border: none;
-    border-radius: 5px; padding: 5px 4px; min-width: 22px; }}
-QFrame#MyomaFigoCard QToolButton:hover {{ background: #40464e; }}
-QFrame#MyomaFigoCard QToolButton:checked {{ background: {ACCENT}; color: white; font-weight: 600; }}
+QFrame#MyomaFigoCard QToolButton {{ background: {BUTTON}; color: {TEXT}; border: none;
+    border-radius: 5px; padding: 5px 2px; min-width: 18px; }}
+QFrame#MyomaFigoCard QToolButton:hover {{ background: {SURFACE_HOVER}; }}
+QFrame#MyomaFigoCard QToolButton:checked {{ background: {ACCENT}; color: {ON_ACCENT}; font-weight: 600; }}
 QFrame#MyomaFigoCard QToolButton#figo_close {{ background: transparent; color: {MUTED};
     font-size: 14px; min-width: 0px; }}
 QFrame#MyomaFigoCard QToolButton#figo_close:hover {{ color: {TEXT}; }}
-QFrame#MyomaFigoCard QToolButton:disabled {{ color: #6b717a; }}
-QFrame#MyomaFigoCard QLineEdit, QFrame#MyomaFigoCard QComboBox {{ background: {FIELD};
-    color: {TEXT}; border: 1px solid {BORDER}; border-radius: 5px; padding: 4px 6px; }}
-QFrame#MyomaFigoCard QLineEdit:focus, QFrame#MyomaFigoCard QComboBox:focus {{ border-color: {ACCENT}; }}
-QFrame#MyomaFigoCard QComboBox QAbstractItemView {{ background: {FIELD}; color: {TEXT};
-    border: 1px solid {BORDER}; selection-background-color: {ACCENT}; selection-color: white;
-    outline: none; }}
+QFrame#MyomaFigoCard QToolButton:disabled {{ color: {DISABLED_TEXT}; }}
+QFrame#MyomaFigoCard QLineEdit {{ background: {FIELD}; color: {TEXT};
+    border: 1px solid {BORDER}; border-radius: 5px; padding: 4px 6px; }}
+QFrame#MyomaFigoCard QLineEdit:focus {{ border-color: {ACCENT}; }}
+QFrame#MyomaFigoCard QGroupBox {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 6px;
+    margin-top: 9px; padding-top: 4px; }}
+QFrame#MyomaFigoCard QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0px 4px;
+    color: {MUTED}; font-size: 12px; }}
+QFrame#MyomaFigoCard QToolButton#figo_type_collapsed {{ background: {BG}; color: {MUTED};
+    border: 1px solid {BORDER}; border-radius: 6px; padding: 6px 8px; text-align: left; font-size: 12px; }}
+QFrame#MyomaFigoCard QToolButton#figo_type_collapsed:hover {{ color: {TEXT}; }}
 """
 
 
@@ -183,6 +253,8 @@ def make_row_delegate(parent: Any) -> Any:
 
     class _RowDelegate(qt.QStyledItemDelegate):
         def sizeHint(self, option, index):
+            if index.data(ROW_HEADER):
+                return qt.QSize(120, 26)
             subtitle = index.data(ROW_SUBTITLE)
             return qt.QSize(120, 44 if subtitle else 34)
 
@@ -190,6 +262,20 @@ def make_row_delegate(parent: Any) -> Any:
             painter.save()
             try:
                 painter.setRenderHint(qt.QPainter.Antialiasing, True)
+                if index.data(ROW_HEADER):
+                    # A group title: small muted caps, never hovered or picked.
+                    font = qt.QFont(painter.font())
+                    font.setPointSizeF(max(font.pointSizeF() - 1.5, 6.0))
+                    font.setWeight(qt.QFont.DemiBold)
+                    font.setLetterSpacing(qt.QFont.AbsoluteSpacing, 1.0)
+                    painter.setFont(font)
+                    painter.setPen(qt.QColor(MUTED))
+                    painter.drawText(
+                        option.rect.adjusted(6, 0, 0, -2),
+                        int(qt.Qt.AlignLeft | qt.Qt.AlignBottom),
+                        str(index.data(ROW_TITLE) or ""),
+                    )
+                    return
                 rect = option.rect.adjusted(0, 2, -2, -2)
                 selected = bool(int(option.state) & int(qt.QStyle.State_Selected))
                 hovered = bool(int(option.state) & int(qt.QStyle.State_MouseOver))
@@ -244,3 +330,4 @@ ROW_TITLE = 0x0100 + 10
 ROW_SUBTITLE = 0x0100 + 11
 ROW_TAG = 0x0100 + 12
 ROW_COLOURS = 0x0100 + 13
+ROW_HEADER = 0x0100 + 14

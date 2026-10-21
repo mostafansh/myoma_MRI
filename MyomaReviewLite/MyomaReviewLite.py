@@ -65,6 +65,7 @@ from MyomaReviewLiteLib import (  # noqa: E402
     CaseStorage,
     DatasetManifest,
     ImageGeometry,
+    QueueEntry,
     QueueStatus,
     QueueSummary,
     ReviewSaveCoordinator,
@@ -90,6 +91,20 @@ from MyomaReviewLiteLib.figo_card import FigoCard, card_position, figo_label, mi
 from MyomaReviewLiteLib.view_tools import ReviewViewTools
 from MyomaReviewLiteLib.correction_tools import ReviewCorrectionTools
 from MyomaReviewLiteLib import theme
+from MyomaReviewLiteLib.fonts import load_bundled_fonts
+from MyomaReviewLiteLib.panel_model import (
+    CASE_FILTER_STATUSES,
+    CASE_FILTERS,
+    DEFAULT_CASE_FILTER,
+    STEP_TITLES,
+    bottom_hint,
+    case_groups,
+    matches_case_search,
+    queue_strip_text,
+    step_states,
+)
+
+ICON_DIR = Path(__file__).resolve().parent / "Resources" / "Icons"
 
 
 VIEW_NAMES = {
@@ -133,20 +148,9 @@ ROI_PICK_TOLERANCE_MM = 1.0
 # A revealed box keeps its selection when a handle just outside it is clicked.
 ROI_ACTIVE_PICK_TOLERANCE_MM = 6.0
 
-# The Annotation tab's post-reveal tabs, and the page_stack page each shows
-# (page 0 is the myoma/FIGO page, page 1 the Segment Editor correction page).
-PAGE_TAB_TITLES = ("Segmentation", "FIGO")
-PAGE_FOR_TAB = (1, 0)
-
-# Case-browser filter/search, ported from the sibling BratsReviewLite
-# pilot's "Subjects" tab pattern so both pilots pick a case the same way.
-CASE_FILTERS = (
-    ("All", "all"),
-    ("Unfinished", "unfinished"),
-    ("Finished", "finished"),
-    ("Attention", "attention"),
-)
-DEFAULT_CASE_FILTER = "all"
+# page_stack pages: 0 is the myoma/FIGO page, 1 the Segment Editor correction
+# page. After reveal the step bar's "2 FIGO" and "4 Correct" switch between them.
+STEP_FOR_PAGE = {1: 0, 3: 1}
 
 # The reviewer-configurable keyboard shortcut panel. Each row is
 # (action id, label shown in the shortcut dialog, factory-default key
@@ -163,6 +167,7 @@ SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] 
     ("delete_box", "Delete box", "", "on_delete_box", "delete_button", "Delete"),
     ("save_draft", "Save draft", "", "on_save_draft", "save_draft_button", "Save draft"),
     ("show_myomas", "Show segmented myomas", "V", "on_show_myomas", None, None),
+    ("toggle_roi_boxes", "Show ROI boxes", "Q", "on_toggle_roi_boxes", "show_roi_check", "Show ROI boxes"),
 )
 SHORTCUT_SETTINGS_PREFIX = "MyomaReviewLite/Shortcuts/"
 # Mouse-button bindings, layered on the same action list as
@@ -197,12 +202,6 @@ CASE_STATUS_TITLES = {
     QueueStatus.IN_PROGRESS: "In progress",
     QueueStatus.COMPLETE: "Finished",
     QueueStatus.ATTENTION: "Attention",
-}
-CASE_FILTER_STATUSES = {
-    "all": frozenset(QueueStatus),
-    "unfinished": frozenset({QueueStatus.NEW, QueueStatus.IN_PROGRESS}),
-    "finished": frozenset({QueueStatus.COMPLETE}),
-    "attention": frozenset({QueueStatus.ATTENTION}),
 }
 
 
@@ -1322,6 +1321,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         super().setup()
         if not SLICER_AVAILABLE:
             return
+        # Before the stylesheet asks for it; a failed load falls back to Segoe UI.
+        load_bundled_fonts(Path(__file__).resolve().parent / "Resources" / "Fonts")
         self._build_ui()
         self._install_shortcuts()
         self._install_mouse_bindings()
@@ -1601,62 +1602,51 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def _build_ui(self) -> None:
         # The look lives in MyomaReviewLiteLib/theme.py: widgets here only get
         # a "role" and the panel stylesheet decides how each role is drawn.
+        self.parent.objectName = theme.PANEL_OBJECT_NAME
+        self.parent.setAttribute(qt.Qt.WA_StyledBackground, True)
         self.parent.setStyleSheet(theme.PANEL_QSS)
         self.layout.setContentsMargins(10, 8, 10, 8)
 
-        # --- Header: what is open, and by whom ---
-        header = qt.QVBoxLayout()
-        header.setSpacing(2)
-        title_row = qt.QHBoxLayout()
+        # --- Header: the open case between previous / next case buttons ---
+        header = qt.QHBoxLayout()
+        header.setSpacing(6)
+        self.prev_case_button = self._icon_button("chevron-left.svg", "Previous case", self.on_previous_case)
+        header.addWidget(self.prev_case_button)
+        title_block = qt.QVBoxLayout()
+        title_block.setSpacing(0)
         self.study_label = theme.set_role(qt.QLabel("Myoma review"), "title")
-        title_row.addWidget(self.study_label, 1)
-        header.addLayout(title_row)
-        sub_row = qt.QHBoxLayout()
-        sub_row.setSpacing(6)
+        self.study_label.alignment = qt.Qt.AlignCenter
+        title_block.addWidget(self.study_label)
         self.case_header = theme.set_role(qt.QLabel("No case open"), "muted")
-        sub_row.addWidget(self.case_header)
-        self.manifest_button = theme.set_role(qt.QPushButton("Open case manifest"), "link")
-        self.manifest_button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
-        self.manifest_button.connect("clicked()", self.choose_manifest)
-        sub_row.addWidget(self.manifest_button)
-        sub_row.addStretch(1)
-        header.addLayout(sub_row)
+        self.case_header.alignment = qt.Qt.AlignCenter
+        title_block.addWidget(self.case_header)
+        header.addLayout(title_block, 1)
+        self.next_case_button = self._icon_button("chevron-right.svg", "Next case", self.on_next_case)
+        header.addWidget(self.next_case_button)
         self.layout.addLayout(header)
-        self.status_label = theme.set_role(qt.QLabel("Open one prepared case to begin."), "muted")
-        self.status_label.wordWrap = True
-        self.layout.addWidget(self.status_label)
 
-        # Two focus states, not one long scroll: picking a case and
-        # annotating it are different tasks and never need to be on screen
-        # at once. Choosing a case jumps here to "Annotation"; see
-        # _focus_annotation_tab. Ported from the BratsReviewLite
-        # Subjects/Annotation tab split.
-        self.tab_widget = qt.QTabWidget()
-        self.tab_widget.documentMode = True
-        self.layout.addWidget(self.tab_widget, 1)
-
-        self.cases_tab = qt.QWidget()
-        cases_layout = qt.QVBoxLayout(self.cases_tab)
-        cases_layout.setContentsMargins(0, 10, 0, 0)
-        cases_layout.setSpacing(8)
-        self.tab_widget.addTab(self.cases_tab, "Cases")
-
-        self.annotation_tab = qt.QWidget()
-        annotation_layout = qt.QVBoxLayout(self.annotation_tab)
-        annotation_layout.setContentsMargins(0, 10, 0, 0)
-        annotation_layout.setSpacing(8)
-        self.tab_widget.addTab(self.annotation_tab, "Annotation")
-
-        # --- Cases tab: progress bar, filter pills, search, case rows ---
-        progress_row = qt.QHBoxLayout()
-        progress_row.addWidget(qt.QLabel("Progress"))
-        progress_row.addStretch(1)
+        # --- Queue strip: progress at a glance; clicking it opens the drawer ---
+        self.queue_toggle = theme.set_role(qt.QToolButton(), "strip")
+        self.queue_toggle.checkable = True
+        self.queue_toggle.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self.queue_toggle.setMinimumHeight(52)
+        self.queue_toggle.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.queue_toggle.connect("toggled(bool)", self._on_queue_toggled)
+        strip_layout = qt.QVBoxLayout(self.queue_toggle)
+        strip_layout.setContentsMargins(10, 8, 10, 8)
+        strip_layout.setSpacing(6)
+        strip_row = qt.QHBoxLayout()
+        strip_row.addWidget(qt.QLabel("Queue"))
+        strip_row.addStretch(1)
         self.progress_label = theme.set_role(qt.QLabel(""), "muted")
-        progress_row.addWidget(self.progress_label)
-        cases_layout.addLayout(progress_row)
+        strip_row.addWidget(self.progress_label)
+        arrow = qt.QLabel()
+        arrow.setPixmap(qt.QIcon(str(ICON_DIR / "chevron-down.svg")).pixmap(14, 14))
+        strip_row.addWidget(arrow)
+        strip_layout.addLayout(strip_row)
         self.progress_bar = qt.QFrame()
-        self.progress_bar.setFixedHeight(6)
-        self.progress_bar.setStyleSheet(f"background: {theme.SURFACE}; border-radius: 3px;")
+        self.progress_bar.setFixedHeight(4)
+        self.progress_bar.setStyleSheet(f"background: {theme.FIELD}; border-radius: 2px;")
         bar_layout = qt.QHBoxLayout(self.progress_bar)
         bar_layout.setContentsMargins(0, 0, 0, 0)
         bar_layout.setSpacing(0)
@@ -1668,11 +1658,28 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             segment.visible = False
             bar_layout.addWidget(segment)
             self.progress_segments[status] = segment
-        cases_layout.addWidget(self.progress_bar)
-        self.progress_legend = theme.set_role(qt.QLabel(""), "muted")
-        self.progress_legend.textFormat = qt.Qt.RichText
-        cases_layout.addWidget(self.progress_legend)
+        strip_layout.addWidget(self.progress_bar)
+        # The strip's labels are decoration: clicks belong to the button.
+        for child in self.queue_toggle.findChildren(qt.QWidget):
+            child.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        self.layout.addWidget(self.queue_toggle)
 
+        # Picking a case and annotating it never need to be on screen at once,
+        # so the drawer takes the annotation's place while it is open.
+        self.content_stack = qt.QStackedWidget()
+        self.layout.addWidget(self.content_stack, 1)
+        self.annotation_tab = qt.QWidget()
+        annotation_layout = qt.QVBoxLayout(self.annotation_tab)
+        annotation_layout.setContentsMargins(0, 10, 0, 0)
+        annotation_layout.setSpacing(8)
+        self.content_stack.addWidget(self.annotation_tab)
+        self.queue_drawer = qt.QWidget()
+        cases_layout = qt.QVBoxLayout(self.queue_drawer)
+        cases_layout.setContentsMargins(0, 10, 0, 0)
+        cases_layout.setSpacing(8)
+        self.content_stack.addWidget(self.queue_drawer)
+
+        # --- Queue drawer: filter pills, search, grouped case rows, manifest ---
         filter_row = qt.QHBoxLayout()
         filter_row.setSpacing(6)
         self.filter_buttons: dict[str, Any] = {}
@@ -1700,8 +1707,20 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.case_list.setMouseTracking(True)
         self.case_list.minimumHeight = 200
         self.case_list.connect("itemClicked(QListWidgetItem*)", self.on_case_chosen)
-        # The list is this tab's whole job now, so let it claim the room.
         cases_layout.addWidget(self.case_list, 1)
+        self.case_empty_label = theme.set_role(qt.QLabel("No cases match"), "muted")
+        self.case_empty_label.alignment = qt.Qt.AlignCenter
+        self.case_empty_label.visible = False
+        cases_layout.addWidget(self.case_empty_label)
+
+        manifest_row = qt.QHBoxLayout()
+        self.manifest_label = theme.set_role(qt.QLabel(""), "muted")
+        manifest_row.addWidget(self.manifest_label, 1)
+        self.manifest_button = theme.set_role(qt.QPushButton("Open case manifest"), "link")
+        self.manifest_button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.manifest_button.connect("clicked()", self.choose_manifest)
+        manifest_row.addWidget(self.manifest_button)
+        cases_layout.addLayout(manifest_row)
 
         self.view_tools = ReviewViewTools(self.logic, self.parent)
         # Lets an Alt-drag disarm the Segment Editor for the drag's duration,
@@ -1712,35 +1731,40 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # window/level now, see AltDragWindowLevel), so there is nothing of
         # its to add to the layout here.
 
-        # --- Annotation tab: page tabs, case comment, then the page ---
-        # Once AI is revealed the two pages are two views of one step, so they
-        # get plain tabs; switching leaves the slice views (and mask) alone.
-        # Before reveal there is only the annotation page and no tab bar.
-        self.page_tabs = qt.QTabBar()
-        self.page_tabs.drawBase = False
-        self.page_tabs.expanding = False
-        for text_value in PAGE_TAB_TITLES:
-            self.page_tabs.addTab(text_value)
-        self.page_tabs.visible = False
-        self.page_tabs.connect("currentChanged(int)", self._on_page_tab_changed)
-        annotation_layout.addWidget(self.page_tabs)
+        # --- Annotation: step bar, read-only banner, the page, the action bar ---
+        self.step_bar = qt.QWidget()
+        step_layout = qt.QHBoxLayout(self.step_bar)
+        step_layout.setContentsMargins(0, 0, 0, 0)
+        step_layout.setSpacing(4)
+        self.step_buttons: list[Any] = []
+        for number, title in enumerate(STEP_TITLES, start=1):
+            button = theme.set_role(qt.QToolButton(), "step")
+            button.text = f"{number} {title}"
+            button.setProperty("state", "todo")
+            button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+            button.enabled = False
+            button.connect("clicked()", lambda _checked=False, index=number - 1: self._on_step_clicked(index))
+            step_layout.addWidget(button)
+            self.step_buttons.append(button)
+        annotation_layout.addWidget(self.step_bar)
 
-        self.reopen_button = qt.QPushButton("Reopen case for editing")
-        self.reopen_button.toolTip = (
-            "Return this completed case to AI correction. The published results are "
-            "backed up, and the case must be completed again."
-        )
-        self.reopen_button.connect("clicked()", self.on_reopen_case)
-        self.reopen_button.visible = False
-        annotation_layout.addWidget(self.reopen_button)
-        # The case comment stays folded away until the reader wants it. Its
-        # bar sits under the current page's main actions (_place_comment_bar)
-        # and the text box drops down over the controls below it instead of
-        # pushing them down (_position_comment_overlay).
-        self.comment_toggle = theme.set_role(qt.QToolButton(), "bar")
+        self.readonly_banner = theme.set_role(qt.QFrame(), "banner")
+        banner_layout = qt.QVBoxLayout(self.readonly_banner)
+        banner_layout.setContentsMargins(12, 8, 12, 8)
+        banner_layout.setSpacing(2)
+        banner_layout.addWidget(theme.set_role(qt.QLabel("Finished"), "banner-title"))
+        banner_layout.addWidget(theme.set_role(qt.QLabel("Read-only. Nothing here can be changed."), "banner-text"))
+        self.readonly_banner.visible = False
+        annotation_layout.addWidget(self.readonly_banner)
+
+        # The case comment stays folded away until the reader wants it: an
+        # icon in the action bar opens it as a pop-over just above the bar
+        # (_position_comment_overlay), covering the page instead of pushing it.
+        self.comment_toggle = theme.set_role(qt.QToolButton(), "icon")
         self.comment_toggle.checkable = True
-        self.comment_toggle.toolButtonStyle = qt.Qt.ToolButtonTextBesideIcon
-        self.comment_toggle.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self.comment_toggle.toolButtonStyle = qt.Qt.ToolButtonIconOnly
+        self.comment_toggle.setIconSize(qt.QSize(16, 16))
+        self.comment_toggle.setFixedSize(38, 34)
         self.comment_toggle.connect("toggled(bool)", self.on_comment_toggled)
         self.case_comment_edit = theme.set_role(qt.QPlainTextEdit(self.annotation_tab), "comment")
         self.case_comment_edit.placeholderText = "Comment on the whole case"
@@ -1750,13 +1774,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         comment_escape.context = qt.Qt.WidgetWithChildrenShortcut
         comment_escape.connect("activated()", lambda: setattr(self.comment_toggle, "checked", False))
         self._comment_overlay_filter = self._make_comment_overlay_filter()
-        self._refresh_comment_toggle()
 
         self.page_stack = qt.QStackedWidget()
         self.page_stack.connect("currentChanged(int)", lambda _index: self._on_page_changed())
         annotation_layout.addWidget(self.page_stack, 1)
-        # The blinded annotation page: boxes, FIGO (on the image card), early
-        # stops and reveal all live here; the same page is used after reveal.
+        # The blinded annotation page: boxes, FIGO (on the image card) and
+        # early stops live here; the same page is used after reveal.
         blind = qt.QWidget()
         blind_layout = qt.QVBoxLayout(blind)
         blind_layout.setContentsMargins(0, 0, 0, 0)
@@ -1784,8 +1807,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         actions.addWidget(self.add_button, 1)
         actions.addWidget(self.delete_button)
         blind_layout.addLayout(actions)
-        self.blind_comment_slot = qt.QVBoxLayout()
-        blind_layout.addLayout(self.blind_comment_slot)
         # Only shown while a box is being placed or redrawn.
         self.roi_edit_bar = qt.QWidget()
         roi_transaction_actions = qt.QHBoxLayout(self.roi_edit_bar)
@@ -1799,15 +1820,27 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         blind_layout.addWidget(self.roi_edit_bar)
         self._set_roi_edit_buttons(False)
         # Only asked before reveal; once AI is shown the answer is settled.
+        # Folded to one line unless the case has no boxes (_refresh_nothing_to_box).
         self.nothing_to_box_section = qt.QWidget()
         nothing_layout = qt.QVBoxLayout(self.nothing_to_box_section)
         nothing_layout.setContentsMargins(0, 0, 0, 0)
         nothing_layout.setSpacing(6)
         blind_layout.addWidget(self.nothing_to_box_section)
-        nothing_layout.addWidget(theme.set_role(qt.QLabel("NOTHING TO BOX?"), "section"))
+        self.nothing_to_box_toggle = theme.set_role(qt.QToolButton(), "fold")
+        self.nothing_to_box_toggle.text = "Nothing to box? No uterus, wrong image, cannot assess"
+        self.nothing_to_box_toggle.checkable = True
+        self.nothing_to_box_toggle.toolButtonStyle = qt.Qt.ToolButtonTextBesideIcon
+        self.nothing_to_box_toggle.arrowType = qt.Qt.RightArrow
+        self.nothing_to_box_toggle.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self.nothing_to_box_toggle.connect("toggled(bool)", self._set_nothing_to_box_open)
+        nothing_layout.addWidget(self.nothing_to_box_toggle)
+        self.nothing_to_box_body = qt.QWidget()
+        body_layout = qt.QVBoxLayout(self.nothing_to_box_body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(6)
         self.zero_check = qt.QCheckBox("Confirm zero myomas")
         self.zero_check.connect("toggled(bool)", self.on_zero_toggled)
-        nothing_layout.addWidget(self.zero_check)
+        body_layout.addWidget(self.zero_check)
         # Early stops answer "is there anything to box at all", so they sit
         # with the zero-myoma confirmation.
         stops = qt.QHBoxLayout()
@@ -1818,34 +1851,16 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             button.connect("clicked()", lambda _checked=False, value=status: self.on_early_stop(value))
             stops.addWidget(button, 1)
             self.early_stop_buttons.append(button)
-        nothing_layout.addLayout(stops)
-        blind_layout.addWidget(theme.set_role(qt.QFrame(), "divider"))
-        self.reveal_hint = theme.set_role(qt.QLabel(""), "warning")
-        self.reveal_hint.wordWrap = True
-        self.reveal_hint.visible = False
-        blind_layout.addWidget(self.reveal_hint)
-        lower = qt.QHBoxLayout()
-        self.save_draft_button = qt.QPushButton("Save draft")
-        self.save_draft_button.connect("clicked()", self.on_save_draft)
-        self.reveal_button = theme.set_role(qt.QPushButton("Reveal AI  →"), "primary")
-        self.reveal_button.connect("clicked()", self.on_reveal_ai)
-        lower.addWidget(self.save_draft_button)
-        lower.addWidget(self.reveal_button, 1)
-        blind_layout.addLayout(lower)
+        body_layout.addLayout(stops)
+        self.nothing_to_box_body.visible = False
+        nothing_layout.addWidget(self.nothing_to_box_body)
+        self._nothing_to_box_case: str | None = None
         self.page_stack.addWidget(blind)
 
         correction = qt.QWidget()
         correction_layout = qt.QVBoxLayout(correction)
         correction_layout.setContentsMargins(0, 0, 0, 0)
         correction_layout.setSpacing(6)
-        correction_actions = qt.QHBoxLayout()
-        self.correction_save_button = qt.QPushButton("Save draft")
-        self.correction_save_button.connect("clicked()", self.on_save_draft)
-        correction_actions.addStretch(1)
-        correction_actions.addWidget(self.correction_save_button)
-        correction_layout.addLayout(correction_actions)
-        self.correction_comment_slot = qt.QVBoxLayout()
-        correction_layout.addLayout(self.correction_comment_slot)
         self.show_roi_check = qt.QCheckBox("Show ROI boxes")
         self.show_roi_check.checked = False
         self.show_roi_check.connect("toggled(bool)", self.on_show_roi_toggled)
@@ -1855,10 +1870,41 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.segment_editor_host_layout = qt.QVBoxLayout(self.segment_editor_host)
         self.segment_editor_host_layout.setContentsMargins(0, 0, 0, 0)
         correction_layout.addWidget(self.segment_editor_host, 1)
+        self.page_stack.addWidget(correction)
+
+        # --- Action bar: what blocks or follows, then the page's actions ---
+        self.action_bar = theme.set_role(qt.QFrame(), "footer")
+        footer_layout = qt.QVBoxLayout(self.action_bar)
+        footer_layout.setContentsMargins(10, 8, 10, 10)
+        footer_layout.setSpacing(8)
+        self.status_label = theme.set_role(qt.QLabel("Open one prepared case to begin."), "hint-muted")
+        self.status_label.wordWrap = True
+        footer_layout.addWidget(self.status_label)
+        footer_row = qt.QHBoxLayout()
+        footer_row.setSpacing(6)
+        footer_row.addWidget(self.comment_toggle)
+        self.save_draft_button = qt.QPushButton("Save draft")
+        self.save_draft_button.connect("clicked()", self.on_save_draft)
+        footer_row.addWidget(self.save_draft_button)
+        self.reveal_button = theme.set_role(qt.QPushButton("Reveal AI  →"), "primary")
+        self.reveal_button.connect("clicked()", self.on_reveal_ai)
+        footer_row.addWidget(self.reveal_button, 1)
         self.complete_button = theme.set_role(qt.QPushButton("Export corrected labels and complete"), "primary")
         self.complete_button.connect("clicked()", self.on_complete)
-        correction_layout.addWidget(self.complete_button)
-        self.page_stack.addWidget(correction)
+        footer_row.addWidget(self.complete_button, 1)
+        self.reopen_button = qt.QPushButton("Reopen case for editing")
+        self.reopen_button.toolTip = (
+            "Return this completed case to AI correction. The published results are "
+            "backed up, and the case must be completed again."
+        )
+        self.reopen_button.connect("clicked()", self.on_reopen_case)
+        footer_row.addWidget(self.reopen_button, 1)
+        self.footer_next_button = theme.set_role(qt.QPushButton("Next case  →"), "primary")
+        self.footer_next_button.connect("clicked()", self.on_next_case)
+        footer_row.addWidget(self.footer_next_button, 1)
+        footer_layout.addLayout(footer_row)
+        annotation_layout.addWidget(self.action_bar)
+        self._refresh_comment_toggle()
         self.figo_card = FigoCard(
             self._on_card_figo, self._on_card_text, self._on_card_closed, self._position_figo_card
         )
@@ -1869,6 +1915,23 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         for shortcut in self.figo_card.widget.findChildren(qt.QShortcut):
             shortcut.connect("activatedAmbiguously()", self.close_figo_card)
         self._on_page_changed()
+
+    def _icon_button(self, icon_name: str, tooltip: str, slot: Callable[[], None]) -> Any:
+        button = theme.set_role(qt.QToolButton(), "icon")
+        button.setIcon(qt.QIcon(str(ICON_DIR / icon_name)))
+        button.setIconSize(qt.QSize(16, 16))
+        button.setFixedSize(32, 32)
+        button.toolTip = tooltip
+        button.setAccessibleName(tooltip)
+        button.enabled = False
+        button.connect("clicked()", slot)
+        return button
+
+    def _on_queue_toggled(self, checked: bool) -> None:
+        self.content_stack.setCurrentIndex(1 if checked else 0)
+        if checked:
+            self._refresh_case_list()
+            self.case_search.setFocus()
 
     def _set_roi_edit_buttons(self, active: bool) -> None:
         """Enable Save/Cancel ROI, and show their bar, only while a box is open for editing."""
@@ -1890,47 +1953,77 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.myoma_section_label.text = f"MYOMAS · {count}" if count else "MYOMAS"
 
     def _on_page_changed(self) -> None:
-        self._refresh_page_tabs()
-        self._place_comment_bar()
-
-    def _refresh_page_tabs(self) -> None:
-        """Show the Segmentation / FIGO tabs once AI is revealed, on the current page."""
-
-        if not hasattr(self, "page_tabs"):
-            return
-        self.page_tabs.visible = self.logic.segmentation_node is not None
-        tab = PAGE_FOR_TAB.index(self.page_stack.currentIndex)
-        if self.page_tabs.currentIndex != tab:
-            self.page_tabs.blockSignals(True)
-            self.page_tabs.setCurrentIndex(tab)
-            self.page_tabs.blockSignals(False)
-
-    def _on_page_tab_changed(self, tab: int) -> None:
-        if 0 <= tab < len(PAGE_FOR_TAB):
-            self._show_page(PAGE_FOR_TAB[tab])
-        # A refused switch (a box still being placed) puts the tab back.
-        self._refresh_page_tabs()
-
-    def _place_comment_bar(self) -> None:
-        """Put the case comment bar under the visible page's main actions."""
-
-        on_correction = self.page_stack.currentIndex == 1
-        slot = self.correction_comment_slot if on_correction else self.blind_comment_slot
-        if slot.indexOf(self.comment_toggle) < 0:
-            # addWidget takes the bar out of the other page's slot.
-            slot.addWidget(self.comment_toggle)
-            self.comment_toggle.show()
+        self._refresh_action_bar()
         self._position_comment_overlay()
 
+    def _on_step_clicked(self, index: int) -> None:
+        """After reveal, "2 FIGO" shows the myoma page and "4 Correct" the correction page."""
+        page = STEP_FOR_PAGE.get(index)
+        if page is not None:
+            # A refused switch (a box still being placed) leaves the page as it is.
+            self._show_page(page)
+        self._refresh_action_bar()
+
+    def _set_hint(self, text_value: str, tone: str) -> None:
+        self.status_label.text = text_value
+        self._set_role_state(self.status_label, "role", f"hint-{tone}")
+
+    @staticmethod
+    def _set_role_state(widget: Any, name: str, value: str) -> None:
+        """Set a dynamic property the stylesheet reads, and redraw with it."""
+        if widget.property(name) == value:
+            return
+        widget.setProperty(name, value)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _set_nothing_to_box_open(self, opened: bool) -> None:
+        self.nothing_to_box_toggle.blockSignals(True)
+        self.nothing_to_box_toggle.checked = bool(opened)
+        self.nothing_to_box_toggle.blockSignals(False)
+        self.nothing_to_box_toggle.arrowType = qt.Qt.DownArrow if opened else qt.Qt.RightArrow
+        self.nothing_to_box_body.visible = bool(opened)
+
+    def _refresh_action_bar(self) -> None:
+        """Step states, the banner, and which of the action bar's buttons show."""
+        if not hasattr(self, "action_bar"):
+            return
+        state = self.logic.state
+        read_only = self.logic.read_only
+        complete_record = bool(
+            read_only and (self.logic.final_annotation or {}).get("status") == "complete"
+        )
+        on_correction = self.page_stack.currentIndex == 1
+        if read_only:
+            steps = ("done",) * 4
+        elif state is None:
+            steps = step_states(None, 0, False, 0)
+        else:
+            steps = step_states(
+                state.phase, state.lesion_count, state.zero_myomas, len(missing_figo_ids(state))
+            )
+        revealed = self.logic.segmentation_node is not None
+        for index, (button, step) in enumerate(zip(self.step_buttons, steps)):
+            self._set_role_state(button, "state", step)
+            button.enabled = revealed and index in STEP_FOR_PAGE
+            button.checked = False
+        self.readonly_banner.visible = complete_record
+        blind = state is not None and state.phase == ReviewPhase.BLIND.value
+        self.reveal_button.visible = not read_only and blind and not on_correction
+        self.complete_button.visible = not read_only and on_correction
+        self.reopen_button.visible = complete_record
+        self.footer_next_button.visible = read_only
+        self.footer_next_button.enabled = self.next_case_button.enabled
+
     def _position_comment_overlay(self) -> None:
-        """Lay the open comment box right under its bar, over whatever is below."""
+        """Lay the open comment box just above the action bar, over the page."""
 
         edit = self.case_comment_edit
         if edit.isHidden():
             return
-        bar = self.comment_toggle
-        corner = bar.mapTo(self.annotation_tab, qt.QPoint(0, bar.height))
-        edit.setGeometry(corner.x(), corner.y(), bar.width, edit.height)
+        bar_top = self.action_bar.mapTo(self.annotation_tab, qt.QPoint(0, 0)).y()
+        top = max(bar_top - 6 - edit.height, 0)
+        edit.setGeometry(12, top, max(self.annotation_tab.width - 24, 120), edit.height)
         edit.raise_()
 
     def _set_comment_overlay_tracking(self, on: bool) -> None:
@@ -1941,10 +2034,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         app = qt.QApplication.instance()
         try:
             if on:
-                self.comment_toggle.installEventFilter(self._comment_overlay_filter)
+                self.action_bar.installEventFilter(self._comment_overlay_filter)
                 app.installEventFilter(self._comment_overlay_filter)
             else:
-                self.comment_toggle.removeEventFilter(self._comment_overlay_filter)
+                self.action_bar.removeEventFilter(self._comment_overlay_filter)
                 app.removeEventFilter(self._comment_overlay_filter)
         except Exception:
             pass
@@ -1969,21 +2062,22 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 kind = event.type()
                 if kind == qt.QEvent.MouseButtonPress:
                     widget._fold_comment_if_clicked_outside(obj)
-                elif kind in (qt.QEvent.Move, qt.QEvent.Resize) and obj is widget.comment_toggle:
+                elif kind in (qt.QEvent.Move, qt.QEvent.Resize) and obj is widget.action_bar:
                     widget._position_comment_overlay()
                 return False
 
         return _CommentOverlayFilter()
 
     def _focus_annotation_tab(self) -> None:
-        """Switch to the Annotation tab once a case is loaded and ready.
+        """Close the queue drawer once a case is loaded and ready.
 
         Called after every successful case load (case picked from the list,
-        case manifest chosen, or launched via the case env var) so the
-        reviewer always lands on the review screen, not the browser.
+        previous/next, case manifest chosen, or launched via the case env var)
+        so the reviewer always lands on the review screen, not the browser.
         """
-        if hasattr(self, "tab_widget") and hasattr(self, "annotation_tab"):
-            self.tab_widget.setCurrentWidget(self.annotation_tab)
+        if hasattr(self, "content_stack"):
+            self.queue_toggle.checked = False
+            self.content_stack.setCurrentIndex(0)
 
     def _claim_shortcut_keys(self) -> None:
         """Take our keys away from Slicer's own menu actions while we are open.
@@ -2171,61 +2265,55 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.open_case(path)
 
     def _refresh_case_list(self) -> None:
-        """Rebuild the case list under the active filter and search text."""
+        """Rebuild the drawer's grouped case rows under the filter and search text."""
         if not hasattr(self, "case_list"):
             return
         summary = self.logic.queue_summary
-        allowed = CASE_FILTER_STATUSES.get(self._case_filter, CASE_FILTER_STATUSES["all"])
         needle = str(self.case_search.text) if hasattr(self, "case_search") else ""
+        if summary is not None:
+            groups = case_groups(summary.entries, self._case_filter, needle)
+        else:
+            # A single-case manifest has no queue statuses; list it plainly.
+            groups = [("", [QueueEntry(case_id, None) for case_id in self.logic.available_case_ids
+                            if matches_case_search(case_id, needle)])]
+            groups = [group for group in groups if group[1]]
         current_row = -1
         self.case_list.blockSignals(True)
         try:
             self.case_list.clear()
-            for case_id in self.logic.available_case_ids:
-                entry = None if summary is None else summary.entry(case_id)
-                status = None if entry is None else entry.status
-                if status is not None and status not in allowed:
-                    continue
-                if not self._matches_case_search(case_id, needle):
-                    continue
-                title = "" if status is None else CASE_STATUS_TITLES[status]
-                item = qt.QListWidgetItem(f"{case_id}    {title}" if title else case_id)
-                item.setData(qt.Qt.UserRole, case_id)
-                item.setData(theme.ROW_TITLE, case_id)
-                item.setData(theme.ROW_TAG, title)
-                if status is not None:
-                    _bar, tag_bg, tag_fg = theme.STATUS_COLOURS[status.value]
-                    item.setData(theme.ROW_COLOURS, ["", tag_bg, tag_fg])
-                if entry is not None and entry.diagnostic:
-                    item.setToolTip(entry.diagnostic)
-                    if status is QueueStatus.ATTENTION:
-                        item.setData(theme.ROW_SUBTITLE, entry.diagnostic)
-                self.case_list.addItem(item)
-                if case_id == self.logic.case_id:
-                    current_row = self.case_list.count - 1
+            for title, entries in groups:
+                if title:
+                    header = qt.QListWidgetItem(title)
+                    header.setFlags(qt.Qt.NoItemFlags)
+                    header.setData(theme.ROW_HEADER, True)
+                    header.setData(theme.ROW_TITLE, title)
+                    self.case_list.addItem(header)
+                for entry in entries:
+                    status = entry.status
+                    tag = "" if status is None else CASE_STATUS_TITLES[status]
+                    if entry.case_id == self.logic.case_id:
+                        tag = "open now"
+                    item = qt.QListWidgetItem(f"{entry.case_id}    {tag}" if tag else entry.case_id)
+                    item.setData(qt.Qt.UserRole, entry.case_id)
+                    item.setData(theme.ROW_TITLE, entry.case_id)
+                    item.setData(theme.ROW_TAG, tag)
+                    if status is not None:
+                        dot, tag_bg, tag_fg = theme.STATUS_COLOURS[status.value]
+                        item.setData(theme.ROW_COLOURS, [dot, tag_bg, tag_fg])
+                    if entry.diagnostic:
+                        item.setToolTip(entry.diagnostic)
+                        if status is QueueStatus.ATTENTION:
+                            item.setData(theme.ROW_SUBTITLE, entry.diagnostic)
+                    self.case_list.addItem(item)
+                    if entry.case_id == self.logic.case_id:
+                        current_row = self.case_list.count - 1
+            self.case_empty_label.visible = not groups and bool(self.logic.available_case_ids)
             if current_row >= 0:
                 self.case_list.setCurrentRow(current_row)
                 self.case_list.scrollToItem(self.case_list.item(current_row))
         finally:
             self.case_list.blockSignals(False)
         self._refresh_progress()
-
-    @staticmethod
-    def _matches_case_search(case_id: str, needle: str) -> bool:
-        """Match on the ID, or on the case number however it is typed."""
-        needle = (needle or "").strip().lower()
-        if not needle:
-            return True
-        if needle in case_id.lower():
-            return True
-        digits = "".join(character for character in needle if character.isdigit())
-        tail = "".join(character for character in case_id if character.isdigit())
-        if not digits or not tail:
-            return False
-        try:
-            return int(digits) == int(tail)
-        except ValueError:
-            return False
 
     def on_case_filter(self, name: str) -> None:
         self._case_filter = name if name in CASE_FILTER_STATUSES else "all"
@@ -2239,30 +2327,50 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def _refresh_progress(self) -> None:
         if not hasattr(self, "progress_label"):
             return
+        self._refresh_case_nav()
         summary = self.logic.queue_summary
         if summary is None:
             self.progress_label.text = ""
             return
         counts = summary.counts
-        total = sum(counts.values())
-        self.progress_label.text = f"{counts[QueueStatus.COMPLETE]} of {total} finished"
-        legend = []
+        self.progress_label.text = queue_strip_text(counts)
         for status, segment in self.progress_segments.items():
             count = counts[status]
             segment.visible = count > 0
             # Stretch factors make each segment's width its share of the cases.
             self.progress_bar.layout().setStretchFactor(segment, count)
-            colour = theme.STATUS_COLOURS[status.value][0]
-            legend.append(
-                f"<span style='color:{colour};'>■</span> {CASE_STATUS_TITLES[status]} {count}"
-            )
-        self.progress_legend.text = "&nbsp;&nbsp;&nbsp;".join(legend)
         pill_counts = {
             key: sum(counts[status] for status in statuses)
             for key, statuses in CASE_FILTER_STATUSES.items()
         }
         for title, key in CASE_FILTERS:
             self.filter_buttons[key].text = f"{title}  {pill_counts.get(key, 0)}"
+
+    def _refresh_case_nav(self) -> None:
+        """Enable previous / next only when an openable case lies that way."""
+        summary = self.logic.queue_summary
+        case_id = self.logic.case_id
+        for button, step in ((self.prev_case_button, -1), (self.next_case_button, +1)):
+            button.enabled = bool(summary is not None and case_id and summary.neighbour(case_id, step))
+
+    def on_previous_case(self) -> None:
+        self._open_neighbour(-1)
+
+    def on_next_case(self) -> None:
+        self._open_neighbour(+1)
+
+    def _open_neighbour(self, step: int) -> None:
+        if self.logic.manifest_source is None or not self.logic.case_id:
+            return
+        # Rescan first: a case may have turned finished or Attention meanwhile.
+        summary = self.logic.refresh_queue()
+        neighbour = None if summary is None else summary.neighbour(self.logic.case_id, step)
+        if neighbour is None:
+            self._refresh_case_nav()
+            return
+        # The same guarded path as picking from the list: unsaved work is
+        # saved, and an unfinished box edit blocks the switch.
+        self.open_case(self.logic.manifest_source, neighbour.case_id)
 
     def _no_reviewable_message(self) -> str:
         summary = self.logic.queue_summary
@@ -2278,7 +2386,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def on_case_chosen(self, item: Any) -> None:
         if item is None or self.logic.manifest_source is None:
             return
-        selected_case_id = str(item.data(qt.Qt.UserRole))
+        # Group headers carry no case.
+        selected_case_id = str(item.data(qt.Qt.UserRole) or "")
         # Re-opening the case already on screen would only cost a reload.
         if not selected_case_id or selected_case_id == self.logic.case_id:
             return
@@ -2324,8 +2433,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.shutdown_saved = False
         self.save_coordinator.clear_dirty()
         self._refresh_case_list()
-        self.study_label.text = f"{self.logic.manifest.study_id} · {self.logic.case_id}"  # type: ignore[union-attr]
-        self.case_header.text = f"Reader {self.logic.manifest.reader_id} ·"  # type: ignore[union-attr]
+        manifest = self.logic.manifest
+        self.study_label.text = self.logic.case_id
+        self.case_header.text = f"{manifest.study_id} · Reader {manifest.reader_id}"  # type: ignore[union-attr]
+        self.manifest_label.text = (
+            f"Manifest: {manifest.study_id} ({len(self.logic.available_case_ids)} cases)"  # type: ignore[union-attr]
+        )
         self.manifest_button.text = "Change manifest"
         self.logic.load_registered_volumes()
         self.view_tools.refresh()
@@ -2360,14 +2473,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.segment_editor_widget.setReadOnly(read_only)
             if read_only:
                 self.segment_editor_widget.setActiveEffectByName("")
-        self.correction_save_button.enabled = not read_only
         self.correction_tools.refresh()
-        self.reopen_button.visible = bool(
-            read_only and (self.logic.final_annotation or {}).get("status") == "complete"
-        )
         # Whether there is anything to box is settled once AI is shown.
         self.nothing_to_box_section.visible = self.logic.segmentation_node is None
-        self._refresh_page_tabs()
         if state is None:
             if not self.logic.read_only or self.logic.final_annotation is None:
                 return
@@ -2399,8 +2507,15 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             if self.roi_overlay is not None:
                 self.roi_overlay.refresh()
             status = str(self.logic.final_annotation.get("status", "complete")).replace("_", " ")
-            self._set_status(f"Final outcome: {status}. This record is read-only.")
+            if status == "complete":
+                self._set_hint(
+                    "Reopening backs up the published results. You will have to complete the case again.",
+                    "muted",
+                )
+            else:
+                self._set_hint(f"Final outcome: {status}. This record is read-only.", "muted")
             self._refresh_progress()
+            self._refresh_action_bar()
             return
         selected_id = self._selected_lesion_id()
         self.lesion_list.blockSignals(True)
@@ -2427,9 +2542,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.reveal_button.enabled = bool(state.can_reveal)
         missing = missing_figo_ids(state)
         self.reveal_button.toolTip = f"FIGO missing: {', '.join(missing)}" if missing else ""
-        self.reveal_button.visible = state.phase == ReviewPhase.BLIND.value
-        self.reveal_hint.text = self.reveal_button.toolTip
-        self.reveal_hint.visible = bool(missing) and self.reveal_button.visible
         self.save_draft_button.enabled = not self.logic.read_only
         self.complete_button.enabled = state.phase == ReviewPhase.AI_REVEALED.value
         for button in self.early_stop_buttons:
@@ -2437,8 +2549,15 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._refresh_roi_arming()
         if self.roi_overlay is not None:
             self.roi_overlay.refresh()
-        self._set_status(f"Phase: {state.phase} · {state.lesion_count} myomas (no count limit)")
+        # A new case opens "Nothing to box?" when it has no boxes; after that
+        # it stays however the reader leaves it.
+        if self._nothing_to_box_case != state.case_id:
+            self._nothing_to_box_case = state.case_id
+            self._set_nothing_to_box_open(state.lesion_count == 0)
+        hint, tone = bottom_hint(state.phase, missing, state.lesion_count, state.zero_myomas)
+        self._set_hint(hint, tone)
         self._refresh_progress()
+        self._refresh_action_bar()
         # Keep an open card's highlight in step with the saved FIGO (say, after
         # an undo); opening/closing is not ours. Only a changed value is pushed,
         # so a half-made 8/Hybrid choice on the card is not reset.
@@ -2455,7 +2574,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def _set_status(self, text_value: str) -> None:
         if hasattr(self, "status_label"):
-            self.status_label.text = text_value
+            self._set_hint(text_value, "muted")
 
     def _show_error(self, message: str) -> None:
         self._set_status(message)
@@ -2708,8 +2827,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def _refresh_comment_toggle(self) -> None:
         expanded = bool(self.comment_toggle.checked)
         has_text = bool(str(self.case_comment_edit.plainText).strip())
-        self.comment_toggle.arrowType = qt.Qt.DownArrow if expanded else qt.Qt.RightArrow
         self.comment_toggle.text = "Case comment" + (" (written)" if has_text and not expanded else "")
+        self.comment_toggle.toolTip = self.comment_toggle.text
+        self.comment_toggle.setIcon(qt.QIcon(str(ICON_DIR / ("comment-written.svg" if has_text else "comment.svg"))))
 
     def on_comment_toggled(self, expanded: bool) -> None:
         self.case_comment_edit.visible = bool(expanded)
@@ -3907,6 +4027,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.roi_overlay.set_enabled(bool(visible))
         if self.roi_draft_node is not None:
             self.roi_draft_node.SetDisplayVisibility(True)
+
+    def on_toggle_roi_boxes(self) -> None:
+        """The "Show ROI boxes" key: only meaningful on the correction page."""
+        if self.page_stack.currentIndex != 1 or not self.show_roi_check.enabled:
+            return
+        self.show_roi_check.checked = not self.show_roi_check.checked
 
     def on_show_roi_toggled(self, checked: bool) -> None:
         if self.logic.segmentation_node is not None:

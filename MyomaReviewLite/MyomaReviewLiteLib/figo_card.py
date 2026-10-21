@@ -40,20 +40,36 @@ def card_position(
     box_rect is (x_min, y_min, x_max, y_max) in VTK slice-view XY (origin bottom-left,
     physical pixels); card_size and view_size are logical Qt pixels.
     """
-    x_min, _y_min, x_max, y_max = (v / device_pixel_ratio for v in box_rect)
+    x_min, y_min, x_max, y_max = (v / device_pixel_ratio for v in box_rect)
     card_w, card_h = card_size
     view_w, view_h = view_size
-    x = x_max + gap
-    if x + card_w > view_w:
-        x = x_min - gap - card_w
-    top = view_h - y_max
+    top, bottom = view_h - y_max, view_h - y_min
+    if x_max + gap + card_w <= view_w:
+        x, y = x_max + gap, top
+    elif x_min - gap - card_w >= 0:
+        x, y = x_min - gap - card_w, top
+    elif bottom + gap + card_h <= view_h:
+        # Neither side has room: below the box, then above it, before covering it.
+        x, y = x_min, bottom + gap
+    elif top - gap - card_h >= 0:
+        x, y = x_min, top - gap - card_h
+    else:
+        x, y = x_max + gap, top
     x = min(max(x, 0), max(view_w - card_w, 0))
-    y = min(max(top, 0), max(view_h - card_h, 0))
+    y = min(max(y, 0), max(view_h - card_h, 0))
     return int(round(x)), int(round(y))
 
 
 class FigoCard:
-    """Compact FIGO chooser shown beside a box; Qt is imported lazily."""
+    """Compact FIGO chooser shown beside a box; Qt is imported lazily.
+
+    Every choice is a button: the FIGO type row (0-8), Hybrid / Uncertain, and
+    framed rows for the parts those need (type-8 location, Hybrid endometrial
+    and serosal sides, Uncertain reason). While Hybrid is picked the type row
+    folds into a one-line bar, so the two side rows have the room.
+    """
+
+    COLLAPSED_TEXT = "FIGO type 0–8 · hidden while Hybrid is picked"
 
     def __init__(
         self,
@@ -73,6 +89,7 @@ class FigoCard:
         self.is_open = False
         self._loading = False
         self._kind_key = None
+        self._type_expanded = False
         self._orig_ddx = ""
         self._orig_comment = ""
 
@@ -87,7 +104,7 @@ class FigoCard:
 
         layout = qt.QVBoxLayout(widget)
         layout.setContentsMargins(6, 4, 6, 6)
-        layout.setSpacing(4)
+        layout.setSpacing(6)
 
         title_row = qt.QHBoxLayout()
         self._title = qt.QLabel("")
@@ -99,39 +116,44 @@ class FigoCard:
         title_row.addWidget(close_button)
         layout.addLayout(title_row)
 
+        # The kind: one exclusive group over the nine types, Hybrid and Uncertain.
         self._group = qt.QButtonGroup(widget)
         self._group.exclusive = True
         self._buttons: dict[object, Any] = {}
-        grid = qt.QGridLayout()
-        grid.setSpacing(2)
+        self._type_group, type_grid = self._framed("figo_type_group", "FIGO type")
         for number in range(9):
-            self._add_button(grid, number, f"figo_type_{number}", str(number), number, number // 5, number % 5)
-        self._add_button(grid, "hybrid", "figo_hybrid", "Hybrid", "hybrid", 2, 0, 2)
-        self._add_button(grid, "uncertain", "figo_uncertain", "Uncertain", "uncertain", 2, 2, 3)
-        layout.addLayout(grid)
+            self._add_kind_button(type_grid, number, f"figo_type_{number}", str(number), 0, number)
+        layout.addWidget(self._type_group)
+        self._type_collapsed = qt.QToolButton()
+        self._type_collapsed.objectName = "figo_type_collapsed"
+        self._type_collapsed.text = self.COLLAPSED_TEXT
+        self._type_collapsed.toolButtonStyle = qt.Qt.ToolButtonTextBesideIcon
+        self._type_collapsed.arrowType = qt.Qt.RightArrow
+        self._type_collapsed.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self._type_collapsed.connect("clicked()", self._expand_type_row)
+        layout.addWidget(self._type_collapsed)
+        kinds = qt.QGridLayout()
+        kinds.setSpacing(2)
+        self._add_kind_button(kinds, "hybrid", "figo_hybrid", "Hybrid", 0, 0)
+        self._add_kind_button(kinds, "uncertain", "figo_uncertain", "Uncertain", 0, 1)
+        layout.addLayout(kinds)
 
-        self._location = self._combo(
-            "figo_location", "Location…",
-            [(m.value.replace("_", " "), m.value) for m in Type8Location],
+        # The parts some kinds need, each its own exclusive row.
+        self._location = self._choice_row(
+            layout, "figo_location", "Location",
+            [(m.value, m.value.replace("_", " ")) for m in Type8Location], columns=1,
         )
-        self._endo = self._combo(
-            "figo_endometrial", "Endometrial…", [(str(n), n) for n in range(9)]
+        self._endo = self._choice_row(
+            layout, "figo_endo", "Endometrial side", [(n, str(n)) for n in range(9)], columns=9,
         )
-        self._sero = self._combo(
-            "figo_serosal", "Serosal…", [(str(n), n) for n in range(9)]
+        self._sero = self._choice_row(
+            layout, "figo_sero", "Serosal side", [(n, str(n)) for n in range(9)], columns=9,
         )
-        self._reason = self._combo(
-            "figo_reason", "Reason…",
-            [(m.value.replace("_", " "), m.value) for m in UncertainReason],
+        self._reason = self._choice_row(
+            layout, "figo_reason", "Reason",
+            [(m.value, m.value.replace("_", " ")) for m in UncertainReason], columns=1,
         )
-        self._combos = (self._location, self._endo, self._sero, self._reason)
-        # A wheel turned over an unfocused list must scroll the image, not
-        # silently change (and save) a FIGO choice.
-        self._wheel_guard = self._make_wheel_guard()
-        for combo in self._combos:
-            combo.setFocusPolicy(qt.Qt.StrongFocus)
-            layout.addWidget(combo)
-            combo.connect("currentIndexChanged(int)", self._on_choice_changed)
+        self._choices = (self._location, self._endo, self._sero, self._reason)
 
         self._ddx = qt.QLineEdit()
         self._ddx.objectName = "figo_ddx"
@@ -150,51 +172,46 @@ class FigoCard:
         self._shortcut = shortcut
         self._update_rows(None)
 
-    def _make_wheel_guard(self):
-        qt = self._qt
-
-        class _WheelGuard(qt.QObject):
-            def eventFilter(self, obj, event):
-                if event.type() == qt.QEvent.Wheel and not obj.hasFocus():
-                    event.ignore()
-                    return True
-                return False
-
-        return _WheelGuard()
-
-    def _set_wheel_guard(self, on: bool) -> None:
-        """Filter the combos only while the card is open, so Qt never holds a
-        filter on them through a Python object that dies before they do."""
-        for combo in self._combos:
-            try:
-                if on:
-                    combo.installEventFilter(self._wheel_guard)
-                else:
-                    combo.removeEventFilter(self._wheel_guard)
-            except Exception:
-                pass
-
     def dispose(self) -> None:
-        self._set_wheel_guard(False)
+        """Kept for the owner's teardown; the card holds nothing to release."""
 
-    def _add_button(self, grid, key, name, text, value, row, col, span=1) -> None:
+    def _framed(self, name: str, title: str):
+        box = self._qt.QGroupBox(title)
+        box.objectName = name
+        grid = self._qt.QGridLayout(box)
+        grid.setContentsMargins(4, 3, 4, 4)
+        grid.setSpacing(2)
+        return box, grid
+
+    def _make_button(self, name: str, text: str):
         button = self._qt.QToolButton()
         button.objectName = name
         button.text = text
         button.checkable = True
         button.setSizePolicy(self._qt.QSizePolicy.Expanding, self._qt.QSizePolicy.Fixed)
+        return button
+
+    def _add_kind_button(self, grid, key, name, text, row, col) -> None:
+        button = self._make_button(name, text)
         self._group.addButton(button)
-        grid.addWidget(button, row, col, 1, span)
-        button.connect("clicked()", lambda v=value: self._on_type_clicked(v))
+        grid.addWidget(button, row, col)
+        button.connect("clicked()", lambda v=key: self._on_type_clicked(v))
         self._buttons[key] = button
 
-    def _combo(self, name, placeholder, items):
-        combo = self._qt.QComboBox()
-        combo.objectName = name
-        combo.addItem(placeholder, None)
-        for text, data in items:
-            combo.addItem(text, data)
-        return combo
+    def _choice_row(self, layout, prefix, title, items, columns):
+        """A framed, exclusive row of choice buttons; returns (box, group, {value: button})."""
+        box, grid = self._framed(f"{prefix}_group", title)
+        group = self._qt.QButtonGroup(box)
+        group.exclusive = True
+        buttons = {}
+        for index, (value, text) in enumerate(items):
+            button = self._make_button(f"{prefix}_{value}", text)
+            group.addButton(button)
+            grid.addWidget(button, index // columns, index % columns)
+            button.connect("clicked()", self._on_choice_changed)
+            buttons[value] = button
+        layout.addWidget(box)
+        return box, group, buttons
 
     # -- selection state -------------------------------------------------
     def _selected_key(self):
@@ -203,11 +220,26 @@ class FigoCard:
                 return key
         return None
 
+    @staticmethod
+    def _value(choice):
+        _box, _group, buttons = choice
+        for value, button in buttons.items():
+            if button.checked:
+                return value
+        return None
+
+    def _expand_type_row(self) -> None:
+        self._type_expanded = True
+        self._update_rows(self._kind_key)
+
     def _update_rows(self, key) -> None:
-        self._location.visible = key == 8
-        self._endo.visible = key == "hybrid"
-        self._sero.visible = key == "hybrid"
-        self._reason.visible = key == "uncertain"
+        folded = key == "hybrid" and not self._type_expanded
+        self._type_group.visible = not folded
+        self._type_collapsed.visible = folded
+        self._location[0].visible = key == 8
+        self._endo[0].visible = key == "hybrid"
+        self._sero[0].visible = key == "hybrid"
+        self._reason[0].visible = key == "uncertain"
         if self.is_open:
             # The card sits on a slice view, not in a layout, so nothing grows
             # it for the extra rows; without this they squash the type buttons.
@@ -215,13 +247,12 @@ class FigoCard:
             if self._on_resize is not None:
                 self._on_resize()
 
-    def _reset_combos(self) -> None:
-        was_loading, self._loading = self._loading, True
-        try:
-            for combo in self._combos:
-                combo.setCurrentIndex(0)
-        finally:
-            self._loading = was_loading
+    def _reset_choices(self) -> None:
+        for _box, group, buttons in self._choices:
+            group.exclusive = False
+            for button in buttons.values():
+                button.checked = False
+            group.exclusive = True
 
     def _on_type_clicked(self, value) -> None:
         if self._loading:
@@ -230,32 +261,29 @@ class FigoCard:
         if value == self._kind_key:
             return
         self._kind_key = value
+        self._type_expanded = False
+        self._reset_choices()
         self._update_rows(value)
-        self._reset_combos()
         self._emit()
 
-    def _on_choice_changed(self, _index=None) -> None:
+    def _on_choice_changed(self, _checked=None) -> None:
         if not self._loading:
             self._emit()
-
-    @staticmethod
-    def _data(combo):
-        return combo.itemData(combo.currentIndex)
 
     def _build_figo(self) -> dict | None:
         key = self._selected_key()
         if key is None:
             return None
         if key == "hybrid":
-            endo, sero = self._data(self._endo), self._data(self._sero)
+            endo, sero = self._value(self._endo), self._value(self._sero)
             if endo is None or sero is None:
                 return None
             return {"kind": "hybrid", "endometrial": endo, "serosal": sero}
         if key == "uncertain":
-            reason = self._data(self._reason)
+            reason = self._value(self._reason)
             return None if reason is None else {"kind": "uncertain", "reason": reason}
         if key == 8:
-            location = self._data(self._location)
+            location = self._value(self._location)
             if location is None:
                 return None
             return {"kind": "standard", "type": 8, "location": location}
@@ -278,7 +306,7 @@ class FigoCard:
             for button in self._buttons.values():
                 button.checked = False
             self._group.exclusive = True
-            self._reset_combos()
+            self._reset_choices()
             key = None
             if figo is not None:
                 kind = figo.get("kind")
@@ -298,14 +326,16 @@ class FigoCard:
                 else:
                     key = None
             self._kind_key = key
+            self._type_expanded = False
             self._update_rows(key)
         finally:
             self._loading = was_loading
 
     @staticmethod
-    def _select(combo, value) -> None:
-        index = combo.findData(value)
-        combo.setCurrentIndex(index if index >= 0 else 0)
+    def _select(choice, value) -> None:
+        button = choice[2].get(value)
+        if button is not None:
+            button.checked = True
 
     # -- lifecycle ---------------------------------------------------------
     def open(self, parent, lesion_id, figo, ddx, comment, read_only) -> None:
@@ -320,11 +350,11 @@ class FigoCard:
         self._comment.text = comment or ""
         self._orig_ddx = (ddx or "").strip()
         self._orig_comment = (comment or "").strip()
-        for cls in (qt.QToolButton, qt.QComboBox, qt.QLineEdit):
+        for cls in (qt.QAbstractButton, qt.QLineEdit):
             for control in self.widget.findChildren(cls):
-                if control.objectName != "figo_close":
+                # Closing, and unfolding the type row to look, stay possible.
+                if control.objectName not in ("figo_close", "figo_type_collapsed"):
                     control.enabled = not read_only
-        self._set_wheel_guard(True)
         self.is_open = True
         self.widget.adjustSize()
         self.widget.show()
@@ -350,7 +380,6 @@ class FigoCard:
             if unsaved:
                 self._on_text(self.lesion_id, self._ddx.text.strip(), self._comment.text.strip())
         finally:
-            self._set_wheel_guard(False)
             self.widget.hide()
             self._on_close()
 

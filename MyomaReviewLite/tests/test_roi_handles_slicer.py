@@ -644,9 +644,10 @@ def test_early_stops_sit_with_zero_myomas_on_the_annotation_page() -> None:
         for button in widget.early_stop_buttons:
             assert page.isAncestorOf(button), f"{button.text} is not on the annotation page"
             assert button.enabled, f"{button.text} is disabled before reveal"
-        for control in (widget.zero_check, widget.save_draft_button, widget.reveal_button,
-                        widget.lesion_list):
+        for control in (widget.zero_check, widget.lesion_list):
             assert page.isAncestorOf(control), f"{control} is not on the annotation page"
+        for control in (widget.save_draft_button, widget.reveal_button):
+            assert widget.action_bar.isAncestorOf(control), f"{control.text} is not in the action bar"
         for lesion_id in (first, second):
             widget._on_card_figo(lesion_id, {"kind": "standard", "type": 0})
         widget.logic.state.reveal()
@@ -916,8 +917,9 @@ def test_reveal_saves_text_typed_on_the_card_into_the_blinded_snapshot() -> None
     widget, first, second = _build_case("sub-00067")
     try:
         widget.logic.activate_layout()
-        # reveal_ai only needs the manifest for the AI mask path it returns.
-        widget.logic.manifest = types.SimpleNamespace(ai_mask=OUTPUT_ROOT / "ai.nii.gz")
+        # reveal_ai only needs the manifest for the AI mask path it returns
+        # (and refresh_ui reads the case ID for previous / next).
+        widget.logic.manifest = types.SimpleNamespace(ai_mask=OUTPUT_ROOT / "ai.nii.gz", case_id="sub-00067")
         widget.logic.load_ai_mask = lambda: None
         widget._open_correction_page = lambda: None
         for lesion_id in (first, second):
@@ -1062,7 +1064,7 @@ def test_a_refresh_keeps_a_half_made_card_choice() -> None:
         assert widget.logic.state.lesions[first].figo is None, "8 saved without a location"
         widget.refresh_ui()
         assert _card_child(widget, "figo_type_8").checked, "a refresh reset the half-made 8"
-        assert not _card_child(widget, "figo_location").isHidden(), "the location row went away"
+        assert not _card_child(widget, "figo_location_group").isHidden(), "the location row went away"
 
         # A FIGO saved some other way still reaches the open card.
         widget._remember_annotation()
@@ -1276,49 +1278,119 @@ def _slice_offsets() -> list[float]:
     return [manager.sliceWidget(name).mrmlSliceNode().GetSliceOffset() for name in VIEW_NAMES.values()]
 
 
-def test_tabs_appear_after_reveal_and_switch_pages_without_moving_the_views() -> None:
+def test_steps_switch_pages_after_reveal_without_moving_the_views() -> None:
     widget, first, second = _revealed_case("sub-00092")
     try:
         widget.logic.activate_layout()
-        assert widget.page_tabs.isHidden(), "the tabs show before AI is revealed"
+        assert not any(button.enabled for button in widget.step_buttons), "a step switches pages before AI is shown"
         assert not widget.nothing_to_box_section.isHidden()
         widget.logic.segmentation_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
         widget.page_stack.setCurrentIndex(1)
         widget.refresh_ui()
-        assert not widget.page_tabs.isHidden(), "the tabs are missing after reveal"
+        figo_step, correct_step = widget.step_buttons[1], widget.step_buttons[3]
+        assert figo_step.enabled and correct_step.enabled, "the FIGO / Correct steps do not switch pages"
+        assert not widget.step_buttons[0].enabled and not widget.step_buttons[2].enabled
         assert widget.nothing_to_box_section.isHidden()
-        assert [widget.page_tabs.tabText(i) for i in range(widget.page_tabs.count)] == ["Segmentation", "FIGO"]
-        assert widget.page_tabs.currentIndex == 0
 
         _center_views_on(SMALL_BOX_INSIDE)
         before = _slice_offsets()
-        widget.page_tabs.setCurrentIndex(1)
-        assert widget.page_stack.currentIndex == 0, "the FIGO tab did not show the myoma page"
+        figo_step.click()
+        assert widget.page_stack.currentIndex == 0, "the FIGO step did not show the myoma page"
         assert widget.active_roi_id is None and _outlines_shown(widget) == {first, second}
         widget.on_view_clicked("MyomaLiteAxial", SMALL_BOX_INSIDE)
         assert _outlines_shown(widget) == {second}
-        widget.page_tabs.setCurrentIndex(0)
+        correct_step.click()
         assert widget.page_stack.currentIndex == 1
         assert not widget.figo_card.is_open
-        widget.page_tabs.setCurrentIndex(1)
-        assert widget.active_roi_id is None, "the FIGO tab kept an old selection"
-        assert _slice_offsets() == before, "switching tabs moved the slice views"
-        assert widget.logic.segmentation_node.GetDisplayNode().GetVisibility(), "switching tabs hid the mask"
+        figo_step.click()
+        assert widget.active_roi_id is None, "the FIGO step kept an old selection"
+        assert _slice_offsets() == before, "switching steps moved the slice views"
+        assert widget.logic.segmentation_node.GetDisplayNode().GetVisibility(), "switching steps hid the mask"
 
-        # A box still being placed keeps the reader on the FIGO tab.
+        # A box still being placed keeps the reader on the myoma page.
         widget.accept_rectangle(BoxGeometry((30.0, 30.0, 30.0), (12.0, 12.0, 12.0)), None)
-        widget.page_tabs.setCurrentIndex(0)
-        assert widget.page_stack.currentIndex == 0 and widget.page_tabs.currentIndex == 1
+        correct_step.click()
+        assert widget.page_stack.currentIndex == 0
         widget.cancel_roi_edit()
     finally:
         widget.logic.segmentation_node = None
         widget.cleanup()
 
 
+def test_q_toggles_the_roi_boxes_only_on_the_correction_page() -> None:
+    actions = {entry[0]: entry for entry in bundled_module.SHORTCUT_ACTIONS}
+    assert actions["toggle_roi_boxes"][2] == "Q", actions.get("toggle_roi_boxes")
+    widget, _first, _second = _revealed_case("sub-00093")
+    try:
+        widget._install_shortcuts()
+        assert widget.show_roi_check.text == "Show ROI boxes (Q)", widget.show_roi_check.text
+        widget.on_toggle_roi_boxes()
+        assert not widget.show_roi_check.checked, "Q changed the boxes from the myoma page"
+        widget.logic.segmentation_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+        widget.page_stack.setCurrentIndex(1)
+        widget.refresh_ui()
+        widget.on_toggle_roi_boxes()
+        assert widget.show_roi_check.checked, "Q did not show the boxes"
+        widget.on_toggle_roi_boxes()
+        assert not widget.show_roi_check.checked, "Q did not hide the boxes again"
+    finally:
+        widget.logic.segmentation_node = None
+        widget.cleanup()
+
+
+def _shortcuts_on(sequence: str) -> list:
+    target = qt.QKeySequence(sequence)
+    return [
+        shortcut
+        for shortcut in slicer.util.mainWindow().findChildren(qt.QShortcut)
+        if shortcut.key.matches(target) == qt.QKeySequence.ExactMatch
+    ]
+
+
+def _slice_view_state(view_name: str) -> tuple:
+    widget = slicer.app.layoutManager().sliceWidget(view_name)
+    node, composite = widget.mrmlSliceNode(), widget.mrmlSliceCompositeNode()
+    return (
+        round(node.GetSliceOffset(), 6), tuple(round(v, 6) for v in node.GetFieldOfView()),
+        node.GetSliceVisible(), node.GetOrientation(),
+        composite.GetForegroundOpacity(), composite.GetLabelOpacity(),
+        composite.GetBackgroundVolumeID(), composite.GetForegroundVolumeID(),
+    )
+
+
+def test_q_is_not_taken_elsewhere() -> None:
+    # cleanup() of earlier tests only queued their shortcuts for deletion.
+    qt.QCoreApplication.sendPostedEvents(None, qt.QEvent.DeferredDelete)
+    assert not _menu_actions_with("Q"), "a Slicer menu action already uses Q"
+    widget, _first, _second = _build_case("sub-00094")
+    try:
+        widget.logic.activate_layout()
+        # Below Qt: the slice views' own key bindings must ignore Q too.
+        for view_name in VIEW_NAMES.values():
+            before_state = _slice_view_state(view_name)
+            interactor = slicer.app.layoutManager().sliceWidget(view_name).sliceView().interactor()
+            for key_sym in ("q", "Q"):
+                interactor.SetKeySym(key_sym)
+                interactor.SetKeyCode(key_sym)
+                interactor.InvokeEvent(vtk.vtkCommand.KeyPressEvent)
+                interactor.InvokeEvent(vtk.vtkCommand.CharEvent)
+                interactor.InvokeEvent(vtk.vtkCommand.KeyReleaseEvent)
+            slicer.app.processEvents()
+            assert _slice_view_state(view_name) == before_state, f"Q changed the {view_name} view"
+        before = _shortcuts_on("Q")
+        widget._install_shortcuts()
+        ours = widget.shortcut_bindings["toggle_roi_boxes"]
+        others = [shortcut for shortcut in _shortcuts_on("Q") if shortcut not in before and shortcut is not ours]
+        assert not before, f"{len(before)} other shortcut(s) already use Q"
+        assert not others, "a second shortcut was bound to Q"
+    finally:
+        widget.cleanup()
+
+
 TESTS = (
     test_a_selected_myoma_shows_alone_and_no_selection_shows_all,
     test_clicking_the_selected_row_or_the_empty_list_deselects,
-    test_tabs_appear_after_reveal_and_switch_pages_without_moving_the_views,
+    test_steps_switch_pages_after_reveal_without_moving_the_views,
     test_saved_boxes_are_thin_and_have_no_handle_circles,
     test_clicking_a_box_reveals_only_that_box,
     test_selecting_a_row_selects_that_box,
@@ -1368,6 +1440,8 @@ TESTS = (
     test_the_card_hides_while_its_box_is_not_drawn,
     test_a_read_only_list_shows_figo_and_opens_the_card_read_only,
     test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r,
+    test_q_toggles_the_roi_boxes_only_on_the_correction_page,
+    test_q_is_not_taken_elsewhere,
 )
 
 failures = 0

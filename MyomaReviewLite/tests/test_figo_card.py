@@ -41,6 +41,14 @@ class CardPositionTests(unittest.TestCase):
         x, y = card_position((10, 0, 390, 20), (120, 90), (400, 300))
         self.assertTrue(0 <= x <= 400 - 120 and 0 <= y <= 300 - 90)
 
+    def test_card_position_goes_below_when_neither_side_fits(self):
+        # view 300x400; box x 100..200, Qt y 100..150; a 150-wide card fits on neither side
+        self.assertEqual(card_position((100, 250, 200, 300), (150, 90), (300, 400)), (100, 158))
+
+    def test_card_position_goes_above_when_below_does_not_fit(self):
+        # view 300x200; box Qt y 140..180, so below has no room but above does
+        self.assertEqual(card_position((100, 20, 200, 60), (150, 90), (300, 200)), (100, 42))
+
     def test_card_position_divides_by_device_pixel_ratio(self):
         # same box in physical pixels at dpr 2 -> same logical answer as dpr 1
         self.assertEqual(card_position((200, 400, 300, 500), (120, 90), (400, 300), device_pixel_ratio=2.0),

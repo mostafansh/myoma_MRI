@@ -10,6 +10,7 @@ from pathlib import Path
 from MyomaReviewLiteLib import (
     CaseStorage,
     DatasetManifest,
+    QueueEntry,
     QueueStatus,
     QueueSummary,
     ReviewState,
@@ -165,6 +166,21 @@ class QueueSummaryTests(unittest.TestCase):
         summary = QueueSummary.scan(manifest)
 
         self.assertIs(summary.entry("sub-00001").status, QueueStatus.IN_PROGRESS)
+
+
+class QueueNeighbourTests(unittest.TestCase):
+    def test_neighbour_skips_attention_and_never_wraps(self):
+        summary = QueueSummary((
+            QueueEntry("sub-1", QueueStatus.COMPLETE),
+            QueueEntry("sub-2", QueueStatus.ATTENTION, "x"),
+            QueueEntry("sub-3", QueueStatus.NEW),
+        ))
+        self.assertEqual(summary.neighbour("sub-1", +1).case_id, "sub-3")
+        self.assertEqual(summary.neighbour("sub-3", -1).case_id, "sub-1")
+        self.assertIsNone(summary.neighbour("sub-3", +1))
+        self.assertIsNone(summary.neighbour("sub-1", -1))
+        self.assertIsNone(summary.neighbour("nope", +1))
+
 
 if __name__ == "__main__":
     unittest.main()
