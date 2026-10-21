@@ -129,6 +129,38 @@ class PortalCoreTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in rows], ["mostafa"])
         self.assertIsNotNone(rows[0]["error"])
 
+    def test_concurrent_wrong_logins_cannot_exceed_the_attempt_budget(self):
+        import threading
+        from unittest import mock
+
+        calls = []
+        gate = threading.Event()
+
+        def slow_verify(password, stored):
+            calls.append(1)
+            gate.wait(2)
+            return False
+
+        results = []
+        barrier = threading.Barrier(20)
+
+        def attempt():
+            barrier.wait()
+            results.append(self.app.login("mostafa", "wrong"))
+
+        with mock.patch.object(portal_core, "verify_password", slow_verify):
+            threads = [threading.Thread(target=attempt) for _ in range(20)]
+            for t in threads:
+                t.start()
+            threading.Event().wait(0.5)
+            gate.set()
+            for t in threads:
+                t.join(10)
+        self.assertLessEqual(len(calls), 5)
+        self.assertEqual(len(results), 20)
+        self.assertTrue(self.app.throttle.is_locked("mostafa", 1000.0))
+        self.assertEqual(self.app.login("mostafa", "pw").message, portal_core.MSG_LOCKED)
+
     def test_progress_import_failure_fills_every_row_error(self):
         import builtins
 

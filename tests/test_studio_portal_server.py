@@ -127,6 +127,33 @@ class PortalServerTests(unittest.TestCase):
         self.assertTrue(fields[2].startswith("ali?fake?login_ok?boss"))
         self.assertLessEqual(len(fields[2]), 64)
 
+    def test_folded_forwarded_for_cannot_forge_log_lines(self):
+        import socket
+
+        body = urllib.parse.urlencode({"username": "mostafa", "password": "bad"})
+        raw = (
+            "POST /login HTTP/1.1\r\nHost: x\r\n"
+            "X-Forwarded-For: 1.2.3.4\r\n x\tlogin_ok\tboss\r\n"
+            "Content-Type: application/x-www-form-urlencoded\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n{body}"
+        )
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as sock:
+            sock.sendall(raw.encode("ascii"))
+            while sock.recv(4096):
+                pass
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        fields = lines[0].split("\t")
+        self.assertEqual(len(fields), 4)
+        self.assertEqual(fields[1], "login_failed")
+        self.assertEqual(fields[3], "127.0.0.1")
+
+    def test_valid_forwarded_for_is_logged(self):
+        self.request("POST", "/login", urllib.parse.urlencode({"username": "x", "password": "y"}),
+                     {"Content-Type": "application/x-www-form-urlencoded", "X-Forwarded-For": "10.1.2.3, 10.0.0.1"})
+        fields = self.log_path.read_text(encoding="utf-8").splitlines()[0].split("\t")
+        self.assertEqual(fields[3], "10.1.2.3")
+
     def test_root_and_logout_redirect_to_login(self):
         resp, _ = self.request("GET", "/")
         self.assertEqual((resp.status, resp.getheader("Location")), (302, "/login"))

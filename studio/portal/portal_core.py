@@ -14,6 +14,7 @@ import os
 import posixpath
 import re
 import secrets
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -169,25 +170,56 @@ def read_session(token: str | None, secret: bytes, now: float) -> str | None:
 # --- throttling ------------------------------------------------------------
 
 class LoginThrottle:
-    """5 failures within 600 s lock a username for 600 s."""
+    """5 failures within 600 s lock a username for 600 s. Thread safe.
+
+    Attempts are reserved before the slow password check so that concurrent
+    requests cannot all pass the lock check: failures plus attempts in flight
+    never exceed LOCK_FAILURES.
+    """
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._failures: dict[str, list[float]] = {}
         self._locked_until: dict[str, float] = {}
+        self._in_flight: dict[str, int] = {}
+
+    def _recent(self, user: str, now: float) -> list[float]:
+        return [t for t in self._failures.get(user, []) if now - t < LOCK_SECONDS]
 
     def is_locked(self, user: str, now: float) -> bool:
-        return now < self._locked_until.get(user, 0.0)
+        with self._lock:
+            return now < self._locked_until.get(user, 0.0)
+
+    def try_begin(self, user: str, now: float) -> bool:
+        """Reserve one attempt; False when locked or the budget is used up."""
+        with self._lock:
+            if now < self._locked_until.get(user, 0.0):
+                return False
+            if len(self._recent(user, now)) + self._in_flight.get(user, 0) >= LOCK_FAILURES:
+                return False
+            self._in_flight[user] = self._in_flight.get(user, 0) + 1
+            return True
+
+    def end(self, user: str) -> None:
+        with self._lock:
+            left = self._in_flight.get(user, 0) - 1
+            if left > 0:
+                self._in_flight[user] = left
+            else:
+                self._in_flight.pop(user, None)
 
     def record_failure(self, user: str, now: float) -> None:
-        recent = [t for t in self._failures.get(user, []) if now - t < LOCK_SECONDS]
-        recent.append(now)
-        self._failures[user] = recent
-        if len(recent) >= LOCK_FAILURES:
-            self._locked_until[user] = now + LOCK_SECONDS
+        with self._lock:
+            recent = self._recent(user, now)
+            recent.append(now)
+            self._failures[user] = recent
+            if len(recent) >= LOCK_FAILURES:
+                self._locked_until[user] = now + LOCK_SECONDS
 
     def reset(self, user: str) -> None:
-        self._failures.pop(user, None)
-        self._locked_until.pop(user, None)
+        with self._lock:
+            self._failures.pop(user, None)
+            self._locked_until.pop(user, None)
 
 
 # --- authorization ---------------------------------------------------------
@@ -234,18 +266,21 @@ class PortalApp:
     def login(self, username: str, password: str) -> LoginResult:
         user = (username or "").strip().lower()
         now = self.clock()
-        if self.throttle.is_locked(user, now):
+        if not self.throttle.try_begin(user, now):
             return LoginResult(False, None, MSG_LOCKED)
-        reader = self.readers.get(user)
-        stored = reader.password_hash if reader else self._dummy_hash()
-        valid = verify_password(password or "", stored) and reader is not None
-        if not valid:
-            self.throttle.record_failure(user, now)
-            if self.throttle.is_locked(user, now):
-                return LoginResult(False, None, MSG_LOCKED)
-            return LoginResult(False, None, MSG_BAD_LOGIN)
-        self.throttle.reset(user)
-        return LoginResult(True, reader, None)
+        try:
+            reader = self.readers.get(user)
+            stored = reader.password_hash if reader else self._dummy_hash()
+            valid = verify_password(password or "", stored) and reader is not None
+            if not valid:
+                self.throttle.record_failure(user, now)
+                if self.throttle.is_locked(user, now):
+                    return LoginResult(False, None, MSG_LOCKED)
+                return LoginResult(False, None, MSG_BAD_LOGIN)
+            self.throttle.reset(user)
+            return LoginResult(True, reader, None)
+        finally:
+            self.throttle.end(user)
 
     @classmethod
     def _dummy_hash(cls) -> str:

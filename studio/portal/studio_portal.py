@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import html
+import ipaddress
 import http.cookies
 import os
 import secrets
@@ -50,11 +51,17 @@ th, td {{ border-bottom: 1px solid #d5d9e0; padding: 6px 12px; text-align: left;
 """
 
 
+def clean_field(text: str) -> str:
+    """Make a value safe for one tab-separated access-log field."""
+    return "".join(
+        "?" if (ord(c) < 32 or 127 <= ord(c) < 160 or c in "\u2028\u2029") else c
+        for c in str(text)
+    )
+
+
 def clean_username(username: str) -> str:
     """Lowercase, truncate and neutralise control characters for the access log."""
-    text = (username or "").strip().lower()[:64]
-    text = "".join("?" if (ord(c) < 32 or 127 <= ord(c) < 160 or c in "\u2028\u2029") else c for c in text)
-    return text or "-"
+    return clean_field((username or "").strip().lower()[:64]) or "-"
 
 
 def render_page(title: str, body: str) -> bytes:
@@ -106,16 +113,18 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     # -- helpers --
     def client_ip(self) -> str:
-        forwarded = self.headers.get("X-Forwarded-For", "")
-        first = forwarded.split(",")[0].strip()
-        return first or self.client_address[0]
+        first = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        try:
+            return str(ipaddress.ip_address(first))
+        except ValueError:
+            return clean_field(self.client_address[0])
 
     def log_event(self, event: str, reader_id: str | None) -> None:
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        line = f"{stamp}\t{event}\t{reader_id or '-'}\t{self.client_ip()}\n"
+        fields = [stamp, event, clean_field(reader_id or "-"), clean_field(self.client_ip())]
         try:
-            with self.log_lock, open(self.log_path, "a", encoding="utf-8") as handle:
-                handle.write(line)
+            with self.log_lock, open(self.log_path, "a", encoding="utf-8", newline="") as handle:
+                handle.write(chr(9).join(fields) + chr(10))
         except OSError:
             pass
 
