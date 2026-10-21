@@ -48,7 +48,10 @@ def render_compose(reader_ids: list[str], dataset_root: str, readers_root: str, 
         "      - ./Caddyfile:/etc/caddy/Caddyfile:ro",
         "      - caddy-data:/data",
         "    networks:",
-        "      - studio",
+        "      - edge",
+    ]
+    lines += [f"      - net-{rid}" for rid in reader_ids]
+    lines += [
         "  portal:",
         "    image: myoma-studio-portal",
         "    restart: unless-stopped",
@@ -57,7 +60,7 @@ def render_compose(reader_ids: list[str], dataset_root: str, readers_root: str, 
         f"      - {_q(dataset_root + ':/data:ro')}",
         f"      - {_q(readers_root + ':/readers:ro')}",
         "    networks:",
-        "      - studio",
+        "      - edge",
     ]
     for rid in reader_ids:
         lines += [
@@ -71,9 +74,12 @@ def render_compose(reader_ids: list[str], dataset_root: str, readers_root: str, 
             f"      - {_q(readers_root + '/' + rid + ':/review')}",
             f"      - settings-{rid}:/home/reader/.config",
             "    networks:",
-            "      - studio",
+            f"      - net-{rid}",
         ]
-    lines += ["networks:", "  studio: {}", "volumes:", "  caddy-data: {}"]
+    lines += ["networks:", "  edge: {}"]
+    for rid in reader_ids:
+        lines += [f"  net-{rid}:", "    internal: true"]
+    lines += ["volumes:", "  caddy-data: {}"]
     lines += [f"  settings-{rid}: {{}}" for rid in reader_ids]
     return "\n".join(lines) + "\n"
 
@@ -86,11 +92,13 @@ def render_caddyfile(reader_ids: list[str], server_address: str) -> str:
     for rid in reader_ids:
         lines += [
             f"    handle /{rid}/* {{",
-            "        forward_auth portal:9000 {",
-            "            uri /auth",
+            "        route {",
+            "            forward_auth portal:9000 {",
+            "                uri /auth",
+            "            }",
+            f"            uri strip_prefix /{rid}",
+            f"            reverse_proxy slicer-{rid}:6080",
             "        }",
-            f"        uri strip_prefix /{rid}",
-            f"        reverse_proxy slicer-{rid}:6080",
             "    }",
             "",
         ]

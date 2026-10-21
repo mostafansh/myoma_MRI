@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -89,6 +91,133 @@ class StudioConfigTests(unittest.TestCase):
         self.assertEqual(studio_config.read_dataset_root(config), (self.root / "sub" / "data").as_posix())
         config.write_text(json.dumps({"dataset_root": drive + ":\\projects\\x y"}), encoding="utf-8")
         self.assertEqual(studio_config.read_dataset_root(config), drive + ":/projects/x y")
+
+    @staticmethod
+    def _service_networks(compose: str, service: str) -> set[str]:
+        block = re.search(rf"^  {re.escape(service)}:\n((?:    .*\n)+)", compose, re.M).group(1)
+        part = block.split("    networks:\n", 1)[1]
+        return set(re.findall(r"^      - (\S+)$", part, re.M))
+
+    def test_readers_are_isolated_on_internal_networks(self) -> None:
+        text = studio_config.render_compose(["a", "b"], "/d", "/r", "/p")
+        a = self._service_networks(text, "slicer-a")
+        b = self._service_networks(text, "slicer-b")
+        self.assertEqual(a, {"net-a"})
+        self.assertEqual(b, {"net-b"})
+        self.assertFalse(a & b)
+        self.assertEqual(self._service_networks(text, "portal"), {"edge"})
+        self.assertEqual(self._service_networks(text, "caddy"), {"edge", "net-a", "net-b"})
+        self.assertNotIn("  studio:", text)
+        for net in ("net-a", "net-b"):
+            self.assertRegex(text, rf"(?m)^  {net}:\n    internal: true$")
+        self.assertNotRegex(text, r"(?m)^  edge:\n    internal")
+
+    def test_caddyfile_orders_auth_before_strip_inside_route(self) -> None:
+        text = studio_config.render_caddyfile(["ali"], "192.168.0.201")
+        block = text[text.index("handle /ali/*"):]
+        self.assertLess(block.index("route {"), block.index("forward_auth"))
+        self.assertLess(block.index("forward_auth"), block.index("uri strip_prefix /ali"))
+
+
+OLD_CADDY_TEMPLATE = """192.168.0.201 {{
+    tls internal
+
+    handle /{rid}/* {{
+        forward_auth portal:9000 {{
+            uri /auth
+        }}
+        uri strip_prefix /{rid}
+        reverse_proxy slicer-{rid}:6080
+    }}
+}}
+"""
+
+
+def _docker_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        return subprocess.run(["docker", "info"], capture_output=True, timeout=60).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _walk_handlers(node):
+    """Yield handler dicts depth-first in execution order."""
+    if isinstance(node, dict):
+        if "handler" in node:
+            yield node
+        for key in ("handle", "routes"):
+            for child in node.get(key, []) or []:
+                yield from _walk_handlers(child)
+    elif isinstance(node, list):
+        for child in node:
+            yield from _walk_handlers(child)
+
+
+def _auth_before_strip(adapted: dict, rid: str) -> bool:
+    mine = []
+
+    def find(node) -> None:
+        if isinstance(node, dict):
+            if any(f"/{rid}/*" in m.get("path", []) for m in node.get("match", []) if isinstance(m, dict)):
+                mine.append(node)
+                return
+            for value in node.values():
+                find(value)
+        elif isinstance(node, list):
+            for value in node:
+                find(value)
+
+    find(adapted["apps"]["http"]["servers"])
+    if len(mine) != 1:
+        return False
+    handlers = list(_walk_handlers(mine[0]))
+    auth = strip = None
+    for index, h in enumerate(handlers):
+        if h["handler"] == "reverse_proxy" and h.get("rewrite", {}).get("uri") == "/auth" and auth is None:
+            if any(u.get("dial") == "portal:9000" for u in h.get("upstreams", [])):
+                auth = index
+        if h["handler"] == "rewrite" and h.get("strip_path_prefix") == f"/{rid}" and strip is None:
+            strip = index
+    return auth is not None and strip is not None and auth < strip
+
+
+@unittest.skipUnless(_docker_available(), "docker is not available")
+class DockerBackedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.out = Path(self.temporary.name)
+
+    def _adapt(self) -> dict:
+        result = subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{self.out}:/etc/caddy", "caddy:2.8",
+             "caddy", "adapt", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
+            capture_output=True, text=True, timeout=300,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_old_template_is_detected_as_wrong(self) -> None:
+        (self.out / "Caddyfile").write_text(OLD_CADDY_TEMPLATE.format(rid="ali"), encoding="utf-8")
+        self.assertFalse(_auth_before_strip(self._adapt(), "ali"))
+
+    def test_real_caddy_authenticates_before_stripping_prefix(self) -> None:
+        ids = ["ali", "sara"]
+        (self.out / "Caddyfile").write_text(studio_config.render_caddyfile(ids, "192.168.0.201"), encoding="utf-8")
+        adapted = self._adapt()
+        for rid in ids:
+            self.assertTrue(_auth_before_strip(adapted, rid), rid)
+
+    def test_compose_config_is_valid(self) -> None:
+        compose = studio_config.render_compose(["ali", "sara"], "/srv/data", "/srv/readers", "/srv/portal")
+        (self.out / "docker-compose.yml").write_text(compose, encoding="utf-8")
+        result = subprocess.run(
+            ["docker", "compose", "-f", str(self.out / "docker-compose.yml"), "config"],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":
