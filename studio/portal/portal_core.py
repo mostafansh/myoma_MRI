@@ -269,8 +269,6 @@ class PortalApp:
         return AuthResult(200, None)
 
     def progress(self) -> list[dict]:
-        from MyomaReviewLiteLib import reader_queue
-
         rows = []
         for reader in self.readers.values():
             if reader.admin:
@@ -278,6 +276,8 @@ class PortalApp:
             row = {"id": reader.id, "display_name": reader.display_name,
                    "total": None, "counts": None, "error": None}
             try:
+                from MyomaReviewLiteLib import reader_queue
+
                 report = reader_queue.queue_report(self.readers_root / reader.id, data_root=self.data_root)
                 row["total"] = report.get("total")
                 row["counts"] = report.get("counts")

@@ -129,6 +129,24 @@ class PortalCoreTests(unittest.TestCase):
         self.assertEqual([r["id"] for r in rows], ["mostafa"])
         self.assertIsNotNone(rows[0]["error"])
 
+    def test_progress_import_failure_fills_every_row_error(self):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def broken(name, *args, **kwargs):
+            if name == "MyomaReviewLiteLib":
+                raise ImportError("No module named 'nibabel'")
+            return real_import(name, *args, **kwargs)
+
+        builtins.__import__ = broken
+        try:
+            rows = self.app.progress()
+        finally:
+            builtins.__import__ = real_import
+        self.assertEqual(len(rows), 1)
+        self.assertIn("nibabel", rows[0]["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

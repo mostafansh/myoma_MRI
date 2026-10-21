@@ -50,6 +50,13 @@ th, td {{ border-bottom: 1px solid #d5d9e0; padding: 6px 12px; text-align: left;
 """
 
 
+def clean_username(username: str) -> str:
+    """Lowercase, truncate and neutralise control characters for the access log."""
+    text = (username or "").strip().lower()[:64]
+    text = "".join("?" if (ord(c) < 32 or 127 <= ord(c) < 160 or c in "\u2028\u2029") else c for c in text)
+    return text or "-"
+
+
 def render_page(title: str, body: str) -> bytes:
     return PAGE.format(title=html.escape(title), body=body).encode("utf-8")
 
@@ -194,7 +201,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         result = self.app.login(username, password)
         if not result.ok:
             event = "login_locked" if result.message == portal_core.MSG_LOCKED else "login_failed"
-            self.log_event(event, None)
+            self.log_event(event, clean_username(username))
             self.send(401, login_page(result.message), is_html=True)
             return
         reader = result.reader

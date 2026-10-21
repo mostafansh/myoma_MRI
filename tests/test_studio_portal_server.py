@@ -117,6 +117,16 @@ class PortalServerTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(lines[0].split("\t")[1], "login_failed")
 
+    def test_failed_login_logs_sanitised_username(self):
+        self.login("Ali\nFAKE\tlogin_ok\tboss\t1.1.1.1" + "x" * 100, "bad")
+        lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        fields = lines[0].split("\t")
+        self.assertEqual(len(fields), 4)
+        self.assertEqual(fields[1], "login_failed")
+        self.assertTrue(fields[2].startswith("ali?fake?login_ok?boss"))
+        self.assertLessEqual(len(fields[2]), 64)
+
     def test_root_and_logout_redirect_to_login(self):
         resp, _ = self.request("GET", "/")
         self.assertEqual((resp.status, resp.getheader("Location")), (302, "/login"))

@@ -1,0 +1,8 @@
+__pycache__
+*.pyc
+.git
+.superpowers
+studio/readers
+studio/portal-data
+studio/generated
+studio/logs
