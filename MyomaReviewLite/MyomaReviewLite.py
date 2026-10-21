@@ -98,6 +98,7 @@ from MyomaReviewLiteLib.panel_model import (
     CASE_FILTERS,
     DEFAULT_CASE_FILTER,
     bottom_hint,
+    case_filter_counts,
     case_groups,
     matches_case_search,
     queue_strip_text,
@@ -1641,12 +1642,20 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.comment_toggle.setIconSize(qt.QSize(16, 16))
         self.comment_toggle.setFixedSize(38, 34)
         self.comment_toggle.connect("toggled(bool)", self.on_comment_toggled)
+        # The case question for the senior reviewer opens in the same pop-over.
+        self.question_toggle = theme.set_role(qt.QToolButton(), "icon")
+        self.question_toggle.checkable = True
+        self.question_toggle.toolButtonStyle = qt.Qt.ToolButtonIconOnly
+        self.question_toggle.setIconSize(qt.QSize(16, 16))
+        self.question_toggle.setFixedSize(38, 34)
+        self.question_toggle.connect("toggled(bool)", self.on_question_toggled)
         self.case_comment_box = theme.set_role(qt.QFrame(self.annotation_tab), "popover")
         comment_box_layout = qt.QVBoxLayout(self.case_comment_box)
         comment_box_layout.setContentsMargins(10, 10, 10, 10)
         comment_box_layout.setSpacing(6)
         comment_title_row = qt.QHBoxLayout()
-        comment_title_row.addWidget(theme.set_role(qt.QLabel("Case comment"), "strong"))
+        self.case_note_title = theme.set_role(qt.QLabel("Case comment"), "strong")
+        comment_title_row.addWidget(self.case_note_title)
         comment_title_row.addStretch(1)
         comment_title_row.addWidget(theme.set_role(qt.QLabel("Esc to close"), "hint-muted"))
         comment_box_layout.addLayout(comment_title_row)
@@ -1654,11 +1663,16 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.case_comment_edit.placeholderText = "Comment on the whole case"
         self.case_comment_edit.setFixedHeight(88)
         comment_box_layout.addWidget(self.case_comment_edit)
+        self.case_question_edit = qt.QPlainTextEdit()
+        self.case_question_edit.placeholderText = "What should the senior reviewer check in this case?"
+        self.case_question_edit.setFixedHeight(88)
+        comment_box_layout.addWidget(self.case_question_edit)
         self.case_comment_box.visible = False
         self.case_comment_edit.visible = False
+        self.case_question_edit.visible = False
         comment_escape = qt.QShortcut(qt.QKeySequence("Esc"), self.case_comment_box)
         comment_escape.context = qt.Qt.WidgetWithChildrenShortcut
-        comment_escape.connect("activated()", lambda: setattr(self.comment_toggle, "checked", False))
+        comment_escape.connect("activated()", self._fold_case_notes)
         self._comment_overlay_filter = self._make_comment_overlay_filter()
 
         self.page_stack = qt.QStackedWidget()
@@ -1827,6 +1841,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         footer_row = qt.QHBoxLayout()
         footer_row.setSpacing(6)
         footer_row.addWidget(self.comment_toggle)
+        footer_row.addWidget(self.question_toggle)
         self.save_draft_button = qt.QPushButton("Save draft")
         self.save_draft_button.connect("clicked()", self.on_save_draft)
         footer_row.addWidget(self.save_draft_button)
@@ -1850,7 +1865,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         annotation_layout.addWidget(self.action_bar)
         self._refresh_comment_toggle()
         self.figo_card = FigoCard(
-            self._on_card_figo, self._on_card_text, self._on_card_closed, self._position_figo_card
+            self._on_card_figo, self._on_card_text, self._on_card_closed, self._position_figo_card,
+            on_question=self._on_card_question,
         )
         # The card lives on a slice view, outside this panel's stylesheet.
         self.figo_card.widget.setStyleSheet(theme.CARD_QSS)
@@ -1884,13 +1900,17 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.cancel_roi_button.enabled = active
         self.roi_edit_bar.visible = active
 
-    def _style_lesion_item(self, item: Any, lesion_id: str, figo: Any) -> None:
-        """A myoma row: its ID, and a green FIGO tag or an amber "FIGO ?" one."""
+    def _style_lesion_item(self, item: Any, lesion_id: str, figo: Any, question: str | None = None) -> None:
+        """A myoma row: its ID, a green FIGO tag or an amber "FIGO ?" one, and
+        an amber "?" when the reader has a question about it."""
 
         colours = theme.FIGO_SET_COLOURS if figo is not None else theme.FIGO_MISSING_COLOURS
         item.setData(theme.ROW_TITLE, lesion_id)
         item.setData(theme.ROW_TAG, figo_label(figo))
         item.setData(theme.ROW_COLOURS, list(colours))
+        item.setData(theme.ROW_BADGE, "?" if question is not None else "")
+        if question is not None:
+            item.setToolTip(f"Question for the senior reviewer: {question}" if question else "Question for the senior reviewer")
 
     def _refresh_myoma_count(self) -> None:
         count = self.lesion_list.count
@@ -1999,12 +2019,17 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # The same press also passes through its window; judge it once,
             # at the widget that receives it.
             return
-        for own in (self.case_comment_box, self.comment_toggle):
+        for own in (self.case_comment_box, self.comment_toggle, self.question_toggle):
             # The bar's own click already toggles the box.
             if clicked is own or own.isAncestorOf(clicked):
                 return
         # After the click is handled, so it still reaches what was clicked.
-        qt.QTimer.singleShot(0, lambda: setattr(self.comment_toggle, "checked", False))
+        qt.QTimer.singleShot(0, self._fold_case_notes)
+
+    def _fold_case_notes(self) -> None:
+        for toggle in (self.comment_toggle, self.question_toggle):
+            if toggle.checked:
+                toggle.checked = False
 
     def _make_comment_overlay_filter(self) -> Any:
         widget = self
@@ -2256,6 +2281,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                     if status is not None:
                         dot, tag_bg, tag_fg = theme.STATUS_COLOURS[status.value]
                         item.setData(theme.ROW_COLOURS, [dot, tag_bg, tag_fg])
+                    asks = entry.has_question
+                    if entry.case_id == self.logic.case_id and self.logic.state is not None:
+                        # The open case's files may lag behind what was just typed.
+                        asks = self.logic.state.has_questions
+                    if asks:
+                        item.setData(theme.ROW_BADGE, "?")
+                        item.setToolTip("The reader has a question for the senior reviewer")
                     if entry.diagnostic:
                         item.setToolTip(entry.diagnostic)
                         if status is QueueStatus.ATTENTION:
@@ -2295,10 +2327,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             segment.visible = count > 0
             # Stretch factors make each segment's width its share of the cases.
             self.progress_bar.layout().setStretchFactor(segment, count)
-        pill_counts = {
-            key: sum(counts[status] for status in statuses)
-            for key, statuses in CASE_FILTER_STATUSES.items()
-        }
+        pill_counts = case_filter_counts(summary.entries)
         for title, key in CASE_FILTERS:
             self.filter_buttons[key].text = f"{title}  {pill_counts.get(key, 0)}"
 
@@ -2445,7 +2474,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 lesion_id = str(lesion.get("lesion_id", ""))
                 item = qt.QListWidgetItem(f"{lesion_id} · {figo_label(lesion.get('figo'))}")
                 item.setData(qt.Qt.UserRole, lesion_id)
-                self._style_lesion_item(item, lesion_id, lesion.get("figo"))
+                self._style_lesion_item(item, lesion_id, lesion.get("figo"), lesion.get("question"))
                 self.lesion_list.addItem(item)
             self._refresh_myoma_count()
             self.lesion_list.setCurrentRow(self._lesion_row(selected_id) if selected_id else -1)
@@ -2479,7 +2508,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         for lesion in state.active_lesions:
             item = qt.QListWidgetItem(self.roi_label(lesion.lesion_id))
             item.setData(qt.Qt.UserRole, lesion.lesion_id)
-            self._style_lesion_item(item, lesion.lesion_id, lesion.to_dict().get("figo"))
+            self._style_lesion_item(item, lesion.lesion_id, lesion.to_dict().get("figo"), lesion.question)
             self.lesion_list.addItem(item)
         self._refresh_myoma_count()
         # Nothing is picked for the reader: with no myoma selected every box shows.
@@ -2745,6 +2774,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             and not state.lesions
             and state.blinded_snapshot is None
             and not state.comment
+            and not state.question
         )
 
     def _write_current_draft(self) -> None:
@@ -2789,6 +2819,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         text = str(self.case_comment_edit.plainText).strip()
         if text != state.comment:
             state.set_comment(text)
+        question = str(self.case_question_edit.plainText).strip()
+        if question != state.question:
+            state.set_question(question)
 
     def _refresh_comment_toggle(self) -> None:
         expanded = bool(self.comment_toggle.checked)
@@ -2796,19 +2829,48 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.comment_toggle.text = "Case comment" + (" (written)" if has_text and not expanded else "")
         self.comment_toggle.toolTip = self.comment_toggle.text
         self.comment_toggle.setIcon(qt.QIcon(str(ICON_DIR / ("comment-written.svg" if has_text else "comment.svg"))))
+        asked = bool(str(self.case_question_edit.plainText).strip())
+        self.question_toggle.text = "Question for the senior reviewer" + (
+            " (written)" if asked and not self.question_toggle.checked else ""
+        )
+        self.question_toggle.toolTip = self.question_toggle.text
+        self.question_toggle.setIcon(qt.QIcon(str(ICON_DIR / ("question-written.svg" if asked else "question.svg"))))
 
     def on_comment_toggled(self, expanded: bool) -> None:
-        self.case_comment_box.visible = bool(expanded)
-        self.case_comment_edit.visible = bool(expanded)
-        self._set_comment_overlay_tracking(bool(expanded))
+        self._toggle_case_note("comment", bool(expanded))
+
+    def on_question_toggled(self, expanded: bool) -> None:
+        self._toggle_case_note("question", bool(expanded))
+
+    def _toggle_case_note(self, kind: str, expanded: bool) -> None:
+        """Open the comment or the question in the pop-over; only one at a time."""
+        toggles = {"comment": self.comment_toggle, "question": self.question_toggle}
+        edits = {"comment": self.case_comment_edit, "question": self.case_question_edit}
         if expanded:
+            for other, toggle in toggles.items():
+                if other != kind and toggle.checked:
+                    toggle.blockSignals(True)
+                    toggle.checked = False
+                    toggle.blockSignals(False)
+                    edits[other].visible = False
+            self.case_note_title.text = (
+                "Case comment" if kind == "comment" else "Question for the senior reviewer"
+            )
+            edits[kind].visible = True
+            self.case_comment_box.visible = True
+            self._set_comment_overlay_tracking(True)
             self._position_comment_overlay()
-            self.case_comment_edit.setFocus()
+            edits[kind].setFocus()
         else:
+            edits[kind].visible = False
+            self.case_comment_box.visible = False
+            self._set_comment_overlay_tracking(False)
             try:
                 self._write_current_draft()
             except Exception as exc:
-                self._show_error(f"Comment could not be saved: {exc}")
+                self._show_error(f"{'Comment' if kind == 'comment' else 'Question'} could not be saved: {exc}")
+            if kind == "question":
+                self._refresh_case_list()
         self._refresh_comment_toggle()
 
     def _load_case_comment(self) -> None:
@@ -2816,11 +2878,16 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         text = state.comment if state is not None else str((self.logic.final_annotation or {}).get("comment", ""))
         self.case_comment_edit.plainText = text
         self.case_comment_edit.readOnly = bool(self.logic.read_only)
-        self.comment_toggle.blockSignals(True)
-        self.comment_toggle.checked = False
-        self.comment_toggle.blockSignals(False)
+        question = state.question if state is not None else str((self.logic.final_annotation or {}).get("question") or "")
+        self.case_question_edit.plainText = question
+        self.case_question_edit.readOnly = bool(self.logic.read_only)
+        for toggle in (self.comment_toggle, self.question_toggle):
+            toggle.blockSignals(True)
+            toggle.checked = False
+            toggle.blockSignals(False)
         self.case_comment_box.visible = False
         self.case_comment_edit.visible = False
+        self.case_question_edit.visible = False
         self._set_comment_overlay_tracking(False)
         self._refresh_comment_toggle()
 
@@ -3616,6 +3683,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             payload.get("differential_diagnosis", ""),
             payload.get("comment", ""),
             bool(self.logic.read_only),
+            question=payload.get("question"),
         )
         self._figo_card_view = view_name
         self._figo_card_figo = payload.get("figo")
@@ -3822,6 +3890,23 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             return
         self._write_current_draft()
         self.refresh_ui()
+
+    def _on_card_question(self, lesion_id: str, question: str | None) -> None:
+        """Tag a myoma with a question for the senior reviewer (None removes it)."""
+
+        state = self.logic.state
+        if state is None or self.logic.read_only or lesion_id not in state.lesions:
+            return
+        self._remember_annotation()
+        try:
+            state.set_lesion_question(lesion_id, question)
+        except Exception as exc:
+            self.logic.state = ReviewState.from_draft(self.annotation_undo.pop())
+            self._show_error(str(exc))
+            return
+        self._write_current_draft()
+        self.refresh_ui()
+        self._refresh_case_list()
 
     def update_roi_preview(self, preview_node: Any, geometry: BoxGeometry, view_name: str) -> Any:
         node = self._update_outline_node(preview_node, geometry, "Lite ROI preview", bold=True)

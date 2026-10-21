@@ -9,6 +9,7 @@ from MyomaReviewLiteLib.panel_model import (
     CASE_FILTERS,
     DEFAULT_CASE_FILTER,
     bottom_hint,
+    case_filter_counts,
     case_groups,
     matches_case_search,
     queue_strip_text,
@@ -31,11 +32,21 @@ class QueueDrawerTests(unittest.TestCase):
             QueueEntry("sub-1", QueueStatus.COMPLETE),
             QueueEntry("sub-2", QueueStatus.NEW),
             QueueEntry("sub-3", QueueStatus.ATTENTION, "bad"),
-            QueueEntry("sub-4", QueueStatus.IN_PROGRESS),
+            QueueEntry("sub-4", QueueStatus.IN_PROGRESS, has_question=True),
         ]
 
     def test_filters(self):
-        self.assertEqual(CASE_FILTERS, (("To do", "todo"), ("Finished", "finished"), ("Attention", "attention"), ("All", "all")))
+        self.assertEqual(CASE_FILTERS, (
+            ("To do", "todo"), ("Finished", "finished"), ("Attention", "attention"),
+            ("Questions", "questions"), ("All", "all"),
+        ))
+
+    def test_questions_filter_lists_only_cases_with_a_question(self):
+        self.assertEqual([e.case_id for _, g in case_groups(self.entries, "questions", "") for e in g], ["sub-4"])
+        counts = case_filter_counts(self.entries)
+        self.assertEqual(counts["questions"], 1)
+        self.assertEqual(counts["todo"], 3)
+        self.assertEqual(counts["all"], 4)
         self.assertEqual(DEFAULT_CASE_FILTER, "todo")
 
     def test_case_groups_order_and_filters(self):

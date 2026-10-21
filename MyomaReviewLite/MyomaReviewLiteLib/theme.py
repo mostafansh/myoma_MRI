@@ -199,6 +199,9 @@ QFrame#MyomaFigoCard QToolButton#figo_close {{ background: transparent; color: {
     font-size: 14px; min-width: 0px; }}
 QFrame#MyomaFigoCard QToolButton#figo_close:hover {{ color: {TEXT}; }}
 QFrame#MyomaFigoCard QToolButton:disabled {{ color: {DISABLED_TEXT}; }}
+QFrame#MyomaFigoCard QToolButton#figo_question {{ text-align: left; padding: 5px 8px; }}
+QFrame#MyomaFigoCard QToolButton#figo_question:checked {{ background: {FIGO_MISSING_COLOURS[1]};
+    color: {AMBER}; font-weight: 600; }}
 QFrame#MyomaFigoCard QLineEdit {{ background: {FIELD}; color: {TEXT};
     border: 1px solid {BORDER}; border-radius: 5px; padding: 4px 6px; }}
 QFrame#MyomaFigoCard QLineEdit:focus {{ border-color: {ACCENT}; }}
@@ -378,6 +381,7 @@ def make_row_delegate(parent: Any) -> Any:
                 title = str(index.data(ROW_TITLE) or index.data(qt.Qt.DisplayRole) or "")
                 subtitle = str(index.data(ROW_SUBTITLE) or "")
                 tag = str(index.data(ROW_TAG) or "")
+                badge = str(index.data(ROW_BADGE) or "")
                 tag_width = 0
                 if tag:
                     tag_width, tag_height = _pill_metrics(painter, tag)
@@ -392,6 +396,21 @@ def make_row_delegate(parent: Any) -> Any:
                     painter.drawRoundedRect(tag_rect, tag_height / 2, tag_height / 2)
                     painter.setPen(qt.QColor(tag_fg or TEXT))
                     painter.drawText(tag_rect, qt.Qt.AlignCenter, tag)
+                if badge:
+                    # A question for the senior reviewer: an amber pill left of the tag.
+                    badge_width, badge_height = _pill_metrics(painter, badge)
+                    badge_rect = qt.QRectF(
+                        rect.right() - 8 - tag_width - (6 if tag_width else 0) - badge_width,
+                        rect.center().y() - badge_height / 2,
+                        badge_width,
+                        badge_height,
+                    )
+                    painter.setPen(qt.Qt.NoPen)
+                    painter.setBrush(qt.QColor(FIGO_MISSING_COLOURS[1]))
+                    painter.drawRoundedRect(badge_rect, badge_height / 2, badge_height / 2)
+                    painter.setPen(qt.QColor(FIGO_MISSING_COLOURS[2]))
+                    painter.drawText(badge_rect, qt.Qt.AlignCenter, badge)
+                    tag_width += badge_width + 6
                 text_rect = qt.QRect(x, rect.top(), rect.right() - x - tag_width - 16, rect.height())
                 painter.setPen(qt.QColor(TEXT))
                 if subtitle:
@@ -415,6 +434,7 @@ ROW_SUBTITLE = 0x0100 + 11
 ROW_TAG = 0x0100 + 12
 ROW_COLOURS = 0x0100 + 13
 ROW_HEADER = 0x0100 + 14
+ROW_BADGE = 0x0100 + 15
 
 
 # Shown in place of Slicer's own name and logo while the module is open.
