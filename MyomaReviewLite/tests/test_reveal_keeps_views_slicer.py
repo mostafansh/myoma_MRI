@@ -1,4 +1,9 @@
-"""Slicer-runtime regression test: revealing AI must not move the slice views.
+"""Slicer-runtime regression test: each view opens inside its own series, and
+revealing AI does not move the views.
+
+On opening a case the slice bars used to write a stale slice position (0)
+back after the views were fitted, so sub-00020's axial view opened outside
+its series and showed nothing.
 
 Loading the AI mask let Slicer show it in the views, and with native
 (oblique) series Slicer then re-aimed every view along its own idea of the
@@ -81,8 +86,23 @@ def test_reveal_keeps_the_views() -> None:
         widget.draw_tool = LiteRectangleDrawTool(widget)
         try:
             widget.open_case(queue_path, case.case_id)
-            widget.logic.state.confirm_zero_myomas(True)
             slicer.app.processEvents()
+            # Each view opens on a slice inside its own series. The slice bars
+            # used to write a stale position of 0 back after the fit, which
+            # lies outside e.g. sub-00020's axial series.
+            axis = {"sagittal": 0, "axial": 2, "coronal": 1}
+            for plane, name in VIEW_NAMES.items():
+                bounds = [0.0] * 6
+                widget.logic.volume_nodes[plane].GetRASBounds(bounds)
+                low, high = bounds[2 * axis[plane]], bounds[2 * axis[plane] + 1]
+                # The slice's position along its own axis, in RAS (the sagittal
+                # offset is measured along -R, so the offset itself is not used).
+                slice_to_ras = slicer.app.layoutManager().sliceWidget(name).mrmlSliceNode().GetSliceToRAS()
+                position = slice_to_ras.GetElement(axis[plane], 3)
+                assert low <= position <= high, (
+                    f"{name} opened at {position:.1f} mm, outside its series ({low:.1f}, {high:.1f})"
+                )
+            widget.logic.state.confirm_zero_myomas(True)
             before = _view_state()
             widget.on_reveal_ai()
             slicer.app.processEvents()
