@@ -14,6 +14,7 @@ import os
 import posixpath
 import re
 import secrets
+import sys
 import threading
 import time
 import urllib.parse
@@ -255,21 +256,49 @@ class PortalApp:
     _dummy: str | None = None
 
     def __init__(self, readers: dict[str, Reader], secret: bytes, data_root: Path,
-                 readers_root: Path, clock: Callable[[], float] = time.time) -> None:
+                 readers_root: Path, clock: Callable[[], float] = time.time,
+                 readers_path: Path | None = None) -> None:
         self.readers = readers
+        self.readers_path = Path(readers_path) if readers_path is not None else None
+        self._readers_lock = threading.Lock()
+        self._readers_stamp = self._stat_stamp()
         self.secret = secret
         self.data_root = Path(data_root)
         self.readers_root = Path(readers_root)
         self.clock = clock
         self.throttle = LoginThrottle()
 
+    def _stat_stamp(self) -> tuple[int, int] | None:
+        if self.readers_path is None:
+            return None
+        try:
+            st = os.stat(self.readers_path)
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _refresh_readers(self) -> dict[str, Reader]:
+        """Reload readers.json when its mtime or size changed; keep the last good set on failure."""
+        if self.readers_path is None:
+            return self.readers
+        with self._readers_lock:
+            stamp = self._stat_stamp()
+            if stamp != self._readers_stamp:
+                self._readers_stamp = stamp
+                try:
+                    self.readers = load_readers(self.readers_path)
+                except PortalError as exc:
+                    print(f"portal: keeping previous readers, reload failed: {exc}", file=sys.stderr)
+            return self.readers
+
     def login(self, username: str, password: str) -> LoginResult:
+        readers = self._refresh_readers()
         user = (username or "").strip().lower()
         now = self.clock()
         if not self.throttle.try_begin(user, now):
             return LoginResult(False, None, MSG_LOCKED)
         try:
-            reader = self.readers.get(user)
+            reader = readers.get(user)
             stored = reader.password_hash if reader else self._dummy_hash()
             valid = verify_password(password or "", stored) and reader is not None
             if not valid:
@@ -290,8 +319,9 @@ class PortalApp:
         return cls._dummy
 
     def reader_for(self, token: str | None) -> Reader | None:
+        readers = self._refresh_readers()
         reader_id = read_session(token, self.secret, self.clock())
-        return self.readers.get(reader_id) if reader_id else None
+        return readers.get(reader_id) if reader_id else None
 
     def check_auth(self, token: str | None, forwarded_uri: str) -> AuthResult:
         reader = self.reader_for(token)
@@ -305,7 +335,7 @@ class PortalApp:
 
     def progress(self) -> list[dict]:
         rows = []
-        for reader in self.readers.values():
+        for reader in self._refresh_readers().values():
             if reader.admin:
                 continue
             row = {"id": reader.id, "display_name": reader.display_name,

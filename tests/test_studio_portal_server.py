@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import argparse
 import http.client
+import os
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 import urllib.parse
+from unittest import mock
 from pathlib import Path
 
 
@@ -182,6 +185,125 @@ class PortalServerTests(unittest.TestCase):
             result = self.run_cli("set-password", "admin", "--data-dir", d)
             self.assertEqual(result.returncode, 2)
             self.assertFalse((Path(d) / "readers.json").exists())
+
+
+class ReloadTests(unittest.TestCase):
+    """The running server must pick up changes made to readers.json."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        (root / "data" / "sub-001").mkdir(parents=True)
+        (root / "readers").mkdir()
+        self.path = root / "readers.json"
+        self.tick = 1_000_000_000.0
+        self.write({
+            "ali": Reader("ali", "Ali", portal_core.hash_password("pw-ali"), False),
+            "boss": Reader("boss", "Boss", portal_core.hash_password("pw-boss"), True),
+        })
+        self.app = portal_core.PortalApp(
+            portal_core.load_readers(self.path), SECRET, root / "data", root / "readers",
+            readers_path=self.path)
+        self.server = studio_portal.make_server(self.app, "127.0.0.1", 0, root / "access.log")
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.stop)
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(5)
+
+    def write(self, readers) -> None:
+        portal_core.save_readers(self.path, readers)
+        self.bump()
+
+    def bump(self) -> None:
+        self.tick += 10
+        os.utime(self.path, (self.tick, self.tick))
+
+    def request(self, method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        try:
+            conn.request(method, path, body=body, headers=headers or {})
+            resp = conn.getresponse()
+            return resp, resp.read().decode("utf-8")
+        finally:
+            conn.close()
+
+    def login(self, user, password):
+        body = urllib.parse.urlencode({"username": user, "password": password})
+        return self.request("POST", "/login", body, {"Content-Type": "application/x-www-form-urlencoded"})
+
+    def auth(self, cookie, uri="/ali/vnc.html"):
+        return self.request("GET", "/auth", headers={"Cookie": cookie, "X-Forwarded-Uri": uri})[0]
+
+    def test_added_reader_can_log_in(self):
+        self.assertEqual(self.login("sara", "pw-sara")[0].status, 401)
+        readers = portal_core.load_readers(self.path)
+        readers["sara"] = Reader("sara", "Sara", portal_core.hash_password("pw-sara"), False)
+        self.write(readers)
+        self.assertEqual(self.login("sara", "pw-sara")[0].status, 302)
+
+    def test_changed_password_replaces_old_one(self):
+        self.assertEqual(self.login("ali", "pw-ali")[0].status, 302)
+        readers = portal_core.load_readers(self.path)
+        readers["ali"] = Reader("ali", "Ali", portal_core.hash_password("brand-new-pw"), False)
+        self.write(readers)
+        self.assertEqual(self.login("ali", "pw-ali")[0].status, 401)
+        self.assertEqual(self.login("ali", "brand-new-pw")[0].status, 302)
+
+    def test_removed_reader_cookie_stops_working(self):
+        cookie = self.login("ali", "pw-ali")[0].getheader("Set-Cookie").split(";")[0]
+        self.assertEqual(self.auth(cookie).status, 200)
+        readers = portal_core.load_readers(self.path)
+        del readers["ali"]
+        self.write(readers)
+        resp = self.auth(cookie)
+        self.assertEqual((resp.status, resp.getheader("Location")), (302, "/login"))
+
+    def test_corrupt_file_keeps_last_good_readers(self):
+        cookie = self.login("ali", "pw-ali")[0].getheader("Set-Cookie").split(";")[0]
+        self.path.write_text("{ not json", encoding="utf-8")
+        self.bump()
+        with mock.patch("sys.stderr"):
+            self.assertEqual(self.login("ali", "pw-ali")[0].status, 302)
+            self.assertEqual(self.auth(cookie).status, 200)
+        self.assertEqual(self.login("ali", "nope")[0].status, 401)
+        self.path.unlink()
+        with mock.patch("sys.stderr"):
+            self.assertEqual(self.auth(cookie).status, 200)
+
+    def test_admin_progress_sees_new_reader(self):
+        readers = portal_core.load_readers(self.path)
+        readers["sara"] = Reader("sara", "Sara", portal_core.hash_password("pw-sara"), False)
+        self.write(readers)
+        ids = [row["id"] for row in self.app.progress()]
+        self.assertIn("sara", ids)
+
+
+class SetPasswordMinimumTests(unittest.TestCase):
+    def run_set_password(self, data_dir, password, repeat=None):
+        args = argparse.Namespace(reader="ali", data_dir=str(data_dir), name=None, admin=False)
+        answers = iter([password, password if repeat is None else repeat])
+        with mock.patch("getpass.getpass", side_effect=lambda prompt="": next(answers)),                 mock.patch("sys.stderr") as err:
+            code = studio_portal.cmd_set_password(args)
+        return code, "".join(c.args[0] for c in err.write.call_args_list)
+
+    def test_short_password_is_refused_before_anything_is_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, err = self.run_set_password(d, "short12")
+            self.assertEqual(code, 2)
+            self.assertIn("at least 8", err)
+            self.assertEqual(list(Path(d).iterdir()), [])
+
+    def test_eight_characters_are_accepted(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, _ = self.run_set_password(d, "12345678")
+            self.assertEqual(code, 0)
+            self.assertTrue((Path(d) / "readers.json").exists())
 
 
 if __name__ == "__main__":

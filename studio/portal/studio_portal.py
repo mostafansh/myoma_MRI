@@ -25,6 +25,7 @@ from portal_core import PortalApp, PortalError, Reader
 
 COOKIE_NAME = "studio_session"
 MAX_BODY = 8192
+MIN_PASSWORD = 8
 UNAVAILABLE_COPY = "Data drive unavailable, tell the study admin"
 HTML_HEADERS = {
     "X-Frame-Options": "DENY",
@@ -259,7 +260,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
     if len(secret) < 32:
         print(f"error: {secret_path} is too short", file=sys.stderr)
         return 2
-    app = PortalApp(readers, secret, Path(args.data_root), Path(args.readers_root))
+    app = PortalApp(readers, secret, Path(args.data_root), Path(args.readers_root),
+                    readers_path=data_dir / "readers.json")
     server = make_server(app, "0.0.0.0", args.port, data_dir / "access.log")
     try:
         server.serve_forever()
@@ -288,6 +290,9 @@ def cmd_set_password(args: argparse.Namespace) -> int:
     password = getpass.getpass("Password: ")
     if not password or password != getpass.getpass("Repeat password: "):
         print("error: passwords are empty or do not match", file=sys.stderr)
+        return 2
+    if len(password) < MIN_PASSWORD:
+        print(f"error: password must be at least {MIN_PASSWORD} characters", file=sys.stderr)
         return 2
     existing = readers.get(rid)
     name = args.name or (existing.display_name if existing else rid)

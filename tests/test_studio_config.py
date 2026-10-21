@@ -27,13 +27,26 @@ class StudioConfigTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
 
     def test_compose_has_one_slicer_per_reader_and_readonly_dataset(self) -> None:
-        text = studio_config.render_compose(["ali", "mostafa"], "/srv/data", "/srv/readers", "/srv/portal")
+        text = studio_config.render_compose(["ali", "mostafa"], "/srv/data", "/srv/readers", "/srv/portal", "192.168.0.201")
         self.assertIn("slicer-ali:", text)
         self.assertIn("slicer-mostafa:", text)
         self.assertEqual(text.count(":/data:ro"), 3)
-        self.assertEqual(text.count("443:443"), 1)
+        self.assertEqual(len(re.findall(r'"[^"]*:443:443"', text)), 1)
+        self.assertIn('      - "192.168.0.201:443:443"', text)
+        self.assertNotIn('- "443:443"', text)
         self.assertNotIn("6080:", text)
         self.assertIn("caddy:2.8", text)
+
+    def test_compose_has_project_name_and_init_for_every_slicer(self) -> None:
+        text = studio_config.render_compose(["ali", "sara"], "/d", "/r", "/p", "192.168.0.201")
+        self.assertRegex(text, r"(?m)^name: myoma-studio$")
+        for rid in ("ali", "sara"):
+            block = re.search(rf"^  slicer-{rid}:\n((?:    .*\n)+)", text, re.M).group(1)
+            self.assertIn("    init: true\n", block)
+
+    def test_compose_rejects_bad_server_address(self) -> None:
+        with self.assertRaises(ValueError):
+            studio_config.render_compose(["ali"], "/d", "/r", "/p", "1.2.3.4\n  x: y")
 
     def test_caddyfile_guards_every_reader_route(self) -> None:
         text = studio_config.render_caddyfile(["ali", "mostafa"], "192.168.0.201")
@@ -71,9 +84,9 @@ class StudioConfigTests(unittest.TestCase):
         self.assertNotIn("slicer-boss", compose)
         self.assertNotIn("slicer-boss", caddy)
         with self.assertRaises(ValueError):
-            studio_config.render_compose(["Bad Id"], "/d", "/r", "/p")
+            studio_config.render_compose(["Bad Id"], "/d", "/r", "/p", "192.168.0.201")
         with self.assertRaises(ValueError):
-            studio_config.render_compose(["admin"], "/d", "/r", "/p")
+            studio_config.render_compose(["admin"], "/d", "/r", "/p", "192.168.0.201")
         with self.assertRaises(ValueError):
             studio_config.render_caddyfile(["Bad Id"], "x")
 
@@ -81,7 +94,7 @@ class StudioConfigTests(unittest.TestCase):
         config = self.root / "review-config.json"
         config.write_text(json.dumps({"dataset_root": "/srv/data"}), encoding="utf-8")
         root = studio_config.read_dataset_root(config)
-        text = studio_config.render_compose(["ali"], root, "/r", "/p")
+        text = studio_config.render_compose(["ali"], root, "/r", "/p", "192.168.0.201")
         self.assertIn('"/srv/data:/data:ro"', text)
 
     def test_relative_and_drive_dataset_roots(self) -> None:
@@ -99,7 +112,7 @@ class StudioConfigTests(unittest.TestCase):
         return set(re.findall(r"^      - (\S+)$", part, re.M))
 
     def test_readers_are_isolated_on_internal_networks(self) -> None:
-        text = studio_config.render_compose(["a", "b"], "/d", "/r", "/p")
+        text = studio_config.render_compose(["a", "b"], "/d", "/r", "/p", "192.168.0.201")
         a = self._service_networks(text, "slicer-a")
         b = self._service_networks(text, "slicer-b")
         self.assertEqual(a, {"net-a"})
@@ -215,7 +228,7 @@ class DockerBackedTests(unittest.TestCase):
             self.assertTrue(_auth_before_strip(adapted, rid), rid)
 
     def test_compose_config_is_valid(self) -> None:
-        compose = studio_config.render_compose(["ali", "sara"], "/srv/data", "/srv/readers", "/srv/portal")
+        compose = studio_config.render_compose(["ali", "sara"], "/srv/data", "/srv/readers", "/srv/portal", "192.168.0.201")
         (self.out / "docker-compose.yml").write_text(compose, encoding="utf-8")
         result = subprocess.run(
             ["docker", "compose", "-f", str(self.out / "docker-compose.yml"), "config"],

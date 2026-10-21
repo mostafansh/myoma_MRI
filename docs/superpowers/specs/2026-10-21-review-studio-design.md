@@ -63,7 +63,7 @@ A small Python web service, about 200 lines, with no database.
 - `GET /auth` (used by Caddy `forward_auth`): returns 200 only if the cookie is valid and its reader id matches the first path segment, or the user is an admin. Otherwise it returns a redirect to `/login`. This covers the noVNC WebSocket upgrade too.
 - `GET /logout` clears the cookie. The reader's Slicer keeps running, and the next login lands in the same session.
 - `GET /admin` (admins only): one table per reader built from `reader_queue.py status --json` (done / in progress / remaining). It refreshes on load; nothing is pushed live.
-- An access log line (time, reader, IP, event) for each login, logout and failed attempt, written to `studio/logs/access.log`.
+- An access log line (time, reader, IP, event) for each login, logout and failed attempt, written to `access.log` in the portal data directory (`studio/portal-data/access.log`).
 - A helper command adds a reader or resets a password: `python studio_portal.py set-password READER`.
 
 ### 3. Reader containers

@@ -42,8 +42,10 @@ unless a step says otherwise. `<dataset path>` is the `dataset_root` value in
    New-NetFirewallRule -DisplayName "Myoma studio" -Direction Inbound -Protocol TCP -LocalPort 443 -RemoteAddress 192.168.0.0/24 -Action Allow
    ```
 
-   Docker Desktop may have created a broader rule for 443. List the inbound
-   rules for port 443 and restrict or remove any that allow any remote address:
+   Docker Desktop may also have created broader rules for 443, and some of them
+   are program rules (they match the Docker executable, not a port), which a
+   port-based listing cannot see. List both kinds and restrict or remove any
+   that allow any remote address:
 
    ```powershell
    Get-NetFirewallPortFilter -Protocol TCP | Where-Object LocalPort -eq 443 |
@@ -52,11 +54,32 @@ unless a step says otherwise. `<dataset path>` is the `dataset_root` value in
            $addr = $_ | Get-NetFirewallAddressFilter
            [pscustomobject]@{ Name = $rule.DisplayName; Enabled = $rule.Enabled; Action = $rule.Action; Remote = $addr.RemoteAddress }
        }
+
+   Get-NetFirewallRule -Direction Inbound -Action Allow | Where-Object DisplayName -like '*docker*' |
+       ForEach-Object {
+           [pscustomobject]@{
+               Name    = $_.DisplayName
+               Enabled = $_.Enabled
+               Program = ($_ | Get-NetFirewallApplicationFilter).Program
+               Remote  = ($_ | Get-NetFirewallAddressFilter).RemoteAddress
+           }
+       }
    ```
 
    To restrict a rule: `Set-NetFirewallRule -DisplayName "<name>" -RemoteAddress 192.168.0.0/24`.
-5. Check from a laptop on the same network that `https://192.168.0.201` answers,
-   and from outside the network (for example a phone on mobile data) that it does not.
+
+   As a second line of defence the generated compose file publishes caddy's
+   port as `<server address>:443:443`, so 443 is bound only to the server's LAN
+   address (the `--server-address` you render with) and not to every interface
+   on the host.
+5. Check from another device on the LAN (a laptop, not the server) that
+   `https://192.168.0.201` answers. On the server, confirm nothing listens on
+   443 on any other interface; only the server address and Docker's proxy
+   should appear:
+
+   ```powershell
+   Get-NetTCPConnection -LocalPort 443 -State Listen
+   ```
 
 ## 3. Build the images
 
@@ -106,11 +129,30 @@ starting with a letter. The ids `admin`, `login`, `logout`, `auth`,
 4. Start or update the studio:
 
    ```powershell
-   docker compose -f studio/generated/docker-compose.yml up -d
+   docker compose -f studio/generated/docker-compose.yml up -d --remove-orphans
    docker compose -f studio/generated/docker-compose.yml ps
    ```
 
    `ps` should list `caddy`, `portal` and one `slicer-<id>` per reader as running.
+   `--remove-orphans` stops and removes the containers of readers that are no
+   longer in the file. Containers are named `myoma-studio-<service>-1`, for
+   example `myoma-studio-slicer-<id>-1`.
+
+   The portal re-reads `readers.json` whenever it changes, so a new reader, a
+   password reset or a removed reader takes effect immediately and the portal
+   container does not need a restart. A new reader still needs the render (step 3)
+   and `up -d` above to get a Slicer container. If `readers.json` cannot be parsed, the portal keeps
+   the last good set and logs the error (`docker compose ... logs portal`).
+
+Reset a password: run `set-password <id> --data-dir studio/portal-data` again.
+It is live as soon as the file is saved; the old password stops working, but
+sessions already signed in stay valid until they expire (up to 12 hours).
+
+Remove a reader: delete their entry from `studio/portal-data/readers.json`, then
+render again (step 3) and run `up -d --remove-orphans` (step 4). Their cookie
+stops working at once, and the container and network are removed. Their results
+in `studio/readers/<id>` stay on disk; delete or archive them yourself.
+Passwords are at least 8 characters; `set-password` refuses shorter ones.
 
 `studio/readers/` and `studio/portal-data/` hold reader results, password hashes
 and the session secret. They are git-ignored; do not commit or share them.
@@ -189,6 +231,10 @@ docker compose -f studio/generated/docker-compose.yml restart
   Windows. Still to check (see the checklist).
 - A backup killed mid-run leaves a `readers-*.partial` folder in the backup
   location. Delete it by hand.
+- On every Slicer start or restart, the reader may see Slicer's full menus for
+  under a second before the lockdown applies.
+- There is no sign-out link on the viewer. Readers leave by closing the tab, and
+  an open viewer stays connected until then.
 - After replugging the data drive, run `docker compose ... restart` (section 7).
 - The admin page reads every reader's queue on each load. With two readers of
   302 cases each it took about 15 seconds on this server, so expect it to be slow.
@@ -196,7 +242,7 @@ docker compose -f studio/generated/docker-compose.yml restart
 ## Verified locally on 2026-10-21
 
 Run on the server against `https://127.0.0.1:8443` with a compose override that
-published caddy on loopback only, two test readers and one admin (scratch data,
+published caddy on loopback only (an override adding `127.0.0.1:8443:443`; compose appends it to the server-address binding, or use `!override` to replace it), two test readers and one admin (scratch data,
 removed afterwards). Not on the real network.
 
 - [x] (a) `/` redirects to `/login`
