@@ -37,7 +37,7 @@ class StudioConfigTests(unittest.TestCase):
 
     def test_caddyfile_guards_every_reader_route(self) -> None:
         text = studio_config.render_caddyfile(["ali", "mostafa"], "192.168.0.201")
-        self.assertTrue(text.lstrip().startswith("192.168.0.201 {"))
+        self.assertIn(chr(10) + "192.168.0.201 {", text)
         self.assertIn("tls internal", text)
         self.assertNotIn("trusted_proxies", text)
         for rid in ("ali", "mostafa"):
@@ -111,6 +111,10 @@ class StudioConfigTests(unittest.TestCase):
         for net in ("net-a", "net-b"):
             self.assertRegex(text, rf"(?m)^  {net}:\n    internal: true$")
         self.assertNotRegex(text, r"(?m)^  edge:\n    internal")
+
+    def test_caddyfile_sets_default_sni_for_ip_addresses(self) -> None:
+        text = studio_config.render_caddyfile(["ali"], "192.168.0.201")
+        self.assertTrue(text.startswith("{" + chr(10) + "    default_sni 192.168.0.201" + chr(10) + "}" + chr(10)))
 
     def test_caddyfile_orders_auth_before_strip_inside_route(self) -> None:
         text = studio_config.render_caddyfile(["ali"], "192.168.0.201")

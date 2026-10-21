@@ -88,7 +88,9 @@ def render_caddyfile(reader_ids: list[str], server_address: str) -> str:
     _check_ids(reader_ids)
     if not re.match(r"^[A-Za-z0-9.:\-\[\]]+$", server_address or ""):
         raise ValueError(f"Invalid server address: {server_address!r}")
-    lines = [f"{server_address} {{", "    tls internal", ""]
+    # Browsers send no SNI for an IP address, and Caddy then matches on the
+    # container's own address, so without default_sni the TLS handshake fails.
+    lines = ["{", f"    default_sni {server_address}", "}", "", f"{server_address} {{", "    tls internal", ""]
     for rid in reader_ids:
         lines += [
             f"    handle /{rid}/* {{",
