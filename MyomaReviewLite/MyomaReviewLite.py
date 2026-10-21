@@ -2870,6 +2870,17 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             pass
         self.segmentation_observer = None
 
+    def _active_effect_update_timer(self) -> Any:
+        """The delayed-update timer of the active auto-complete effect, if any."""
+        editor = self.segment_editor_widget
+        if editor is None:
+            return None
+        try:
+            effect = editor.activeEffect()
+            return getattr(effect.self(), "delayedAutoUpdateTimer", None) if effect else None
+        except Exception:
+            return None
+
     def _teardown_current_case(self) -> None:
         # Before anything else, so typed card text still lands in this case.
         self.close_figo_card()
@@ -2879,6 +2890,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if self.correction_tools is not None:
             self.correction_tools.cleanup()
         self._remove_segmentation_observer()
+        effect_timer = self._active_effect_update_timer()
+        if effect_timer is not None:
+            effect_timer.stop()
         if self.segment_editor_widget is not None:
             editor = self.segment_editor_widget
             self.correction_panel.unbind()
@@ -2925,6 +2939,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.roi_draft_update_id = None
         self.roi_transaction.cancel()
         self.logic._clear_loaded_nodes()
+        # Removing the segmentation can re-arm an auto-complete effect's
+        # delayed update. Left running it fires while the next case loads (on
+        # a slower machine the loader's event loop outlasts the delay) and
+        # pops a modal "Segmentation operation failed" dialog.
+        if effect_timer is not None:
+            effect_timer.stop()
         if hasattr(self, "page_stack"):
             self.page_stack.setCurrentIndex(0)
 

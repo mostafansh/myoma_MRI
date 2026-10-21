@@ -26,6 +26,15 @@ def _dialog_stub(*args, **kwargs):
 for _name in ("question", "warning", "critical", "information"):
     setattr(qt.QMessageBox, _name, staticmethod(_dialog_stub))
 
+if sys.platform.startswith("linux"):
+    # Headless Xvfb has no window manager, so Slicer stays at its 1200x570
+    # default and the slice views come out narrower than the FIGO card.
+    # Windows runs the same tests in a maximised window.
+    import slicer
+
+    slicer.util.mainWindow().setGeometry(0, 0, 1920, 1080)
+    slicer.app.processEvents()
+
 try:
     runpy.run_path(os.environ["MYOMA_TEST_SCRIPT"], run_name="__main__")
 except Exception:
