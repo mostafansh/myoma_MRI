@@ -167,6 +167,10 @@ SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] 
     ("save_draft", "Save draft", "", "on_save_draft", "save_draft_button", "Save draft"),
     ("show_myomas", "Show segmented myomas", "V", "on_show_myomas", None, None),
     ("toggle_roi_boxes", "Show ROI boxes", "Q", "on_toggle_roi_boxes", "show_roi_check", "Show ROI boxes"),
+    ("segment_1", "Pick uterine wall", "1", "on_pick_segment_1", None, None),
+    ("segment_2", "Pick uterine cavity", "2", "on_pick_segment_2", None, None),
+    ("segment_3", "Pick myoma", "3", "on_pick_segment_3", None, None),
+    ("segment_4", "Pick Nabothian cyst", "4", "on_pick_segment_4", None, None),
 )
 SHORTCUT_SETTINGS_PREFIX = "MyomaReviewLite/Shortcuts/"
 # Mouse-button bindings, layered on the same action list as
@@ -1414,6 +1418,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 if self.shortcut_bindings.get(action_id) is not None
             ]
             self.correction_panel.set_key_hint(" · ".join(f"{key} {text}" for key, text in bound if key))
+            self.correction_panel.set_segment_keys({
+                FIXED_SEGMENT_IDS[value]: self.shortcut_bindings[f"segment_{value}"].key.toString()
+                for value in (1, 2, 3, 4)
+                if self.shortcut_bindings.get(f"segment_{value}") is not None
+            })
 
     def _enable_synced_crosshair(self) -> None:
         # A small "+" that follows the mouse in whichever slice view is
@@ -1919,7 +1928,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # Our own segment rows and tools; Slicer's Segment Editor works behind them.
         self.correction_panel = CorrectionPanel(
             ICON_DIR,
-            {FIXED_SEGMENT_IDS[value]: FIXED_SEGMENT_NAMES[FIXED_SEGMENT_IDS[value]] for value in (3, 1, 2, 4)},
+            {FIXED_SEGMENT_IDS[value]: FIXED_SEGMENT_NAMES[FIXED_SEGMENT_IDS[value]] for value in (1, 2, 3, 4)},
         )
         correction_layout.addWidget(self.correction_panel.widget)
         correction_layout.addStretch(1)
@@ -3752,11 +3761,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._figo_card_observers = []
 
     def _position_figo_card(self) -> None:
-        """Put the card beside its box's projection; hide it while the box is not drawn.
+        """Put the card clear of its box's projection, or where the reader dragged it.
 
         The box is not drawn off its slices, while the boxes are hidden, or
-        while another box is being placed. Hiding is not closing: the card
-        stays open (and keeps any typed text) and comes back with the box.
+        while another box is being placed; the card then stays where it was
+        (top right of the view if it has not been placed yet) so the reader
+        keeps their FIGO choice in sight while scrolling.
         """
 
         card = self.figo_card
@@ -3778,16 +3788,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             and (node.GetDisplayVisibility() or (outline is not None and outline.GetDisplayVisibility()))
         )
         if not drawn:
-            if not card.widget.isHidden():
-                card.widget.visible = False
+            self._keep_figo_card_up(slice_widget)
             return
         bounds = [0.0] * 6
         node.GetRASBounds(bounds)
         slice_node = slice_widget.mrmlSliceNode()
         # Same rule as LiteRoiLabelOverlay.refresh_view.
         if not slice_cuts_bounds(slice_node, bounds):
-            if not card.widget.isHidden():
-                card.widget.visible = False
+            self._keep_figo_card_up(slice_widget)
             return
         inverse = vtk.vtkMatrix4x4()
         vtk.vtkMatrix4x4.Invert(slice_node.GetXYToRAS(), inverse)
@@ -3811,6 +3819,15 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             device_pixel_ratio=ratio or 1.0,
         )
         card.move_to(x, y)
+        if card.widget.isHidden():
+            card.widget.visible = True
+
+    def _keep_figo_card_up(self, slice_widget: Any) -> None:
+        """Leave the card where it is while its box is not drawn."""
+        card = self.figo_card
+        if not card.placed:
+            width, _height = card.size()
+            card.place_at(max(int(slice_widget.sliceView().width) - width - 8, 0), 8)
         if card.widget.isHidden():
             card.widget.visible = True
 
@@ -4105,6 +4122,24 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if self.page_stack.currentIndex != 1 or not self.show_roi_check.enabled:
             return
         self.show_roi_check.checked = not self.show_roi_check.checked
+
+    def _pick_segment(self, label_value: int) -> None:
+        """Keys 1-4 pick a label by its value in the mask, on the correction page only."""
+        if self.page_stack.currentIndex != SEGMENT_PAGE or self.segment_editor_widget is None:
+            return
+        self.correction_panel.select_segment(FIXED_SEGMENT_IDS[label_value])
+
+    def on_pick_segment_1(self) -> None:
+        self._pick_segment(1)
+
+    def on_pick_segment_2(self) -> None:
+        self._pick_segment(2)
+
+    def on_pick_segment_3(self) -> None:
+        self._pick_segment(3)
+
+    def on_pick_segment_4(self) -> None:
+        self._pick_segment(4)
 
     def on_show_roi_toggled(self, checked: bool) -> None:
         if self.logic.segmentation_node is not None:

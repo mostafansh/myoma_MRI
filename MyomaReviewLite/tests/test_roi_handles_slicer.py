@@ -873,7 +873,7 @@ def test_card_sits_beside_the_box_not_on_it() -> None:
         widget.cleanup()
 
 
-def test_card_hides_when_the_slice_leaves_the_box() -> None:
+def test_card_stays_put_when_the_slice_leaves_the_box() -> None:
     widget, _first, second = _build_case("sub-00065")
     try:
         widget.logic.activate_layout()
@@ -882,11 +882,20 @@ def test_card_hides_when_the_slice_leaves_the_box() -> None:
         assert not widget.figo_card.widget.isHidden()
         slice_node = slicer.app.layoutManager().sliceWidget("MyomaLiteAxial").mrmlSliceNode()
         offset = slice_node.GetSliceOffset()
+        where = widget.figo_card.widget.pos
         slice_node.SetSliceOffset(offset + 100.0)
-        assert widget.figo_card.widget.isHidden(), "the card stayed up off the box's slices"
-        assert widget.figo_card.is_open, "leaving the box closed the card instead of hiding it"
+        assert not widget.figo_card.widget.isHidden(), "the card went away off the box's slices"
+        assert widget.figo_card.widget.pos == where, "the card moved off the box's slices"
+        assert widget.figo_card.is_open, "leaving the box closed the card"
         slice_node.SetSliceOffset(offset)
-        assert not widget.figo_card.widget.isHidden(), "the card did not come back"
+        assert not widget.figo_card.widget.isHidden()
+
+        # A dragged card keeps its place relative to the box.
+        card = widget.figo_card
+        card.drag_to(5, 5)
+        assert (card.widget.x, card.widget.y) == (5, 5)
+        widget._position_figo_card()
+        assert (card.widget.x, card.widget.y) == (5, 5), "the card snapped back after a drag"
     finally:
         widget.cleanup()
 
@@ -1105,7 +1114,7 @@ def test_a_no_op_undo_leaves_the_card_alone() -> None:
         widget.cleanup()
 
 
-def test_the_card_hides_while_its_box_is_not_drawn() -> None:
+def test_the_card_stays_up_while_its_box_is_not_drawn() -> None:
     widget, _first, second = _build_case("sub-00077")
     try:
         widget.logic.activate_layout()
@@ -1114,9 +1123,9 @@ def test_the_card_hides_while_its_box_is_not_drawn() -> None:
         assert widget.figo_card.is_open and not widget.figo_card.widget.isHidden()
         widget._set_roi_visibility(False)
         assert widget.figo_card.is_open, "hiding the boxes closed the card"
-        assert widget.figo_card.widget.isHidden(), "the card stayed up without its box"
+        assert not widget.figo_card.widget.isHidden(), "the card went away with its box"
         widget._set_roi_visibility(True)
-        assert not widget.figo_card.widget.isHidden(), "the card did not come back with its box"
+        assert not widget.figo_card.widget.isHidden()
     finally:
         widget.cleanup()
 
@@ -1187,7 +1196,7 @@ def test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r() -> Non
         slice_node.GetSliceToRAS().SetElement(0, 3, 41.44)
         slice_node.UpdateMatrices()
         slicer.app.processEvents()
-        assert widget.figo_card.widget.isHidden(), "the card showed on the mirrored sagittal slice"
+        assert not widget.figo_card.widget.isHidden(), "the card went away on the mirrored sagittal slice"
         assert not entry["actors"][view_name].GetVisibility(), "the label showed on the mirrored slice"
     finally:
         widget.cleanup()
@@ -1427,7 +1436,7 @@ TESTS = (
     test_picking_a_row_opens_that_card,
     test_a_card_choice_is_saved_and_undoable,
     test_card_sits_beside_the_box_not_on_it,
-    test_card_hides_when_the_slice_leaves_the_box,
+    test_card_stays_put_when_the_slice_leaves_the_box,
     test_undo_refreshes_or_closes_the_open_card,
     test_reveal_saves_text_typed_on_the_card_into_the_blinded_snapshot,
     test_the_card_never_shows_on_the_correction_page,
@@ -1438,7 +1447,7 @@ TESTS = (
     test_the_card_works_after_reveal,
     test_a_refresh_keeps_a_half_made_card_choice,
     test_a_no_op_undo_leaves_the_card_alone,
-    test_the_card_hides_while_its_box_is_not_drawn,
+    test_the_card_stays_up_while_its_box_is_not_drawn,
     test_a_read_only_list_shows_figo_and_opens_the_card_read_only,
     test_card_and_label_show_in_a_sagittal_view_whose_normal_is_minus_r,
     test_q_toggles_the_roi_boxes_only_on_the_correction_page,

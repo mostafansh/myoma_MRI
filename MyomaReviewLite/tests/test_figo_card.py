@@ -31,11 +31,20 @@ class MissingFigoTests(unittest.TestCase):
 
 class CardPositionTests(unittest.TestCase):
     def test_card_position_prefers_the_right_of_the_box(self):
-        # view 400x300, box x 100..150, y(bottom-up) 200..250 -> top in Qt = 300-250 = 50
-        self.assertEqual(card_position((100, 200, 150, 250), (120, 90), (400, 300)), (158, 50))
+        # view 400x300, box x 100..150, y(bottom-up) 200..250 -> top in Qt = 300-250 = 50;
+        # 48 px of clearance keeps the tissue around the box visible
+        self.assertEqual(card_position((100, 200, 150, 250), (120, 90), (400, 300)), (198, 50))
 
     def test_card_position_flips_left_near_the_right_edge(self):
-        self.assertEqual(card_position((300, 200, 380, 250), (120, 90), (400, 300)), (172, 50))
+        self.assertEqual(card_position((300, 200, 380, 250), (120, 90), (400, 300)), (132, 50))
+
+    def test_card_position_keeps_half_a_large_box_clear(self):
+        # box 200 px wide -> 100 px between box and card
+        self.assertEqual(card_position((50, 300, 250, 500), (120, 90), (600, 600)), (350, 100))
+
+    def test_card_position_moves_as_far_as_room_allows(self):
+        # only 20 px free on the right and nothing elsewhere: the card uses all of it
+        self.assertEqual(card_position((10, 10, 260, 290), (120, 90), (400, 300)), (280, 10))
 
     def test_card_position_clamps_inside_the_view(self):
         x, y = card_position((10, 0, 390, 20), (120, 90), (400, 300))
@@ -43,11 +52,11 @@ class CardPositionTests(unittest.TestCase):
 
     def test_card_position_goes_below_when_neither_side_fits(self):
         # view 300x400; box x 100..200, Qt y 100..150; a 150-wide card fits on neither side
-        self.assertEqual(card_position((100, 250, 200, 300), (150, 90), (300, 400)), (100, 158))
+        self.assertEqual(card_position((100, 250, 200, 300), (150, 90), (300, 400)), (100, 200))
 
     def test_card_position_goes_above_when_below_does_not_fit(self):
         # view 300x200; box Qt y 140..180, so below has no room but above does
-        self.assertEqual(card_position((100, 20, 200, 60), (150, 90), (300, 200)), (100, 42))
+        self.assertEqual(card_position((100, 20, 200, 60), (150, 90), (300, 200)), (100, 0))
 
     def test_card_position_divides_by_device_pixel_ratio(self):
         # same box in physical pixels at dpr 2 -> same logical answer as dpr 1

@@ -98,6 +98,7 @@ class CorrectionPanel:
         self._segment_swatches: dict[str, Any] = {}
         self._segment_names: dict[str, Any] = {}
         self._segment_editing: dict[str, Any] = {}
+        self._segment_keys: dict[str, Any] = {}
         for segment_id, name in segments.items():
             button = theme.set_role(qt.QPushButton(), "segment")
             button.checkable = True
@@ -111,11 +112,14 @@ class CorrectionPanel:
             title = qt.QLabel(segment_title(name))
             editing = theme.set_role(qt.QLabel("editing"), "hint-muted")
             editing.visible = False
-            for label in (swatch, title, editing):
+            key = theme.set_role(qt.QLabel(""), "key")
+            key.visible = False
+            for label in (swatch, title, editing, key):
                 label.setAttribute(qt.Qt.WA_TransparentForMouseEvents, True)
             row.addWidget(swatch)
             row.addWidget(title, 1)
             row.addWidget(editing)
+            row.addWidget(key)
             button.setMinimumHeight(36)
             button.connect("clicked()", lambda segment_id=segment_id: self.select_segment(segment_id))
             layout.addWidget(button)
@@ -123,6 +127,7 @@ class CorrectionPanel:
             self._segment_swatches[segment_id] = swatch
             self._segment_names[segment_id] = title
             self._segment_editing[segment_id] = editing
+            self._segment_keys[segment_id] = key
 
         layout.addWidget(theme.set_role(qt.QLabel("TOOLS"), "section"))
         grid = qt.QGridLayout()
@@ -251,6 +256,13 @@ class CorrectionPanel:
 
     def set_key_hint(self, text: str) -> None:
         self.key_hint.text = text
+
+    def set_segment_keys(self, keys: dict[str, str]) -> None:
+        """Show each row's shortcut key, as currently bound."""
+        for segment_id, label in self._segment_keys.items():
+            text = keys.get(segment_id, "")
+            label.text = text
+            label.visible = bool(text)
 
     # --- state from the editor ---------------------------------------------
 

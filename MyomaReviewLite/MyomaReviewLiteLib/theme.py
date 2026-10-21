@@ -164,6 +164,8 @@ QToolButton[role="tool"]:checked {{ background: {ACCENT}; color: {ON_ACCENT}; fo
 QToolButton[role="tool"]:disabled {{ color: {DISABLED_TEXT}; }}
 QFrame[role="card"] {{ background: {SURFACE}; border: none; border-radius: 8px; }}
 QFrame[role="card"] QLabel {{ background: transparent; }}
+QLabel[role="key"] {{ color: #d6d0c8; border: 1px solid {BORDER}; border-bottom-width: 2px;
+    border-radius: 4px; padding: 0px 6px; font-size: 11px; background: transparent; }}
 QLabel[role="strong"] {{ color: {TEXT}; font-weight: 600; background: transparent; }}
 QFrame[role="empty"] {{ background: transparent; border: 1px dashed {GHOST_BORDER}; border-radius: 8px; }}
 QFrame[role="empty"] QLabel {{ border: none; }}

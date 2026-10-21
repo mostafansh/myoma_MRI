@@ -34,8 +34,14 @@ def card_position(
     view_size: tuple[int, int],
     device_pixel_ratio: float = 1.0,
     gap: int = 8,
+    min_clearance: int = 48,
 ) -> tuple[int, int]:
-    """Top-left of the card in Qt widget pixels, beside the box and inside the view.
+    """Top-left of the card in Qt widget pixels, clear of the box and inside the view.
+
+    The card keeps the tissue around the box visible for FIGO reading: it
+    sits half the box's size away (at least ``min_clearance``) on the first
+    side with that much room (right, left, below, above); failing that, as
+    far away as the roomiest side allows, but never closer than ``gap``.
 
     box_rect is (x_min, y_min, x_max, y_max) in VTK slice-view XY (origin bottom-left,
     physical pixels); card_size and view_size are logical Qt pixels.
@@ -44,17 +50,28 @@ def card_position(
     card_w, card_h = card_size
     view_w, view_h = view_size
     top, bottom = view_h - y_max, view_h - y_min
-    if x_max + gap + card_w <= view_w:
+    clearance = max(min_clearance, 0.5 * max(x_max - x_min, bottom - top))
+    # Free space between the box and the view edge once the card is placed.
+    room = {
+        "right": view_w - x_max - card_w,
+        "left": x_min - card_w,
+        "below": view_h - bottom - card_h,
+        "above": top - card_h,
+    }
+    side = next((name for name, free in room.items() if free >= clearance), None)
+    if side is None:
+        side = max(room, key=lambda name: room[name])
+    distance = min(clearance, room[side])
+    if distance < gap:
         x, y = x_max + gap, top
-    elif x_min - gap - card_w >= 0:
-        x, y = x_min - gap - card_w, top
-    elif bottom + gap + card_h <= view_h:
-        # Neither side has room: below the box, then above it, before covering it.
-        x, y = x_min, bottom + gap
-    elif top - gap - card_h >= 0:
-        x, y = x_min, top - gap - card_h
+    elif side == "right":
+        x, y = x_max + distance, top
+    elif side == "left":
+        x, y = x_min - distance - card_w, top
+    elif side == "below":
+        x, y = x_min, bottom + distance
     else:
-        x, y = x_max + gap, top
+        x, y = x_min, top - distance - card_h
     x = min(max(x, 0), max(view_w - card_w, 0))
     y = min(max(y, 0), max(view_h - card_h, 0))
     return int(round(x)), int(round(y))
@@ -92,6 +109,12 @@ class FigoCard:
         self._type_expanded = False
         self._orig_ddx = ""
         self._orig_comment = ""
+        # Where the owner last asked the card to sit, and how far the reader
+        # dragged each box's card from there; the drag follows the box.
+        self._auto: tuple[int, int] | None = None
+        self._offsets: dict[str, tuple[int, int]] = {}
+        self._drag: tuple[Any, Any] | None = None
+        self._placed = False
 
         widget = qt.QFrame()
         widget.objectName = "MyomaFigoCard"
@@ -108,6 +131,8 @@ class FigoCard:
 
         title_row = qt.QHBoxLayout()
         self._title = qt.QLabel("")
+        self._title.toolTip = "Drag to move the card"
+        self._title.setCursor(qt.QCursor(qt.Qt.OpenHandCursor))
         title_row.addWidget(self._title, 1)
         close_button = qt.QToolButton()
         close_button.objectName = "figo_close"
@@ -170,6 +195,16 @@ class FigoCard:
         shortcut.context = qt.Qt.WidgetWithChildrenShortcut
         shortcut.connect("activated()", self.close)
         self._shortcut = shortcut
+
+        card = self
+
+        class _DragFilter(qt.QObject):
+            def eventFilter(self, obj, event):
+                return card._drag_event(event)
+
+        self._drag_filter = _DragFilter(widget)
+        widget.installEventFilter(self._drag_filter)
+        self._title.installEventFilter(self._drag_filter)
         self._update_rows(None)
 
     def dispose(self) -> None:
@@ -343,6 +378,9 @@ class FigoCard:
             self.close()
         qt = self._qt
         self.lesion_id = lesion_id
+        self._auto = None
+        self._placed = False
+        self._drag = None
         self._title.text = f"{lesion_id}  FIGO"
         self.widget.setParent(parent)
         self.set_figo(figo)
@@ -384,7 +422,54 @@ class FigoCard:
             self._on_close()
 
     def move_to(self, x: int, y: int) -> None:
+        """Sit at (x, y) beside the box, shifted by wherever the reader dragged it."""
+        self._auto = (int(x), int(y))
+        dx, dy = self._offsets.get(self.lesion_id or "", (0, 0))
+        self._place(x + dx, y + dy)
+
+    def place_at(self, x: int, y: int) -> None:
+        """Sit at (x, y) without a box to follow."""
+        self._place(x, y)
+
+    @property
+    def placed(self) -> bool:
+        """Whether the card has been put anywhere since it opened."""
+        return self._placed
+
+    def _place(self, x: float, y: float) -> None:
+        parent = self.widget.parentWidget()
+        if parent is not None:
+            x = min(max(x, 0), max(parent.width - self.widget.width, 0))
+            y = min(max(y, 0), max(parent.height - self.widget.height, 0))
         self.widget.move(int(x), int(y))
+        self._placed = True
+
+    def _drag_event(self, event: Any) -> bool:
+        qt = self._qt
+        kind = event.type()
+        if kind == qt.QEvent.MouseButtonPress and event.button() == qt.Qt.LeftButton:
+            self._drag = (event.globalPos(), self.widget.pos)
+            self._title.setCursor(qt.QCursor(qt.Qt.ClosedHandCursor))
+            return True
+        if kind == qt.QEvent.MouseMove and self._drag is not None:
+            start, origin = self._drag
+            delta = event.globalPos() - start
+            self.drag_to(origin.x() + delta.x(), origin.y() + delta.y())
+            return True
+        if kind == qt.QEvent.MouseButtonRelease and self._drag is not None:
+            self._drag = None
+            self._title.setCursor(qt.QCursor(qt.Qt.OpenHandCursor))
+            return True
+        return False
+
+    def drag_to(self, x: int, y: int) -> None:
+        """Move the card where the reader put it and remember that for its box."""
+        self._place(x, y)
+        if self._auto is not None and self.lesion_id:
+            self._offsets[self.lesion_id] = (
+                int(self.widget.x) - self._auto[0],
+                int(self.widget.y) - self._auto[1],
+            )
 
     def size(self) -> tuple[int, int]:
         hint = self.widget.sizeHint

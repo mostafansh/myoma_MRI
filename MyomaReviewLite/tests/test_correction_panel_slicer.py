@@ -96,9 +96,10 @@ def test_correction_panel_drives_the_segment_editor() -> None:
             for name in HIDDEN_EDITOR_PARTS:
                 part = editor.findChild(qt.QWidget, name)
                 assert part is None or part.isHidden(), name
-            assert list(panel.segment_buttons) == ["myoma", "uterine_wall", "uterine_cavity", "nabothian_cyst"]
+            # Rows follow the mask's label values, so keys 1-4 read top to bottom.
+            assert list(panel.segment_buttons) == ["uterine_wall", "uterine_cavity", "myoma", "nabothian_cyst"]
             assert [b.accessibleName for b in panel.segment_buttons.values()] == [
-                "Myoma", "Uterine wall", "Uterine cavity", "Nabothian cyst",
+                "Uterine wall", "Uterine cavity", "Myoma", "Nabothian cyst",
             ]
             assert panel.segment_buttons["myoma"].checked
 
@@ -133,6 +134,16 @@ def test_correction_panel_drives_the_segment_editor() -> None:
             assert editor.currentSegmentID() == "uterine_wall"
             assert panel.segment_buttons["uterine_wall"].checked
             assert not panel.segment_buttons["myoma"].checked
+
+            # Keys 1-4 pick the label with that value.
+            widget.on_pick_segment_2()
+            assert editor.currentSegmentID() == "uterine_cavity"
+            widget.on_pick_segment_4()
+            assert editor.currentSegmentID() == "nabothian_cyst"
+            widget.on_pick_segment_3()
+            assert editor.currentSegmentID() == "myoma"
+            widget.on_pick_segment_1()
+            assert panel.segment_buttons["uterine_wall"].checked
 
             # A tool switched outside the panel shows on it, with its own options.
             editor.setActiveEffectByName("Islands")
