@@ -171,7 +171,10 @@ def validate_common_geometry(geometries: Iterable[Mapping[str, Any] | ImageGeome
     for index, item in enumerate(parsed[1:], start=1):
         if item.dimensions != reference.dimensions:
             raise ValidationError(f"image {index} dimensions do not match sagittal reference")
-        if any(abs(a - b) > 1e-5 for a, b in zip(item.ijk_to_ras, reference.ijk_to_ras)):
+        # NIfTI stores the header in float32, so an oblique native grid
+        # saved and reloaded by Slicer drifts by ~1e-5 mm; 1e-3 mm is still
+        # far below any voxel.
+        if any(abs(a - b) > 1e-3 for a, b in zip(item.ijk_to_ras, reference.ijk_to_ras)):
             raise ValidationError(f"image {index} IJK-to-RAS geometry does not match sagittal reference")
     return reference
 
