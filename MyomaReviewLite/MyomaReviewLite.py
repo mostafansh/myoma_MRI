@@ -409,6 +409,17 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             raise StorageError("completed cases are read-only")
         self.storage.save_draft(self.state, segmentation_source)
 
+    def ai_mask_path(self) -> Path:
+        """The only read of the AI mask path in this module.
+
+        Level 2 replaces this method with a fetch from the reveal service, so
+        every caller must go through it rather than reading the manifest.
+        """
+
+        if self.manifest is None:
+            raise StorageError("no case is open")
+        return self.manifest.ai_mask
+
     def reveal_ai(self) -> Path:
         """Persist the exposed phase before returning the AI path to the UI."""
 
@@ -418,7 +429,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             raise StorageError("completed cases are read-only")
         self.state.reveal()
         self.storage.save_draft(self.state)
-        return self.manifest.ai_mask
+        return self.ai_mask_path()
 
     def publish_early_stop(self, status: str) -> dict[str, Any]:
         if self.storage is None or self.state is None:
@@ -534,7 +545,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             raise StorageError("AI mask cannot be loaded before reveal")
         if self.ai_mask_node is None:
             self.ai_mask_node = slicer.util.loadLabelVolume(
-                str(self.manifest.ai_mask), {"name": "AI mask (hidden source)", "singleFile": True}
+                str(self.ai_mask_path()), {"name": "AI mask (hidden source)", "singleFile": True}
             )
             if self.ai_mask_node is None:
                 raise RuntimeError("Slicer could not load the AI mask")
