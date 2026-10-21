@@ -63,6 +63,7 @@ CHECKED_PAIRS = (
     ("muted on background", MUTED, BG),
     ("muted on surface", MUTED, SURFACE),
     ("muted on selected row", MUTED, ACCENT_SOFT),
+    ("text on selected row", TEXT, ACCENT_SOFT),
     ("primary button", ON_ACCENT, ACCENT),
     ("text on button", TEXT, BUTTON),
     ("text in field", TEXT, FIELD),
@@ -149,6 +150,31 @@ QLabel[role="hint-warning"] {{ color: {AMBER}; font-size: 12px; }}
 QLabel[role="hint-ok"] {{ color: {FIGO_SET_COLOURS[2]}; font-size: 12px; }}
 
 QListWidget[role="rows"] {{ background: transparent; border: none; outline: none; }}
+
+QPushButton[role="segment"] {{ background: {SURFACE}; border: 1px solid transparent;
+    border-radius: 8px; padding: 0px; text-align: left; }}
+QPushButton[role="segment"]:hover {{ background: {SURFACE_HOVER}; }}
+QPushButton[role="segment"]:checked {{ background: {ACCENT_SOFT}; border-color: {ACCENT}; }}
+QPushButton[role="segment"]:disabled {{ background: {SURFACE}; border-color: transparent; }}
+QPushButton[role="segment"] QLabel {{ color: {TEXT}; background: transparent; }}
+QPushButton[role="segment"] QLabel[role="hint-muted"] {{ color: {MUTED}; }}
+QToolButton[role="tool"] {{ background: {SURFACE}; color: {TEXT}; border: none;
+    border-radius: 8px; padding: 9px 0px 7px 0px; }}
+QToolButton[role="tool"]:hover {{ background: {SURFACE_HOVER}; }}
+QToolButton[role="tool"]:checked {{ background: {ACCENT}; color: {ON_ACCENT}; font-weight: 600; }}
+QToolButton[role="tool"]:disabled {{ color: {DISABLED_TEXT}; }}
+QFrame[role="card"] {{ background: {SURFACE}; border: none; border-radius: 8px; }}
+QFrame[role="card"] QLabel {{ background: transparent; }}
+QLabel[role="strong"] {{ color: {TEXT}; font-weight: 600; background: transparent; }}
+QFrame[role="empty"] {{ background: transparent; border: 1px dashed {GHOST_BORDER}; border-radius: 8px; }}
+QFrame[role="empty"] QLabel {{ border: none; }}
+QFrame[role="popover"] {{ background: {SURFACE}; border: 1px solid {ACCENT}; border-radius: 8px; }}
+QFrame[role="popover"] QLabel {{ background: transparent; border: none; }}
+QSlider::groove:horizontal {{ background: {FIELD}; height: 4px; border-radius: 2px; }}
+QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: {ACCENT}; width: 14px; height: 14px;
+    margin: -5px 0px; border-radius: 7px; }}
+QSlider::sub-page:horizontal:disabled, QSlider::handle:horizontal:disabled {{ background: {DISABLED_TEXT}; }}
 
 QCheckBox {{ color: {TEXT}; spacing: 8px; }}
 """

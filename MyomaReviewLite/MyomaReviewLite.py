@@ -90,6 +90,7 @@ from MyomaReviewLiteLib.domain import validate_correction_mask_values
 from MyomaReviewLiteLib.figo_card import FigoCard, card_position, figo_label, missing_figo_ids
 from MyomaReviewLiteLib.view_tools import ReviewViewTools
 from MyomaReviewLiteLib.correction_tools import ReviewCorrectionTools
+from MyomaReviewLiteLib.correction_panel import CorrectionPanel
 from MyomaReviewLiteLib import theme
 from MyomaReviewLiteLib.fonts import load_bundled_fonts
 from MyomaReviewLiteLib.panel_model import (
@@ -1407,6 +1408,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             mouse_text = _mouse_button_label(mouse_value) if mouse_value else ""
             hint = ", ".join(text for text in (key_text, mouse_text) if text)
             button.text = f"{base_text} ({hint})" if hint else base_text
+        if getattr(self, "correction_panel", None) is not None:
+            keys = (("show_myomas", "jump to myomas"), ("toggle_roi_boxes", "show boxes"))
+            bound = [
+                (self.shortcut_bindings[action_id].key.toString(), text)
+                for action_id, text in keys
+                if self.shortcut_bindings.get(action_id) is not None
+            ]
+            self.correction_panel.set_key_hint(" · ".join(f"{key} {text}" for key, text in bound if key))
 
     def _enable_synced_crosshair(self) -> None:
         # A small "+" that follows the mouse in whichever slice view is
@@ -1771,11 +1780,22 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.comment_toggle.setIconSize(qt.QSize(16, 16))
         self.comment_toggle.setFixedSize(38, 34)
         self.comment_toggle.connect("toggled(bool)", self.on_comment_toggled)
-        self.case_comment_edit = theme.set_role(qt.QPlainTextEdit(self.annotation_tab), "comment")
+        self.case_comment_box = theme.set_role(qt.QFrame(self.annotation_tab), "popover")
+        comment_box_layout = qt.QVBoxLayout(self.case_comment_box)
+        comment_box_layout.setContentsMargins(10, 10, 10, 10)
+        comment_box_layout.setSpacing(6)
+        comment_title_row = qt.QHBoxLayout()
+        comment_title_row.addWidget(theme.set_role(qt.QLabel("Case comment"), "strong"))
+        comment_title_row.addStretch(1)
+        comment_title_row.addWidget(theme.set_role(qt.QLabel("Esc to close"), "hint-muted"))
+        comment_box_layout.addLayout(comment_title_row)
+        self.case_comment_edit = qt.QPlainTextEdit()
         self.case_comment_edit.placeholderText = "Comment on the whole case"
-        self.case_comment_edit.setFixedHeight(110)
+        self.case_comment_edit.setFixedHeight(88)
+        comment_box_layout.addWidget(self.case_comment_edit)
+        self.case_comment_box.visible = False
         self.case_comment_edit.visible = False
-        comment_escape = qt.QShortcut(qt.QKeySequence("Esc"), self.case_comment_edit)
+        comment_escape = qt.QShortcut(qt.QKeySequence("Esc"), self.case_comment_box)
         comment_escape.context = qt.Qt.WidgetWithChildrenShortcut
         comment_escape.connect("activated()", lambda: setattr(self.comment_toggle, "checked", False))
         self._comment_overlay_filter = self._make_comment_overlay_filter()
@@ -1789,8 +1809,34 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         blind_layout = qt.QVBoxLayout(blind)
         blind_layout.setContentsMargins(0, 0, 0, 0)
         blind_layout.setSpacing(6)
-        self.myoma_section_label = theme.set_role(qt.QLabel("MYOMAS"), "section")
-        blind_layout.addWidget(self.myoma_section_label)
+        myoma_header = qt.QHBoxLayout()
+        self.myoma_section_label = theme.set_role(qt.QLabel("MYOMAS · 0"), "section")
+        myoma_header.addWidget(self.myoma_section_label)
+        myoma_header.addStretch(1)
+        self.myoma_edit_hint = theme.set_role(qt.QLabel("Click a box in the views to edit"), "hint-muted")
+        myoma_header.addWidget(self.myoma_edit_hint, 0, qt.Qt.AlignBottom)
+        blind_layout.addLayout(myoma_header)
+        # In place of the empty list until the first box is drawn.
+        self.empty_state = qt.QWidget()
+        empty_slot = qt.QVBoxLayout(self.empty_state)
+        empty_slot.setContentsMargins(0, 0, 0, 0)
+        empty_card = theme.set_role(qt.QFrame(), "empty")
+        empty_slot.addWidget(empty_card)
+        empty_slot.addStretch(1)
+        empty_layout = qt.QVBoxLayout(empty_card)
+        empty_layout.setContentsMargins(12, 18, 12, 18)
+        empty_layout.setSpacing(6)
+        empty_title = theme.set_role(qt.QLabel("No boxes yet"), "strong")
+        empty_text = theme.set_role(qt.QLabel("Draw a box around each myoma in any view."), "muted")
+        empty_text.wordWrap = True
+        for label in (empty_title, empty_text):
+            label.alignment = qt.Qt.AlignCenter
+            empty_layout.addWidget(label)
+        self.empty_add_button = theme.set_role(qt.QPushButton("＋  Add myoma box"), "primary")
+        self.empty_add_button.connect("clicked()", self.on_add_box)
+        empty_layout.addWidget(self.empty_add_button, 0, qt.Qt.AlignHCenter)
+        self.empty_state.visible = False
+        blind_layout.addWidget(self.empty_state, 1)
         self.lesion_list = theme.set_role(qt.QListWidget(), "rows")
         self.lesion_list.setItemDelegate(theme.make_row_delegate(self.lesion_list))
         self.lesion_list.setMouseTracking(True)
@@ -1803,7 +1849,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         list_escape.context = qt.Qt.WidgetShortcut
         list_escape.connect("activated()", self.clear_lesion_selection)
         blind_layout.addWidget(self.lesion_list, 1)
-        actions = qt.QHBoxLayout()
+        self.box_actions = qt.QWidget()
+        actions = qt.QHBoxLayout(self.box_actions)
+        actions.setContentsMargins(0, 0, 0, 0)
         self.add_button = theme.set_role(qt.QPushButton("＋  Add myoma box"), "ghost")
         self.add_button.connect("clicked()", self.on_add_box)
         self.delete_button = qt.QPushButton("Delete")
@@ -1811,7 +1859,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.delete_button.connect("clicked()", self.on_delete_box)
         actions.addWidget(self.add_button, 1)
         actions.addWidget(self.delete_button)
-        blind_layout.addLayout(actions)
+        blind_layout.addWidget(self.box_actions)
         # Only shown while a box is being placed or redrawn.
         self.roi_edit_bar = qt.QWidget()
         roi_transaction_actions = qt.QHBoxLayout(self.roi_edit_bar)
@@ -1826,9 +1874,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._set_roi_edit_buttons(False)
         # Only asked before reveal; once AI is shown the answer is settled.
         # Folded to one line unless the case has no boxes (_refresh_nothing_to_box).
-        self.nothing_to_box_section = qt.QWidget()
+        self.nothing_to_box_section = theme.set_role(qt.QFrame(), "card")
         nothing_layout = qt.QVBoxLayout(self.nothing_to_box_section)
-        nothing_layout.setContentsMargins(0, 0, 0, 0)
+        nothing_layout.setContentsMargins(10, 6, 10, 8)
         nothing_layout.setSpacing(6)
         blind_layout.addWidget(self.nothing_to_box_section)
         self.nothing_to_box_toggle = theme.set_role(qt.QToolButton(), "fold")
@@ -1846,6 +1894,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.zero_check = qt.QCheckBox("Confirm zero myomas")
         self.zero_check.connect("toggled(bool)", self.on_zero_toggled)
         body_layout.addWidget(self.zero_check)
+        body_layout.addWidget(theme.set_role(qt.QLabel("Or stop this case early:"), "hint-muted"))
         # Early stops answer "is there anything to box at all", so they sit
         # with the zero-myoma confirmation.
         stops = qt.QHBoxLayout()
@@ -1866,15 +1915,18 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         correction_layout = qt.QVBoxLayout(correction)
         correction_layout.setContentsMargins(0, 0, 0, 0)
         correction_layout.setSpacing(6)
+        # Our own segment rows and tools; Slicer's Segment Editor works behind them.
+        self.correction_panel = CorrectionPanel(
+            ICON_DIR,
+            {FIXED_SEGMENT_IDS[value]: FIXED_SEGMENT_NAMES[FIXED_SEGMENT_IDS[value]] for value in (3, 1, 2, 4)},
+        )
+        correction_layout.addWidget(self.correction_panel.widget)
+        correction_layout.addStretch(1)
         self.show_roi_check = qt.QCheckBox("Show ROI boxes")
         self.show_roi_check.checked = False
         self.show_roi_check.connect("toggled(bool)", self.on_show_roi_toggled)
         correction_layout.addWidget(self.show_roi_check)
         self.correction_tools = ReviewCorrectionTools(self)
-        self.segment_editor_host = qt.QWidget()
-        self.segment_editor_host_layout = qt.QVBoxLayout(self.segment_editor_host)
-        self.segment_editor_host_layout.setContentsMargins(0, 0, 0, 0)
-        correction_layout.addWidget(self.segment_editor_host, 1)
         self.page_stack.addWidget(correction)
 
         # --- Action bar: what blocks or follows, then the page's actions ---
@@ -1955,7 +2007,20 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def _refresh_myoma_count(self) -> None:
         count = self.lesion_list.count
-        self.myoma_section_label.text = f"MYOMAS · {count}" if count else "MYOMAS"
+        self.myoma_section_label.text = f"MYOMAS · {count}"
+        self._refresh_empty_state()
+
+    def _refresh_empty_state(self) -> None:
+        """No boxes and still free to draw one: the empty card replaces the list."""
+
+        count = self.lesion_list.count
+        editable = bool(self.add_button.enabled) and not self.logic.read_only
+        empty = count == 0 and editable
+        self.empty_state.visible = empty
+        self.empty_add_button.enabled = empty
+        self.lesion_list.visible = not empty
+        self.box_actions.visible = not empty
+        self.myoma_edit_hint.visible = count > 0 and editable
 
     def _on_page_changed(self) -> None:
         self._refresh_action_bar()
@@ -2016,6 +2081,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         blind = state is not None and state.phase == ReviewPhase.BLIND.value
         self.reveal_button.visible = not read_only and blind and not on_correction
         self.complete_button.visible = not read_only and on_correction
+        self.save_draft_button.visible = not read_only
         self.reopen_button.visible = complete_record
         self.footer_next_button.visible = read_only
         self.footer_next_button.enabled = self.next_case_button.enabled
@@ -2023,13 +2089,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def _position_comment_overlay(self) -> None:
         """Lay the open comment box just above the action bar, over the page."""
 
-        edit = self.case_comment_edit
-        if edit.isHidden():
+        box = self.case_comment_box
+        if box.isHidden():
             return
+        height = box.sizeHint.height()
         bar_top = self.action_bar.mapTo(self.annotation_tab, qt.QPoint(0, 0)).y()
-        top = max(bar_top - 6 - edit.height, 0)
-        edit.setGeometry(12, top, max(self.annotation_tab.width - 24, 120), edit.height)
-        edit.raise_()
+        top = max(bar_top - 6 - height, 0)
+        box.setGeometry(12, top, max(self.annotation_tab.width - 24, 120), height)
+        box.raise_()
 
     def _set_comment_overlay_tracking(self, on: bool) -> None:
         """While the box is open: follow the bar's moves, and fold the box
@@ -2052,7 +2119,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # The same press also passes through its window; judge it once,
             # at the widget that receives it.
             return
-        for own in (self.case_comment_edit, self.comment_toggle):
+        for own in (self.case_comment_box, self.comment_toggle):
             # The bar's own click already toggles the box.
             if clicked is own or own.isAncestorOf(clicked):
                 return
@@ -2480,6 +2547,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.segment_editor_widget.setReadOnly(read_only)
             if read_only:
                 self.segment_editor_widget.setActiveEffectByName("")
+        self.correction_panel.set_read_only(read_only)
         self.correction_tools.refresh()
         # Whether there is anything to box is settled once AI is shown.
         self.nothing_to_box_section.visible = self.logic.segmentation_node is None
@@ -2542,6 +2610,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         # or deleted once AI is shown; the blinded snapshot stays frozen.
         for control in (self.add_button, self.delete_button):
             control.enabled = not locked
+        self._refresh_empty_state()
         self.zero_check.blockSignals(True)
         self.zero_check.checked = state.zero_myomas
         self.zero_check.enabled = not locked and not state.lesions
@@ -2839,6 +2908,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.comment_toggle.setIcon(qt.QIcon(str(ICON_DIR / ("comment-written.svg" if has_text else "comment.svg"))))
 
     def on_comment_toggled(self, expanded: bool) -> None:
+        self.case_comment_box.visible = bool(expanded)
         self.case_comment_edit.visible = bool(expanded)
         self._set_comment_overlay_tracking(bool(expanded))
         if expanded:
@@ -2859,6 +2929,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.comment_toggle.blockSignals(True)
         self.comment_toggle.checked = False
         self.comment_toggle.blockSignals(False)
+        self.case_comment_box.visible = False
         self.case_comment_edit.visible = False
         self._set_comment_overlay_tracking(False)
         self._refresh_comment_toggle()
@@ -2920,6 +2991,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._remove_segmentation_observer()
         if self.segment_editor_widget is not None:
             editor = self.segment_editor_widget
+            self.correction_panel.unbind()
             for method_name in (
                 "setSegmentationNode",
                 "setSourceVolumeNode",
@@ -2931,10 +3003,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                     pass
             try:
                 editor.setMRMLScene(None)
-            except Exception:
-                pass
-            try:
-                self.segment_editor_host_layout.removeWidget(editor)
             except Exception:
                 pass
             try:
@@ -3004,9 +3072,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.close_figo_card()
         if self.segment_editor_widget is not None:
             return
-        self.segment_editor_widget = self.logic.setup_segment_editor(self.segment_editor_host)
+        self.segment_editor_widget = self.logic.setup_segment_editor(self.correction_panel.editor_host)
         if self.segment_editor_widget is not None:
-            self.segment_editor_host_layout.addWidget(self.segment_editor_widget)
+            self.correction_panel.bind(
+                self.segment_editor_widget, self.logic.segment_editor_node, self.logic.segmentation_node
+            )
+            self.correction_panel.set_read_only(self.logic.read_only)
         self.view_tools.restore_views(reset_orientation=False, fit=False)
         if self.roi_overlay is not None:
             self.roi_overlay.bind_views()

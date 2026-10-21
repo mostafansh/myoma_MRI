@@ -17,6 +17,12 @@ set(MODULE_PYTHON_RESOURCES
   Resources/Icons/chevron-down.svg
   Resources/Icons/comment.svg
   Resources/Icons/comment-written.svg
+  Resources/Icons/tool-paint.svg
+  Resources/Icons/tool-erase.svg
+  Resources/Icons/tool-draw.svg
+  Resources/Icons/tool-scissors.svg
+  Resources/Icons/tool-islands.svg
+  Resources/Icons/tool-smooth.svg
   Resources/Fonts/HankenGrotesk-Regular.ttf
   Resources/Fonts/HankenGrotesk-Medium.ttf
   Resources/Fonts/HankenGrotesk-SemiBold.ttf

@@ -41,7 +41,7 @@ The MyomaReviewLite module panel is restyled and restructured. Data formats, the
 4. **Page content**:
    - Myoma page: "MYOMAS · N", the myoma rows with their FIGO tags, Add box and Delete.
    - "Nothing to box?" folds into one line. It opens by itself when the case has no boxes.
-   - Correction page: Slicer's own Segment Editor, restyled only, plus "Show ROI boxes".
+   - Correction page (board A5): "SEGMENTS" rows (Myoma, Uterine wall, Uterine cavity, Nabothian cyst) with the V / Q key hint, a 3 × 2 "TOOLS" grid (Paint, Erase, Draw, Scissors, Islands, Smooth) and, for Paint and Erase, a brush panel (size in mm, sphere brush). Slicer's Segment Editor still does the editing behind them; its own buttons and segment table are hidden, and only the picked effect's options show. "Show ROI boxes" sits at the bottom.
 5. **Bottom bar**: one hint line above three controls: a comment icon button, "Save draft", and the page's main button ("Reveal AI  →" or "Export corrected labels and complete").
    - The hint tells the reader what blocks them or what happens next.
    - The case comment opens as a pop-over above the bar; the icon shows a dot when a comment is written.
