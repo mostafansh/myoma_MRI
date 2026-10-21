@@ -104,6 +104,13 @@ class PortalCoreTests(unittest.TestCase):
         with self.assertRaises(portal_core.PortalError):
             portal_core.load_readers(path.with_name("missing.json"))
 
+    def test_load_readers_rejects_reserved_ids(self):
+        for rid in sorted(portal_core.RESERVED_IDS):
+            entry = '{"id": "%s", "display_name": "x", "password_hash": "-", "admin": false}' % rid
+            self.path.write_text('{"readers": [' + entry + "]}", encoding="utf-8")
+            with self.subTest(rid=rid), self.assertRaises(portal_core.PortalError):
+                portal_core.load_readers(self.path)
+
     def test_save_and_load_round_trip(self):
         portal_core.save_readers(self.path, self.readers)
         self.assertEqual(portal_core.load_readers(self.path), self.readers)

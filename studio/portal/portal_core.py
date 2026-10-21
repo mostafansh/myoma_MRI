@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 READER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+RESERVED_IDS = frozenset({"admin", "login", "logout", "auth", "unavailable", "static"})
 SESSION_LIFETIME = 43200
 LOCK_FAILURES = 5
 LOCK_SECONDS = 600
@@ -76,6 +77,8 @@ def load_readers(path: Path) -> dict[str, Reader]:
         rid = entry.get("id")
         if not isinstance(rid, str) or not READER_ID_RE.match(rid):
             raise PortalError(f"Invalid reader id: {rid!r}")
+        if rid in RESERVED_IDS:
+            raise PortalError(f"Reader id is reserved: {rid}")
         if rid in readers:
             raise PortalError(f"Duplicate reader id: {rid}")
         name = entry.get("display_name")
