@@ -86,9 +86,14 @@ def test_studio_on() -> None:
                 assert console_actions, "no Python console action found"
                 for name, action in console_actions:
                     assert not action.enabled, f"console action {name!r} {action.text!r} enabled"
-                    action.trigger()
+                    for attempt in range(2):
+                        action.trigger()
+                        slicer.app.processEvents()
+                        assert not console.visible, f"{name!r} showed the console (trigger {attempt + 1})"
+                for attempt in range(2):
+                    console.show()
                     slicer.app.processEvents()
-                    assert not console.visible, f"{name!r} showed the console"
+                    assert not console.visible, f"console.show() stuck (call {attempt + 1})"
             except AssertionError:
                 print("ACTION NAMES:", sorted(set(names)))
                 raise

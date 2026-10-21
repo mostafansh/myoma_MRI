@@ -2236,9 +2236,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.segment_editor_widget.redo()
         else:
             self._restore_annotation(False)
-        if studio:
-            # A reader never leaves the review module; bring it straight back.
-            qt.QTimer.singleShot(0, lambda: slicer.util.selectModule("MyomaReviewLite"))
 
     def choose_manifest(self) -> None:
         if studio_mode.is_studio_mode():
