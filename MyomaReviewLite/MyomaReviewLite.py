@@ -1266,6 +1266,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._case_filter = DEFAULT_CASE_FILTER
         # Slicer turns dark while this module is shown; see theme.DarkAppStyle.
         self.app_style = theme.DarkAppStyle()
+        # ...and shows our name and logo instead of Slicer's; see theme.AppBranding.
+        self.app_branding = theme.AppBranding(
+            str(Path(__file__).resolve().parent / "Resources" / "Icons" / "MyomaReviewLite.svg")
+        )
         # Placing/redrawing a box swaps the slice-view cursor for a small
         # yellow dot and hides every other myoma box so the reader gets an
         # uncluttered view of the anatomy underneath; see _apply_roi_selection
@@ -2133,6 +2137,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def enter(self) -> None:
         self.app_style.enter()
+        self.app_branding.enter()
         # Slicer's module panel resets its layout margins after setup; put ours back.
         self.layout.setContentsMargins(10, 8, 10, 8)
         for shortcut in self.shortcuts:
@@ -2150,6 +2155,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def exit(self) -> None:
         self.app_style.exit()
+        self.app_branding.exit()
         # The card belongs to the module's views; leaving the module saves
         # and closes it rather than leaving it floating over another module.
         self.close_figo_card()

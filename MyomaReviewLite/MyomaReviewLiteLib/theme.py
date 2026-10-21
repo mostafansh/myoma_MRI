@@ -242,3 +242,103 @@ ROW_TITLE = 0x0100 + 10
 ROW_SUBTITLE = 0x0100 + 11
 ROW_TAG = 0x0100 + 12
 ROW_COLOURS = 0x0100 + 13
+
+
+# Shown in place of Slicer's own name and logo while the module is open.
+BRAND_NAME = "Myoma Review"
+
+
+class AppBranding:
+    """Swap Slicer's logo, window title and icon for ours while the module is shown.
+
+    ``enter`` remembers what Slicer showed and ``exit`` puts it back, so other
+    modules still look like plain Slicer. Slicer's "Help & Acknowledgement"
+    section is hidden for the same time.
+    """
+
+    def __init__(self, logo_path: str) -> None:
+        self._logo_path = logo_path
+        self._saved: dict[str, Any] | None = None
+
+    def enter(self) -> None:
+        import qt
+        import slicer
+
+        window = slicer.util.mainWindow()
+        if window is None or self._saved is not None:
+            return
+        logo = window.findChild(qt.QLabel, "LogoLabel")
+        help_button = window.findChild(qt.QWidget, "HelpCollapsibleButton")
+        self._saved = {
+            "title": window.windowTitle,
+            "icon": window.windowIcon,
+            "app_icon": slicer.app.windowIcon,
+            "logo_pixmap": qt.QPixmap(logo.pixmap) if logo is not None and logo.pixmap is not None else None,
+            "help_visible": bool(help_button.visible) if help_button is not None else None,
+        }
+        icon = qt.QIcon(self._logo_path)
+        window.windowTitle = BRAND_NAME
+        # Slicer rewrites the title when a scene loads; keep ours on top.
+        window.connect("windowTitleChanged(QString)", self._keep_title)
+        window.setWindowIcon(icon)
+        slicer.app.setWindowIcon(icon)
+        if logo is not None:
+            logo.setPixmap(self._logo_pixmap(icon))
+        if help_button is not None:
+            help_button.visible = False
+
+    def exit(self) -> None:
+        import qt
+        import slicer
+
+        window = slicer.util.mainWindow()
+        if window is None or self._saved is None:
+            return
+        saved, self._saved = self._saved, None
+        window.disconnect("windowTitleChanged(QString)", self._keep_title)
+        window.windowTitle = saved["title"]
+        window.setWindowIcon(saved["icon"])
+        slicer.app.setWindowIcon(saved["app_icon"])
+        logo = window.findChild(qt.QLabel, "LogoLabel")
+        if logo is not None and saved["logo_pixmap"] is not None:
+            logo.setPixmap(saved["logo_pixmap"])
+        help_button = window.findChild(qt.QWidget, "HelpCollapsibleButton")
+        if help_button is not None and saved["help_visible"] is not None:
+            help_button.visible = saved["help_visible"]
+
+    def _keep_title(self, title: str) -> None:
+        import slicer
+
+        if self._saved is None or title == BRAND_NAME:
+            return
+        # What Slicer would show now is what exit() should put back.
+        self._saved["title"] = title
+        slicer.util.mainWindow().windowTitle = BRAND_NAME
+
+    @staticmethod
+    def _logo_pixmap(icon: Any) -> Any:
+        """Our icon and name drawn side by side, about the size of Slicer's logo."""
+
+        import qt
+
+        height, icon_size = 40, 32
+        font = qt.QFont("Segoe UI")
+        font.setPixelSize(22)
+        metrics = qt.QFontMetrics(font)
+        text_width = metrics.horizontalAdvance(BRAND_NAME) if hasattr(metrics, "horizontalAdvance") else metrics.width(BRAND_NAME)
+        pixmap = qt.QPixmap(icon_size + 12 + text_width + 4, height)
+        pixmap.fill(qt.QColor(0, 0, 0, 0))
+        painter = qt.QPainter(pixmap)
+        try:
+            painter.setRenderHint(qt.QPainter.Antialiasing, True)
+            painter.drawPixmap((height - icon_size) // 2, (height - icon_size) // 2, icon.pixmap(icon_size, icon_size))
+            painter.setFont(font)
+            painter.setPen(qt.QColor(TEXT))
+            painter.drawText(
+                qt.QRect(icon_size + 12, 0, text_width + 4, height),
+                int(qt.Qt.AlignLeft | qt.Qt.AlignVCenter),
+                BRAND_NAME,
+            )
+        finally:
+            painter.end()
+        return pixmap
