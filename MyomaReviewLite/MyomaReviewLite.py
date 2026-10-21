@@ -91,7 +91,7 @@ from MyomaReviewLiteLib.figo_card import FigoCard, card_position, figo_label, mi
 from MyomaReviewLiteLib.view_tools import ReviewViewTools
 from MyomaReviewLiteLib.correction_tools import ReviewCorrectionTools
 from MyomaReviewLiteLib.correction_panel import CorrectionPanel
-from MyomaReviewLiteLib import theme
+from MyomaReviewLiteLib import studio_mode, theme
 from MyomaReviewLiteLib.fonts import load_bundled_fonts
 from MyomaReviewLiteLib.panel_model import (
     CASE_FILTER_STATUSES,
@@ -1201,6 +1201,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._disable_oblique_rotate()
         self._hide_data_probe()
         self._hide_module_panel_boilerplate()
+        if studio_mode.is_studio_mode():
+            studio_mode.lock_down(slicer.util.mainWindow())
         self.autosave_timer = qt.QTimer()
         self.autosave_timer.setInterval(60_000)
         self.autosave_timer.connect("timeout()", self.on_autosave_timeout)
@@ -1603,6 +1605,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.manifest_button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
         self.manifest_button.connect("clicked()", self.choose_manifest)
         manifest_row.addWidget(self.manifest_button)
+        if studio_mode.is_studio_mode():
+            self.manifest_button.setVisible(False)
         cases_layout.addLayout(manifest_row)
 
         self.view_tools = ReviewViewTools(self.logic, self.parent)
@@ -2074,6 +2078,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._released_action_shortcuts = []
 
     def enter(self) -> None:
+        if studio_mode.is_studio_mode():
+            studio_mode.lock_down(slicer.util.mainWindow())
         self.app_style.enter()
         self._hide_panel_chrome()
         # The module panel re-shows its help box after enter() runs.
@@ -2097,7 +2103,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def exit(self) -> None:
         self.app_style.exit()
         self.app_branding.exit()
-        self._restore_panel_chrome()
+        studio = studio_mode.is_studio_mode()
+        if not studio:
+            self._restore_panel_chrome()
         # The card belongs to the module's views; leaving the module saves
         # and closes it rather than leaving it floating over another module.
         self.close_figo_card()
@@ -2118,6 +2126,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._apply_roi_selection()
         if self.click_selector is not None:
             self.click_selector.unbind_views()
+        if studio:
+            # A reader never leaves the review module; bring it straight back.
+            qt.QTimer.singleShot(0, lambda: slicer.util.selectModule("MyomaReviewLite"))
 
     def _show_page(self, index: int) -> None:
         if self._has_unresolved_roi():
@@ -2225,8 +2236,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.segment_editor_widget.redo()
         else:
             self._restore_annotation(False)
+        if studio:
+            # A reader never leaves the review module; bring it straight back.
+            qt.QTimer.singleShot(0, lambda: slicer.util.selectModule("MyomaReviewLite"))
 
     def choose_manifest(self) -> None:
+        if studio_mode.is_studio_mode():
+            return
         path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), "Open MyomaReviewLite case manifest", "", "JSON (*.json)")
         if path:
             self.open_case(path)
