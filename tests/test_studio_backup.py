@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import subprocess
 import tempfile
 import unittest
@@ -98,6 +99,32 @@ class StudioBackupTests(unittest.TestCase):
         result = self._run(readers=self.root / "does-not-exist")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(list(self.backup.iterdir()), [])
+
+    def test_failed_copy_leaves_no_snapshot_and_keeps_old_ones(self) -> None:
+        for _ in range(2):
+            self.assertEqual(self._run().returncode, 0)
+        before = [p.name for p in self._snapshots()]
+        self.assertEqual(len(before), 2)
+
+        # Hold a source file open with no sharing so robocopy cannot read it.
+        locked = self.readers / "mostafa" / "case1" / "locked.bin"
+        locked.write_bytes(b"x")
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateFileW.restype = ctypes.c_void_p
+        handle = kernel32.CreateFileW(
+            str(locked), 0x80000000, 0, None, 3, 0x80, None
+        )
+        self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+        try:
+            result = self._run()
+        finally:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual([p.name for p in self._snapshots()], before)
+        self.assertEqual(
+            sorted(p.name for p in self.backup.iterdir()), sorted(before)
+        )
 
 
 if __name__ == "__main__":
