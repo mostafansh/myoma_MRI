@@ -474,7 +474,8 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
                 raise RuntimeError(f"Slicer could not load the {plane} volume")
             node.SetName(SAFE_VOLUME_NAMES[plane])
             self.volume_nodes[plane] = node
-        validate_common_geometry([self._node_geometry(node) for node in self.volume_nodes.values()])
+        # Axial and coronal keep their acquired grids (registered into the
+        # sagittal's world space), so only the mask is held to the sagittal grid.
         self.activate_layout()
 
     @staticmethod
@@ -539,8 +540,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             if self.ai_mask_node is None:
                 raise RuntimeError("Slicer could not load the AI mask")
             validate_common_geometry(
-                [self._node_geometry(node) for node in self.volume_nodes.values()]
-                + [self._node_geometry(self.ai_mask_node)]
+                [self._node_geometry(self.volume_nodes["sagittal"]), self._node_geometry(self.ai_mask_node)]
             )
             values = slicer.util.arrayFromVolume(self.ai_mask_node)
             validate_four_label_values(value for value in values.flat)
