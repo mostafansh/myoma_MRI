@@ -163,7 +163,7 @@ SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] 
     ("delete_box", "Delete box", "", "on_delete_box", "delete_button", "Delete"),
     ("save_draft", "Save draft", "", "on_save_draft", "save_draft_button", "Save draft"),
     ("show_myomas", "Show segmented myomas", "V", "on_show_myomas", None, None),
-    ("toggle_roi_boxes", "Show ROI boxes", "Q", "on_toggle_roi_boxes", "show_roi_check", "Show ROI boxes"),
+    ("toggle_roi_boxes", "Show / hide boxes", "Q", "on_toggle_roi_boxes", "show_roi_check", "Show ROI boxes"),
     ("toggle_ai_mask", "Show / hide AI mask", "A", "on_toggle_ai_mask", None, None),
     ("segment_1", "Pick uterine wall", "1", "on_pick_segment_1", None, None),
     ("segment_2", "Pick uterine cavity", "2", "on_pick_segment_2", None, None),
@@ -1113,6 +1113,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.roi_outline_sources: dict[str, Any] = {}
         self.roi_live_sync: tuple[Any, int] | None = None
         self.roi_boxes_visible = True
+        # Q hides every box on the box page too; each page keeps its own choice.
+        self.box_page_boxes_shown = True
         self.active_roi_id: str | None = None
         self.active_roi_geometry: BoxGeometry | None = None
         self.roi_click_baseline: BoxGeometry | None = None
@@ -2118,7 +2120,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if changed and index == 0:
             # The FIGO page opens on every box; picking one narrows to it.
             self.clear_lesion_selection()
-        self._set_roi_visibility(index == 0 or bool(self.show_roi_check.checked))
+        self._set_roi_visibility(
+            self.box_page_boxes_shown if index == BOX_PAGE else bool(self.show_roi_check.checked)
+        )
 
     def _remember_annotation(self) -> None:
         if self.logic.state is not None:
@@ -2395,6 +2399,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.logic.load_registered_volumes()
         self.view_tools.refresh()
         self.roi_boxes_visible = True
+        self.box_page_boxes_shown = True
         self.rebuild_roi_nodes()
         if self.click_selector is not None:
             self.click_selector.bind_views()
@@ -2655,6 +2660,10 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             return
         # Drawing needs the views, so the card goes before the drag starts.
         self.close_figo_card()
+        if not self.box_page_boxes_shown:
+            # A new box is drawn among the others, so they come back first.
+            self.box_page_boxes_shown = True
+            self._set_roi_visibility(True)
         # An armed box would follow the drawing drag too, so disarm it first.
         self.set_active_roi(None)
         if self.draw_tool is not None:
@@ -3992,8 +4001,18 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.roi_draft_node.SetDisplayVisibility(True)
 
     def on_toggle_roi_boxes(self) -> None:
-        """The "Show ROI boxes" key: only meaningful on the correction page."""
-        if self.page_stack.currentIndex != 1 or not self.show_roi_check.enabled:
+        """The "Show / hide boxes" key: every box on the box page (before or
+        after reveal), the "Show ROI boxes" switch on the correction page."""
+        if self.page_stack.currentIndex == BOX_PAGE:
+            has_case = self.logic.state is not None or self.logic.final_annotation is not None
+            # A box being drawn or redrawn stays on screen until it is saved.
+            if not has_case or self._has_unresolved_roi():
+                return
+            self.box_page_boxes_shown = not self.box_page_boxes_shown
+            self._set_roi_visibility(self.box_page_boxes_shown)
+            self._set_status("Boxes shown." if self.box_page_boxes_shown else "Boxes hidden. Press Q to show them.")
+            return
+        if not self.show_roi_check.enabled:
             return
         self.show_roi_check.checked = not self.show_roi_check.checked
 

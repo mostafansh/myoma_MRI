@@ -1296,22 +1296,52 @@ def test_box_segment_switch_pages_after_reveal_without_moving_the_views() -> Non
         widget.cleanup()
 
 
-def test_q_toggles_the_roi_boxes_only_on_the_correction_page() -> None:
+def test_q_hides_the_boxes_before_reveal() -> None:
+    widget, first, second = _build_case("sub-00096")
+    try:
+        assert widget.logic.state.phase == "blind"
+        assert _outlines_shown(widget) == {first, second}
+        widget.on_toggle_roi_boxes()
+        assert _outlines_shown(widget) == set(), "Q did not hide the boxes before reveal"
+        widget.on_toggle_roi_boxes()
+        assert _outlines_shown(widget) == {first, second}, "Q did not show them again"
+    finally:
+        widget.cleanup()
+
+
+def test_q_toggles_the_boxes_on_both_pages() -> None:
     actions = {entry[0]: entry for entry in bundled_module.SHORTCUT_ACTIONS}
     assert actions["toggle_roi_boxes"][2] == "Q", actions.get("toggle_roi_boxes")
     widget, _first, _second = _revealed_case("sub-00093")
     try:
         widget._install_shortcuts()
         assert widget.show_roi_check.text == "Show ROI boxes (Q)", widget.show_roi_check.text
+        # Box page: Q hides and shows every box, and leaves the correction switch alone.
+        assert widget.roi_boxes_visible and _outlines_shown(widget) == {_first, _second}
         widget.on_toggle_roi_boxes()
-        assert not widget.show_roi_check.checked, "Q changed the boxes from the myoma page"
+        assert not widget.roi_boxes_visible and _outlines_shown(widget) == set(), "Q did not hide the boxes"
+        assert not widget.show_roi_check.checked, "Q changed the correction page's switch"
+        widget.on_toggle_roi_boxes()
+        assert widget.roi_boxes_visible and _outlines_shown(widget) == {_first, _second}, "Q did not show them again"
+        # Adding a box brings hidden boxes back.
+        widget.on_toggle_roi_boxes()
+        widget.on_add_box()
+        assert widget.box_page_boxes_shown and widget.roi_boxes_visible
+        widget.draw_tool.cancel()
+        widget.cancel_roi_edit()
+
         widget.logic.segmentation_node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
-        widget.page_stack.setCurrentIndex(1)
+        widget.on_toggle_roi_boxes()
+        assert not widget.box_page_boxes_shown
+        widget._show_page(1)
         widget.refresh_ui()
         widget.on_toggle_roi_boxes()
         assert widget.show_roi_check.checked, "Q did not show the boxes"
         widget.on_toggle_roi_boxes()
         assert not widget.show_roi_check.checked, "Q did not hide the boxes again"
+        # Back on the box page, its own choice holds.
+        widget._show_page(0)
+        assert not widget.roi_boxes_visible, "the box page forgot that its boxes were hidden"
     finally:
         widget.logic.segmentation_node = None
         widget.cleanup()
@@ -1427,7 +1457,8 @@ TESTS = (
     test_the_card_stays_up_while_its_box_is_not_drawn,
     test_a_read_only_list_shows_figo_and_opens_the_card_read_only,
     test_card_shows_in_a_sagittal_view_whose_normal_is_minus_r,
-    test_q_toggles_the_roi_boxes_only_on_the_correction_page,
+    test_q_hides_the_boxes_before_reveal,
+    test_q_toggles_the_boxes_on_both_pages,
     test_q_is_not_taken_elsewhere,
     test_a_is_not_taken_elsewhere,
 )
