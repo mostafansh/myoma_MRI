@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import argparse
 import http.client
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -15,16 +15,15 @@ from unittest import mock
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "studio" / "portal"))
-sys.path.insert(0, str(PROJECT_ROOT / "MyomaReviewLite"))
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT / "slicer-studio" / "portal"))
 
 import portal_core  # noqa: E402
 import studio_portal  # noqa: E402
-from portal_core import Reader  # noqa: E402
+from portal_core import User  # noqa: E402
 
 SECRET = b"k" * 32
-SCRIPT = str(PROJECT_ROOT / "studio" / "portal" / "studio_portal.py")
+SCRIPT = str(PROJECT_ROOT / "slicer-studio" / "portal" / "studio_portal.py")
 
 
 class PortalServerTests(unittest.TestCase):
@@ -33,15 +32,22 @@ class PortalServerTests(unittest.TestCase):
         root = Path(self.temporary.name)
         self.data_root = root / "data"
         (self.data_root / "sub-001").mkdir(parents=True)
-        self.readers_root = root / "readers"
-        self.readers_root.mkdir()
+        self.workspaces_root = root / "workspaces"
+        self.workspaces_root.mkdir()
         self.log_path = root / "access.log"
         pw = portal_core.hash_password("pw")
-        readers = {
-            "mostafa": Reader("mostafa", "Mostafa <b>", pw, False),
-            "boss": Reader("boss", "Boss", pw, True),
+        users = {
+            "mostafa": User("mostafa", "Mostafa <b>", pw, False),
+            "boss": User("boss", "Boss", pw, True),
+            "ali": User("ali", "Ali", pw, False),
         }
-        self.app = portal_core.PortalApp(readers, SECRET, self.data_root, self.readers_root)
+        (self.workspaces_root / "ali").mkdir()
+        (self.workspaces_root / "ali" / "progress.json").write_text(
+            '{"total": 7, "done": 4, "in_progress": 2, "needs_attention": 1}', encoding="utf-8")
+        env = mock.patch.dict(os.environ, {"STUDIO_TITLE": "Hello <b>"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.app = portal_core.PortalApp(users, SECRET, self.workspaces_root, self.data_root)
         self.server = studio_portal.make_server(self.app, "127.0.0.1", 0, self.log_path)
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -78,15 +84,15 @@ class PortalServerTests(unittest.TestCase):
     def test_login_sets_cookie_and_lands_on_viewer(self):
         resp, _ = self.login("mostafa", "pw")
         self.assertEqual(resp.status, 302)
-        self.assertEqual(resp.getheader("Location"), portal_core.landing_path(self.app.readers["mostafa"]))
+        self.assertEqual(resp.getheader("Location"), portal_core.landing_path(self.app.users["mostafa"]))
         cookie = resp.getheader("Set-Cookie")
         for part in ("studio_session=", "HttpOnly", "Secure", "SameSite=Lax", "Max-Age=43200"):
             self.assertIn(part, cookie)
         self.assertEqual(resp.getheader("Cache-Control"), "no-store")
 
-    def test_auth_guards_other_readers_websocket(self):
+    def test_auth_guards_other_users_websocket(self):
         cookie = self.cookie_for("mostafa")
-        resp, _ = self.request("GET", "/auth", headers={"Cookie": cookie, "X-Forwarded-Uri": "/reader2/websockify"})
+        resp, _ = self.request("GET", "/auth", headers={"Cookie": cookie, "X-Forwarded-Uri": "/user2/websockify"})
         self.assertEqual(resp.status, 403)
         resp, _ = self.request("GET", "/auth", headers={"Cookie": cookie, "X-Forwarded-Uri": "/mostafa/websockify"})
         self.assertEqual(resp.status, 200)
@@ -96,7 +102,7 @@ class PortalServerTests(unittest.TestCase):
         self.assertEqual(resp.status, 302)
         self.assertEqual(resp.getheader("Location"), "/login")
 
-    def test_admin_page_lists_readers_only_for_admin(self):
+    def test_admin_page_lists_users_only_for_admin(self):
         resp, body = self.request("GET", "/admin", headers={"Cookie": self.cookie_for("boss")})
         self.assertEqual(resp.status, 200)
         self.assertIn("mostafa", body)
@@ -104,6 +110,28 @@ class PortalServerTests(unittest.TestCase):
         resp, _ = self.request("GET", "/admin", headers={"Cookie": self.cookie_for("mostafa")})
         self.assertEqual(resp.status, 302)
         self.assertEqual(resp.getheader("Location"), "/login")
+
+    def test_admin_page_shows_dash_without_progress_and_numbers_with_it(self):
+        _, body = self.request("GET", "/admin", headers={"Cookie": self.cookie_for("boss")})
+        rows = {m.group(1): m.group(2) for m in re.finditer(r"<tr><td>(\w+)</td>(.*?)</tr>", body)}
+        self.assertEqual(set(rows), {"mostafa", "ali"})
+        self.assertIn("—", rows["mostafa"])
+        for number in ("7", "4", "2", "1"):
+            self.assertIn(f"<td>{number}</td>", rows["ali"])
+        self.assertNotIn("—", rows["ali"])
+
+    def test_pages_carry_escaped_studio_title(self):
+        for path in ("/login", "/unavailable"):
+            with self.subTest(path=path):
+                _, body = self.request("GET", path)
+                self.assertIn("Hello &lt;b&gt;", body)
+                self.assertNotIn("<b>", body)
+
+    def test_title_defaults_to_slicer_studio(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("STUDIO_TITLE", None)
+            _, body = self.request("GET", "/login")
+        self.assertIn("<title>Slicer Studio</title>", body)
 
     def test_unavailable_page_copy(self):
         resp, body = self.request("GET", "/unavailable")
@@ -164,47 +192,39 @@ class PortalServerTests(unittest.TestCase):
         self.assertEqual((resp.status, resp.getheader("Location")), (302, "/login"))
         self.assertIn("Max-Age=0", resp.getheader("Set-Cookie"))
 
-    def test_serve_refuses_malformed_readers_file(self):
+    def test_serve_refuses_malformed_users_file(self):
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "readers.json").write_text("{", encoding="utf-8")
+            (Path(d) / "users.json").write_text("{", encoding="utf-8")
             (Path(d) / "secret.key").write_bytes(b"s" * 32)
-            result = self.run_cli("serve", "--data-dir", d, "--data-root", d,
-                                  "--readers-root", d, "--port", "0")
+            result = self.run_cli("serve", "--data-dir", d, "--users-root", d, "--port", "0")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("readers.json", result.stderr)
+        self.assertIn("users.json", result.stderr)
 
     def test_serve_refuses_missing_secret(self):
         with tempfile.TemporaryDirectory() as d:
-            result = self.run_cli("serve", "--data-dir", d, "--data-root", d,
-                                  "--readers-root", d, "--port", "0")
+            result = self.run_cli("serve", "--data-dir", d, "--users-root", d, "--port", "0")
         self.assertEqual(result.returncode, 2)
         self.assertIn("secret.key", result.stderr)
 
-    def test_set_password_refuses_reserved_id(self):
-        with tempfile.TemporaryDirectory() as d:
-            result = self.run_cli("set-password", "admin", "--data-dir", d)
-            self.assertEqual(result.returncode, 2)
-            self.assertFalse((Path(d) / "readers.json").exists())
-
 
 class ReloadTests(unittest.TestCase):
-    """The running server must pick up changes made to readers.json."""
+    """The running server must pick up changes made to users.json."""
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name)
         (root / "data" / "sub-001").mkdir(parents=True)
-        (root / "readers").mkdir()
-        self.path = root / "readers.json"
+        (root / "workspaces").mkdir()
+        self.path = root / "users.json"
         self.tick = 1_000_000_000.0
         self.write({
-            "ali": Reader("ali", "Ali", portal_core.hash_password("pw-ali"), False),
-            "boss": Reader("boss", "Boss", portal_core.hash_password("pw-boss"), True),
+            "ali": User("ali", "Ali", portal_core.hash_password("pw-ali"), False),
+            "boss": User("boss", "Boss", portal_core.hash_password("pw-boss"), True),
         })
         self.app = portal_core.PortalApp(
-            portal_core.load_readers(self.path), SECRET, root / "data", root / "readers",
-            readers_path=self.path)
+            portal_core.load_users(self.path), SECRET, root / "workspaces", root / "data",
+            users_path=self.path)
         self.server = studio_portal.make_server(self.app, "127.0.0.1", 0, root / "access.log")
         self.port = self.server.server_address[1]
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -216,8 +236,8 @@ class ReloadTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(5)
 
-    def write(self, readers) -> None:
-        portal_core.save_readers(self.path, readers)
+    def write(self, users) -> None:
+        portal_core.save_users(self.path, users)
         self.bump()
 
     def bump(self) -> None:
@@ -240,31 +260,31 @@ class ReloadTests(unittest.TestCase):
     def auth(self, cookie, uri="/ali/vnc.html"):
         return self.request("GET", "/auth", headers={"Cookie": cookie, "X-Forwarded-Uri": uri})[0]
 
-    def test_added_reader_can_log_in(self):
+    def test_added_user_can_log_in(self):
         self.assertEqual(self.login("sara", "pw-sara")[0].status, 401)
-        readers = portal_core.load_readers(self.path)
-        readers["sara"] = Reader("sara", "Sara", portal_core.hash_password("pw-sara"), False)
-        self.write(readers)
+        users = portal_core.load_users(self.path)
+        users["sara"] = User("sara", "Sara", portal_core.hash_password("pw-sara"), False)
+        self.write(users)
         self.assertEqual(self.login("sara", "pw-sara")[0].status, 302)
 
     def test_changed_password_replaces_old_one(self):
         self.assertEqual(self.login("ali", "pw-ali")[0].status, 302)
-        readers = portal_core.load_readers(self.path)
-        readers["ali"] = Reader("ali", "Ali", portal_core.hash_password("brand-new-pw"), False)
-        self.write(readers)
+        users = portal_core.load_users(self.path)
+        users["ali"] = User("ali", "Ali", portal_core.hash_password("brand-new-pw"), False)
+        self.write(users)
         self.assertEqual(self.login("ali", "pw-ali")[0].status, 401)
         self.assertEqual(self.login("ali", "brand-new-pw")[0].status, 302)
 
-    def test_removed_reader_cookie_stops_working(self):
+    def test_removed_user_cookie_stops_working(self):
         cookie = self.login("ali", "pw-ali")[0].getheader("Set-Cookie").split(";")[0]
         self.assertEqual(self.auth(cookie).status, 200)
-        readers = portal_core.load_readers(self.path)
-        del readers["ali"]
-        self.write(readers)
+        users = portal_core.load_users(self.path)
+        del users["ali"]
+        self.write(users)
         resp = self.auth(cookie)
         self.assertEqual((resp.status, resp.getheader("Location")), (302, "/login"))
 
-    def test_corrupt_file_keeps_last_good_readers(self):
+    def test_corrupt_file_keeps_last_good_users(self):
         cookie = self.login("ali", "pw-ali")[0].getheader("Set-Cookie").split(";")[0]
         self.path.write_text("{ not json", encoding="utf-8")
         self.bump()
@@ -276,34 +296,12 @@ class ReloadTests(unittest.TestCase):
         with mock.patch("sys.stderr"):
             self.assertEqual(self.auth(cookie).status, 200)
 
-    def test_admin_progress_sees_new_reader(self):
-        readers = portal_core.load_readers(self.path)
-        readers["sara"] = Reader("sara", "Sara", portal_core.hash_password("pw-sara"), False)
-        self.write(readers)
+    def test_admin_progress_sees_new_user(self):
+        users = portal_core.load_users(self.path)
+        users["sara"] = User("sara", "Sara", portal_core.hash_password("pw-sara"), False)
+        self.write(users)
         ids = [row["id"] for row in self.app.progress()]
         self.assertIn("sara", ids)
-
-
-class SetPasswordMinimumTests(unittest.TestCase):
-    def run_set_password(self, data_dir, password, repeat=None):
-        args = argparse.Namespace(reader="ali", data_dir=str(data_dir), name=None, admin=False)
-        answers = iter([password, password if repeat is None else repeat])
-        with mock.patch("getpass.getpass", side_effect=lambda prompt="": next(answers)),                 mock.patch("sys.stderr") as err:
-            code = studio_portal.cmd_set_password(args)
-        return code, "".join(c.args[0] for c in err.write.call_args_list)
-
-    def test_short_password_is_refused_before_anything_is_written(self):
-        with tempfile.TemporaryDirectory() as d:
-            code, err = self.run_set_password(d, "short12")
-            self.assertEqual(code, 2)
-            self.assertIn("at least 8", err)
-            self.assertEqual(list(Path(d).iterdir()), [])
-
-    def test_eight_characters_are_accepted(self):
-        with tempfile.TemporaryDirectory() as d:
-            code, _ = self.run_set_password(d, "12345678")
-            self.assertEqual(code, 0)
-            self.assertTrue((Path(d) / "readers.json").exists())
 
 
 if __name__ == "__main__":

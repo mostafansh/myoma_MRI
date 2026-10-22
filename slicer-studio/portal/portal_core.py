@@ -22,8 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-READER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+USER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 RESERVED_IDS = frozenset({"admin", "login", "logout", "auth", "unavailable", "static"})
+PROGRESS_KEYS = ("total", "done", "in_progress", "needs_attention")
+PROGRESS_FILE = "progress.json"
+PROGRESS_MAX_BYTES = 1024 * 1024
 SESSION_LIFETIME = 43200
 LOCK_FAILURES = 5
 LOCK_SECONDS = 600
@@ -40,7 +43,7 @@ class PortalError(Exception):
 
 
 @dataclass(frozen=True)
-class Reader:
+class User:
     id: str
     display_name: str
     password_hash: str
@@ -56,48 +59,48 @@ class AuthResult:
 @dataclass
 class LoginResult:
     ok: bool
-    reader: Reader | None = None
+    user: User | None = None
     message: str | None = None
 
 
-# --- reader accounts -------------------------------------------------------
+# --- user accounts -------------------------------------------------------
 
-def load_readers(path: Path) -> dict[str, Reader]:
+def load_users(path: Path) -> dict[str, User]:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except OSError as exc:
-        raise PortalError(f"Cannot read readers file: {exc}") from exc
+        raise PortalError(f"Cannot read users file: {exc}") from exc
     except ValueError as exc:
-        raise PortalError(f"Readers file is not valid JSON: {exc}") from exc
-    entries = data.get("readers") if isinstance(data, dict) else None
+        raise PortalError(f"Users file is not valid JSON: {exc}") from exc
+    entries = data.get("users") if isinstance(data, dict) else None
     if not isinstance(entries, list):
-        raise PortalError('Readers file must contain a "readers" list')
-    readers: dict[str, Reader] = {}
+        raise PortalError('Users file must contain a "users" list')
+    users: dict[str, User] = {}
     for entry in entries:
         if not isinstance(entry, dict):
-            raise PortalError("Reader entry must be an object")
+            raise PortalError("User entry must be an object")
         rid = entry.get("id")
-        if not isinstance(rid, str) or not READER_ID_RE.match(rid):
-            raise PortalError(f"Invalid reader id: {rid!r}")
+        if not isinstance(rid, str) or not USER_ID_RE.match(rid):
+            raise PortalError(f"Invalid user id: {rid!r}")
         if rid in RESERVED_IDS:
-            raise PortalError(f"Reader id is reserved: {rid}")
-        if rid in readers:
-            raise PortalError(f"Duplicate reader id: {rid}")
+            raise PortalError(f"User id is reserved: {rid}")
+        if rid in users:
+            raise PortalError(f"Duplicate user id: {rid}")
         name = entry.get("display_name")
         phash = entry.get("password_hash")
         admin = entry.get("admin", False)
         if not isinstance(name, str) or not isinstance(phash, str) or not isinstance(admin, bool):
-            raise PortalError(f"Invalid fields for reader {rid}")
-        readers[rid] = Reader(rid, name, phash, admin)
-    return readers
+            raise PortalError(f"Invalid fields for user {rid}")
+        users[rid] = User(rid, name, phash, admin)
+    return users
 
 
-def save_readers(path: Path, readers: dict[str, Reader]) -> None:
+def save_users(path: Path, users: dict[str, User]) -> None:
     path = Path(path)
     payload = {
-        "readers": [
+        "users": [
             {"id": r.id, "display_name": r.display_name, "password_hash": r.password_hash, "admin": r.admin}
-            for r in readers.values()
+            for r in users.values()
         ]
     }
     tmp = path.with_name(path.name + ".tmp")
@@ -145,8 +148,8 @@ def _mac(secret: bytes, payload: str) -> str:
     return hmac.new(secret, payload.encode("ascii"), "sha256").hexdigest()
 
 
-def sign_session(reader_id: str, secret: bytes, now: float) -> str:
-    payload = _b64e(json.dumps({"r": reader_id, "exp": now + SESSION_LIFETIME}).encode("utf-8"))
+def sign_session(user_id: str, secret: bytes, now: float) -> str:
+    payload = _b64e(json.dumps({"r": user_id, "exp": now + SESSION_LIFETIME}).encode("utf-8"))
     return payload + "." + _mac(secret, payload)
 
 
@@ -158,14 +161,14 @@ def read_session(token: str | None, secret: bytes, now: float) -> str | None:
         if not hmac.compare_digest(_mac(secret, payload), mac):
             return None
         data = json.loads(_b64d(payload))
-        reader_id, exp = data["r"], data["exp"]
+        user_id, exp = data["r"], data["exp"]
     except (ValueError, KeyError, TypeError, binascii.Error, UnicodeError):
         return None
-    if not isinstance(reader_id, str) or isinstance(exp, bool) or not isinstance(exp, (int, float)):
+    if not isinstance(user_id, str) or isinstance(exp, bool) or not isinstance(exp, (int, float)):
         return None
     if now > exp:
         return None
-    return reader_id
+    return user_id
 
 
 # --- throttling ------------------------------------------------------------
@@ -225,12 +228,29 @@ class LoginThrottle:
 
 # --- authorization ---------------------------------------------------------
 
-def authorize(reader: Reader, forwarded_uri: str) -> bool:
-    if reader.admin:
+def authorize(user: User, forwarded_uri: str) -> bool:
+    if user.admin:
         return True
     path = posixpath.normpath(urllib.parse.unquote(urllib.parse.urlsplit(forwarded_uri).path))
     segments = [s for s in path.split("/") if s]
-    return bool(segments) and segments[0] == reader.id and not path.startswith("//")
+    return bool(segments) and segments[0] == user.id and not path.startswith("//")
+
+
+def read_progress(path: Path) -> dict[str, int] | None:
+    """Parse a module's progress.json; None unless it is exactly the agreed shape."""
+    try:
+        path = Path(path)
+        if path.stat().st_size > PROGRESS_MAX_BYTES:
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict) or set(data) != set(PROGRESS_KEYS):
+        return None
+    for value in data.values():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+    return {key: data[key] for key in PROGRESS_KEYS}
 
 
 def dataset_available(data_root: Path) -> bool:
@@ -241,12 +261,12 @@ def dataset_available(data_root: Path) -> bool:
         return False
 
 
-def landing_path(reader: Reader) -> str:
-    if reader.admin:
+def landing_path(user: User) -> str:
+    if user.admin:
         return "/admin"
     return (
-        f"/{reader.id}/vnc.html?autoconnect=1&reconnect=1&resize=scale"
-        f"&quality=6&compression=2&path={reader.id}/websockify"
+        f"/{user.id}/vnc.html?autoconnect=1&reconnect=1&resize=scale"
+        f"&quality=6&compression=2&path={user.id}/websockify"
     )
 
 
@@ -255,61 +275,61 @@ def landing_path(reader: Reader) -> str:
 class PortalApp:
     _dummy: str | None = None
 
-    def __init__(self, readers: dict[str, Reader], secret: bytes, data_root: Path,
-                 readers_root: Path, clock: Callable[[], float] = time.time,
-                 readers_path: Path | None = None) -> None:
-        self.readers = readers
-        self.readers_path = Path(readers_path) if readers_path is not None else None
-        self._readers_lock = threading.Lock()
-        self._readers_stamp = self._stat_stamp()
+    def __init__(self, users: dict[str, User], secret: bytes, workspaces_root: Path,
+                 data_root: Path | None = None, clock: Callable[[], float] = time.time,
+                 users_path: Path | None = None) -> None:
+        self.users = users
+        self.users_path = Path(users_path) if users_path is not None else None
+        self._users_lock = threading.Lock()
+        self._users_stamp = self._stat_stamp()
         self.secret = secret
-        self.data_root = Path(data_root)
-        self.readers_root = Path(readers_root)
+        self.data_root = Path(data_root) if data_root is not None else None
+        self.workspaces_root = Path(workspaces_root)
         self.clock = clock
         self.throttle = LoginThrottle()
 
     def _stat_stamp(self) -> tuple[int, int] | None:
-        if self.readers_path is None:
+        if self.users_path is None:
             return None
         try:
-            st = os.stat(self.readers_path)
+            st = os.stat(self.users_path)
         except OSError:
             return None
         return (st.st_mtime_ns, st.st_size)
 
-    def _refresh_readers(self) -> dict[str, Reader]:
-        """Reload readers.json when its mtime or size changed; keep the last good set on failure."""
-        if self.readers_path is None:
-            return self.readers
-        with self._readers_lock:
+    def _refresh_users(self) -> dict[str, User]:
+        """Reload users.json when its mtime or size changed; keep the last good set on failure."""
+        if self.users_path is None:
+            return self.users
+        with self._users_lock:
             stamp = self._stat_stamp()
-            if stamp != self._readers_stamp:
-                self._readers_stamp = stamp
+            if stamp != self._users_stamp:
+                self._users_stamp = stamp
                 try:
-                    self.readers = load_readers(self.readers_path)
+                    self.users = load_users(self.users_path)
                 except PortalError as exc:
-                    print(f"portal: keeping previous readers, reload failed: {exc}", file=sys.stderr)
-            return self.readers
+                    print(f"portal: keeping previous users, reload failed: {exc}", file=sys.stderr)
+            return self.users
 
     def login(self, username: str, password: str) -> LoginResult:
-        readers = self._refresh_readers()
-        user = (username or "").strip().lower()
+        users = self._refresh_users()
+        name = (username or "").strip().lower()
         now = self.clock()
-        if not self.throttle.try_begin(user, now):
+        if not self.throttle.try_begin(name, now):
             return LoginResult(False, None, MSG_LOCKED)
         try:
-            reader = readers.get(user)
-            stored = reader.password_hash if reader else self._dummy_hash()
-            valid = verify_password(password or "", stored) and reader is not None
+            user = users.get(name)
+            stored = user.password_hash if user else self._dummy_hash()
+            valid = verify_password(password or "", stored) and user is not None
             if not valid:
-                self.throttle.record_failure(user, now)
-                if self.throttle.is_locked(user, now):
+                self.throttle.record_failure(name, now)
+                if self.throttle.is_locked(name, now):
                     return LoginResult(False, None, MSG_LOCKED)
                 return LoginResult(False, None, MSG_BAD_LOGIN)
-            self.throttle.reset(user)
-            return LoginResult(True, reader, None)
+            self.throttle.reset(name)
+            return LoginResult(True, user, None)
         finally:
-            self.throttle.end(user)
+            self.throttle.end(name)
 
     @classmethod
     def _dummy_hash(cls) -> str:
@@ -318,35 +338,26 @@ class PortalApp:
             cls._dummy = hash_password(secrets.token_hex(8))
         return cls._dummy
 
-    def reader_for(self, token: str | None) -> Reader | None:
-        readers = self._refresh_readers()
-        reader_id = read_session(token, self.secret, self.clock())
-        return readers.get(reader_id) if reader_id else None
+    def user_for(self, token: str | None) -> User | None:
+        users = self._refresh_users()
+        user_id = read_session(token, self.secret, self.clock())
+        return users.get(user_id) if user_id else None
 
     def check_auth(self, token: str | None, forwarded_uri: str) -> AuthResult:
-        reader = self.reader_for(token)
-        if reader is None:
+        user = self.user_for(token)
+        if user is None:
             return AuthResult(302, "/login")
-        if not dataset_available(self.data_root):
+        if self.data_root is not None and not dataset_available(self.data_root):
             return AuthResult(302, "/unavailable")
-        if not authorize(reader, forwarded_uri):
+        if not authorize(user, forwarded_uri):
             return AuthResult(403, None)
         return AuthResult(200, None)
 
     def progress(self) -> list[dict]:
         rows = []
-        for reader in self._refresh_readers().values():
-            if reader.admin:
+        for user in self._refresh_users().values():
+            if user.admin:
                 continue
-            row = {"id": reader.id, "display_name": reader.display_name,
-                   "total": None, "counts": None, "error": None}
-            try:
-                from MyomaReviewLiteLib import reader_queue
-
-                report = reader_queue.queue_report(self.readers_root / reader.id, data_root=self.data_root)
-                row["total"] = report.get("total")
-                row["counts"] = report.get("counts")
-            except Exception as exc:  # any failure is that reader's error
-                row["error"] = str(exc) or type(exc).__name__
-            rows.append(row)
+            progress = read_progress(self.workspaces_root / user.id / PROGRESS_FILE)
+            rows.append({"id": user.id, "display_name": user.display_name, "progress": progress})
         return rows

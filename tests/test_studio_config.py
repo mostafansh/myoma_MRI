@@ -14,7 +14,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "studio"))
-sys.path.insert(0, str(PROJECT_ROOT / "studio" / "portal"))
+sys.path.insert(0, str(PROJECT_ROOT / "slicer-studio" / "portal"))
 
 import portal_core  # noqa: E402
 import studio_config  # noqa: E402
@@ -63,10 +63,10 @@ class StudioConfigTests(unittest.TestCase):
         portal_data = self.root / "portal-data"
         portal_data.mkdir()
         readers = {
-            "ali": portal_core.Reader("ali", "Ali", portal_core.hash_password("pw-ali-12345"), False),
-            "boss": portal_core.Reader("boss", "Boss", portal_core.hash_password("pw-boss-12345"), True),
+            "ali": portal_core.User("ali", "Ali", portal_core.hash_password("pw-ali-12345"), False),
+            "boss": portal_core.User("boss", "Boss", portal_core.hash_password("pw-boss-12345"), True),
         }
-        portal_core.save_readers(portal_data / "readers.json", readers)
+        portal_core.save_users(portal_data / "readers.json", readers)
         config = self.root / "review-config.json"
         config.write_text(json.dumps({"dataset_root": "/srv/data"}), encoding="utf-8")
         out = self.root / "out"

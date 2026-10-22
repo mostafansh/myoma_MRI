@@ -1,18 +1,16 @@
 """HTTP server and command line for the studio portal (standard library only).
 
 Caddy sends /login*, /logout, /admin* and /unavailable here, and calls /auth
-before proxying any /<reader>/* request to that reader's Slicer container.
+before proxying any /<user>/* request to that user's Slicer container.
 """
 
 from __future__ import annotations
 
 import argparse
-import getpass
 import html
 import ipaddress
 import http.cookies
 import os
-import secrets
 import sys
 import threading
 import urllib.parse
@@ -21,11 +19,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import portal_core
-from portal_core import PortalApp, PortalError, Reader
+from portal_core import PortalApp, PortalError
 
 COOKIE_NAME = "studio_session"
 MAX_BODY = 8192
-MIN_PASSWORD = 8
 UNAVAILABLE_COPY = "Data drive unavailable, tell the study admin"
 HTML_HEADERS = {
     "X-Frame-Options": "DENY",
@@ -65,14 +62,18 @@ def clean_username(username: str) -> str:
     return clean_field((username or "").strip().lower()[:64]) or "-"
 
 
-def render_page(title: str, body: str) -> bytes:
-    return PAGE.format(title=html.escape(title), body=body).encode("utf-8")
+def studio_title() -> str:
+    return os.environ.get("STUDIO_TITLE", "Slicer Studio")
+
+
+def render_page(body: str) -> bytes:
+    return PAGE.format(title=html.escape(studio_title()), body=body).encode("utf-8")
 
 
 def login_page(message: str | None = None) -> bytes:
     msg = f'<p class="msg">{html.escape(message)}</p>' if message else ""
     body = (
-        "<h1>Myoma review sign in</h1>" + msg +
+        "<h1>" + html.escape(studio_title()) + " sign in</h1>" + msg +
         '<form method="post" action="/login">'
         '<label for="username">Username</label>'
         '<input id="username" name="username" autocomplete="username" autofocus required>'
@@ -80,27 +81,25 @@ def login_page(message: str | None = None) -> bytes:
         '<input id="password" name="password" type="password" autocomplete="current-password" required>'
         '<button type="submit">Sign in</button></form>'
     )
-    return render_page("Sign in", body)
+    return render_page(body)
 
 
 def admin_page(rows: list[dict]) -> bytes:
     lines = []
     for row in rows:
-        if row["error"] is not None:
-            detail = f"error: {row['error']}"
+        progress = row["progress"]
+        cells = [html.escape(row["id"]), html.escape(row["display_name"])]
+        if progress is None:
+            cells += ["—"] * len(portal_core.PROGRESS_KEYS)
         else:
-            counts = row["counts"] or {}
-            detail = ", ".join(f"{k}: {v}" for k, v in counts.items())
-        total = "-" if row["total"] is None else str(row["total"])
-        lines.append(
-            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>".format(
-                html.escape(row["id"]), html.escape(row["display_name"]),
-                html.escape(total), html.escape(detail)))
+            cells += [html.escape(str(progress[key])) for key in portal_core.PROGRESS_KEYS]
+        lines.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
     body = (
-        "<h1>Reader progress</h1><table><tr><th>Reader</th><th>Name</th><th>Total</th>"
-        "<th>Status counts</th></tr>" + "".join(lines) + '</table><p><a href="/logout">Sign out</a></p>'
+        "<h1>User progress</h1><table><tr><th>User</th><th>Name</th><th>Total</th><th>Done</th>"
+        "<th>In progress</th><th>Needs attention</th></tr>" + "".join(lines)
+        + '</table><p><a href="/logout">Sign out</a></p>'
     )
-    return render_page("Reader progress", body)
+    return render_page(body)
 
 
 class PortalHandler(BaseHTTPRequestHandler):
@@ -120,9 +119,9 @@ class PortalHandler(BaseHTTPRequestHandler):
         except ValueError:
             return clean_field(self.client_address[0])
 
-    def log_event(self, event: str, reader_id: str | None) -> None:
+    def log_event(self, event: str, user_id: str | None) -> None:
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        fields = [stamp, event, clean_field(reader_id or "-"), clean_field(self.client_ip())]
+        fields = [stamp, event, clean_field(user_id or "-"), clean_field(self.client_ip())]
         try:
             with self.log_lock, open(self.log_path, "a", encoding="utf-8", newline="") as handle:
                 handle.write(chr(9).join(fields) + chr(10))
@@ -171,8 +170,8 @@ class PortalHandler(BaseHTTPRequestHandler):
         elif path == "/login":
             self.send(200, login_page(), is_html=True)
         elif path == "/logout":
-            reader = self.app.reader_for(self.session_token())
-            self.log_event("logout", reader.id if reader else None)
+            user = self.app.user_for(self.session_token())
+            self.log_event("logout", user.id if user else None)
             self.redirect("/login", cookie=f"{COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0")
         elif path == "/auth":
             result = self.app.check_auth(self.session_token(), self.headers.get("X-Forwarded-Uri", "/"))
@@ -181,14 +180,14 @@ class PortalHandler(BaseHTTPRequestHandler):
             else:
                 self.send(result.status, b"Forbidden" if result.status == 403 else b"")
         elif path == "/admin":
-            reader = self.app.reader_for(self.session_token())
-            if reader is None or not reader.admin:
+            user = self.app.user_for(self.session_token())
+            if user is None or not user.admin:
                 self.redirect("/login")
             else:
                 self.send(200, admin_page(self.app.progress()), is_html=True)
         elif path == "/unavailable":
             body = f"<h1>{html.escape(UNAVAILABLE_COPY)}</h1>"
-            self.send(503, render_page("Unavailable", body), is_html=True)
+            self.send(503, render_page(body), is_html=True)
         else:
             self.send(404, b"Not found")
 
@@ -214,12 +213,12 @@ class PortalHandler(BaseHTTPRequestHandler):
             self.log_event(event, clean_username(username))
             self.send(401, login_page(result.message), is_html=True)
             return
-        reader = result.reader
-        token = portal_core.sign_session(reader.id, self.app.secret, self.app.clock())
+        user = result.user
+        token = portal_core.sign_session(user.id, self.app.secret, self.app.clock())
         cookie = (f"{COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; "
                   f"Max-Age={portal_core.SESSION_LIFETIME}")
-        self.log_event("login_ok", reader.id)
-        self.redirect(portal_core.landing_path(reader), cookie=cookie)
+        self.log_event("login_ok", user.id)
+        self.redirect(portal_core.landing_path(user), cookie=cookie)
 
 
 def make_server(app: PortalApp, host: str, port: int, log_path: Path) -> ThreadingHTTPServer:
@@ -232,36 +231,25 @@ def make_server(app: PortalApp, host: str, port: int, log_path: Path) -> Threadi
 
 # --- command line ----------------------------------------------------------
 
-def _write_secret(path: Path) -> bytes:
-    secret = secrets.token_bytes(32)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(secret)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-    return secret
-
-
 def cmd_serve(args: argparse.Namespace) -> int:
     data_dir = Path(args.data_dir)
     secret_path = data_dir / "secret.key"
     try:
         secret = secret_path.read_bytes()
     except OSError:
-        print(f"error: cannot read {secret_path}; run set-password first to create it", file=sys.stderr)
+        print(f"error: cannot read {secret_path}; create it with the studio CLI first", file=sys.stderr)
         return 2
     try:
-        readers = portal_core.load_readers(data_dir / "readers.json")
+        users = portal_core.load_users(data_dir / "users.json")
     except PortalError as exc:
-        print(f"error: {exc} (readers.json)", file=sys.stderr)
+        print(f"error: {exc} (users.json)", file=sys.stderr)
         return 2
     if len(secret) < 32:
         print(f"error: {secret_path} is too short", file=sys.stderr)
         return 2
-    app = PortalApp(readers, secret, Path(args.data_root), Path(args.readers_root),
-                    readers_path=data_dir / "readers.json")
+    data_root = Path(args.data_root) if args.data_root else None
+    app = PortalApp(users, secret, Path(args.users_root), data_root,
+                    users_path=data_dir / "users.json")
     server = make_server(app, "0.0.0.0", args.port, data_dir / "access.log")
     try:
         server.serve_forever()
@@ -272,56 +260,15 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_set_password(args: argparse.Namespace) -> int:
-    rid = args.reader
-    if rid in portal_core.RESERVED_IDS:
-        print(f"error: reader id '{rid}' is reserved", file=sys.stderr)
-        return 2
-    if not portal_core.READER_ID_RE.match(rid):
-        print(f"error: invalid reader id '{rid}'", file=sys.stderr)
-        return 2
-    data_dir = Path(args.data_dir)
-    readers_path = data_dir / "readers.json"
-    try:
-        readers = portal_core.load_readers(readers_path) if readers_path.exists() else {}
-    except PortalError as exc:
-        print(f"error: {exc} (readers.json)", file=sys.stderr)
-        return 2
-    password = getpass.getpass("Password: ")
-    if not password or password != getpass.getpass("Repeat password: "):
-        print("error: passwords are empty or do not match", file=sys.stderr)
-        return 2
-    if len(password) < MIN_PASSWORD:
-        print(f"error: password must be at least {MIN_PASSWORD} characters", file=sys.stderr)
-        return 2
-    existing = readers.get(rid)
-    name = args.name or (existing.display_name if existing else rid)
-    admin = True if args.admin else (existing.admin if existing else False)
-    readers[rid] = Reader(rid, name, portal_core.hash_password(password), admin)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    portal_core.save_readers(readers_path, readers)
-    secret_path = data_dir / "secret.key"
-    if not secret_path.exists():
-        _write_secret(secret_path)
-    print(f"Saved reader {rid}")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Studio portal")
     sub = parser.add_subparsers(dest="command", required=True)
     serve = sub.add_parser("serve")
     serve.add_argument("--data-dir", required=True)
-    serve.add_argument("--data-root", required=True)
-    serve.add_argument("--readers-root", required=True)
+    serve.add_argument("--users-root", required=True)
+    serve.add_argument("--data-root")
     serve.add_argument("--port", type=int, default=9000)
     serve.set_defaults(func=cmd_serve)
-    setpw = sub.add_parser("set-password")
-    setpw.add_argument("reader")
-    setpw.add_argument("--data-dir", required=True)
-    setpw.add_argument("--name")
-    setpw.add_argument("--admin", action="store_true")
-    setpw.set_defaults(func=cmd_set_password)
     args = parser.parse_args(argv)
     return args.func(args)
 

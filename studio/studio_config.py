@@ -12,18 +12,18 @@ import sys
 from pathlib import Path
 
 STUDIO_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(STUDIO_DIR / "portal"))
+sys.path.insert(0, str(STUDIO_DIR.parent / "slicer-studio" / "portal"))
 
 import portal_core  # noqa: E402
 from portal_core import RESERVED_IDS  # noqa: E402
 
-READER_ID_RE = portal_core.READER_ID_RE
+USER_ID_RE = portal_core.USER_ID_RE
 _DRIVE_RE = re.compile(r"^[A-Za-z]:[\/]")
 
 
 def _check_ids(reader_ids: list[str]) -> None:
     for rid in reader_ids:
-        if not isinstance(rid, str) or not READER_ID_RE.match(rid):
+        if not isinstance(rid, str) or not USER_ID_RE.match(rid):
             raise ValueError(f"Invalid reader id: {rid!r}")
         if rid in RESERVED_IDS:
             raise ValueError(f"Reserved reader id: {rid!r}")
@@ -165,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        readers = portal_core.load_readers(Path(args.portal_data) / "readers.json")
+        readers = portal_core.load_users(Path(args.portal_data) / "readers.json")
         ids = [r.id for r in readers.values() if not r.admin]
         dataset_root = read_dataset_root(Path(args.review_config))
         compose = render_compose(ids, dataset_root, _abs_posix(args.readers_root), _abs_posix(args.portal_data),
