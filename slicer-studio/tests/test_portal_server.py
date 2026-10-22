@@ -284,6 +284,36 @@ class ReloadTests(unittest.TestCase):
         resp = self.auth(cookie)
         self.assertEqual((resp.status, resp.getheader("Location")), (302, "/login"))
 
+    def _cookie(self, user="ali", password="pw-ali"):
+        return self.login(user, password)[0].getheader("Set-Cookie").split(";")[0]
+
+    def test_password_reset_ends_existing_sessions(self):
+        cookie = self._cookie()
+        self.assertEqual(self.auth(cookie).status, 200)
+        users = portal_core.load_users(self.path)
+        users["ali"] = User("ali", "Ali", portal_core.hash_password("reset-pw-1"), False)
+        self.write(users)
+        resp = self.auth(cookie)
+        self.assertEqual((resp.status, resp.getheader("Location")), (302, "/login"))
+        self.assertEqual(self.auth(self._cookie(password="reset-pw-1")).status, 200)
+
+    def test_remove_and_readd_with_same_id_ends_old_session(self):
+        cookie = self._cookie()
+        users = portal_core.load_users(self.path)
+        del users["ali"]
+        self.write(users)
+        users["ali"] = User("ali", "Ali", portal_core.hash_password("pw-ali"), False)
+        self.write(users)
+        resp = self.auth(cookie)
+        self.assertEqual((resp.status, resp.getheader("Location")), (302, "/login"))
+
+    def test_unchanged_password_keeps_session_across_other_edits(self):
+        cookie = self._cookie()
+        users = portal_core.load_users(self.path)
+        users["sara"] = User("sara", "Sara", portal_core.hash_password("pw-sara"), False)
+        self.write(users)
+        self.assertEqual(self.auth(cookie).status, 200)
+
     def test_corrupt_file_keeps_last_good_users(self):
         cookie = self.login("ali", "pw-ali")[0].getheader("Set-Cookie").split(";")[0]
         self.path.write_text("{ not json", encoding="utf-8")

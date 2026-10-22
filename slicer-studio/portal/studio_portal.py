@@ -214,7 +214,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             self.send(401, login_page(result.message), is_html=True)
             return
         user = result.user
-        token = portal_core.sign_session(user.id, self.app.secret, self.app.clock())
+        token = portal_core.sign_session(user.id, self.app.secret, self.app.clock(), user.password_hash)
         cookie = (f"{COOKIE_NAME}={token}; Path=/; HttpOnly; Secure; SameSite=Lax; "
                   f"Max-Age={portal_core.SESSION_LIFETIME}")
         self.log_event("login_ok", user.id)

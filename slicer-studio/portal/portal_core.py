@@ -149,12 +149,25 @@ def _mac(secret: bytes, payload: str) -> str:
     return hmac.new(secret, payload.encode("ascii"), "sha256").hexdigest()
 
 
-def sign_session(user_id: str, secret: bytes, now: float) -> str:
-    payload = _b64e(json.dumps({"r": user_id, "exp": now + SESSION_LIFETIME}).encode("utf-8"))
+def password_binding(secret: bytes, password_hash: str) -> str:
+    """A short keyed digest of a password hash; a session carries it so a reset ends the session."""
+    return hmac.new(secret, b"pw:" + password_hash.encode("utf-8"), "sha256").hexdigest()[:16]
+
+
+def sign_session(user_id: str, secret: bytes, now: float, password_hash: str) -> str:
+    payload = _b64e(json.dumps({"r": user_id, "exp": now + SESSION_LIFETIME,
+                                "p": password_binding(secret, password_hash)}).encode("utf-8"))
     return payload + "." + _mac(secret, payload)
 
 
 def read_session(token: str | None, secret: bytes, now: float) -> str | None:
+    """The user id of a valid, unexpired token (the password binding is checked by the caller)."""
+    claims = read_session_claims(token, secret, now)
+    return claims[0] if claims else None
+
+
+def read_session_claims(token: str | None, secret: bytes, now: float) -> tuple[str, str] | None:
+    """(user id, password binding) of a valid, unexpired token, else None."""
     if not token or not isinstance(token, str) or token.count(".") != 1:
         return None
     payload, mac = token.split(".")
@@ -162,14 +175,16 @@ def read_session(token: str | None, secret: bytes, now: float) -> str | None:
         if not hmac.compare_digest(_mac(secret, payload), mac):
             return None
         data = json.loads(_b64d(payload))
-        user_id, exp = data["r"], data["exp"]
+        user_id, exp, binding = data["r"], data["exp"], data["p"]
     except (ValueError, KeyError, TypeError, binascii.Error, UnicodeError):
         return None
     if not isinstance(user_id, str) or isinstance(exp, bool) or not isinstance(exp, (int, float)):
         return None
+    if not isinstance(binding, str):
+        return None
     if now > exp:
         return None
-    return user_id
+    return user_id, binding
 
 
 # --- throttling ------------------------------------------------------------
@@ -272,7 +287,7 @@ def read_progress(path: Path) -> dict[str, int] | None:
 def dataset_available(data_root: Path) -> bool:
     try:
         root = Path(data_root)
-        return root.is_dir() and any(root.glob("sub-*"))
+        return root.is_dir() and any(root.iterdir())
     except OSError:
         return False
 
@@ -356,8 +371,16 @@ class PortalApp:
 
     def user_for(self, token: str | None) -> User | None:
         users = self._refresh_users()
-        user_id = read_session(token, self.secret, self.clock())
-        return users.get(user_id) if user_id else None
+        claims = read_session_claims(token, self.secret, self.clock())
+        if claims is None:
+            return None
+        user = users.get(claims[0])
+        if user is None:
+            return None
+        # A password reset (or remove and re-add) changes the hash and ends the session.
+        if not hmac.compare_digest(claims[1], password_binding(self.secret, user.password_hash)):
+            return None
+        return user
 
     def check_auth(self, token: str | None, forwarded_uri: str) -> AuthResult:
         user = self.user_for(token)

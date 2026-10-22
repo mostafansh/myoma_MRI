@@ -327,6 +327,26 @@ class DockerBackedTests(unittest.TestCase):
             capture_output=True, text=True, timeout=120,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+        resolved = subprocess.run(
+            ["docker", "compose", "-f", str(self.out / "docker-compose.yml"), "config", "--format", "json"],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        services = json.loads(resolved.stdout)["services"]
+        for rid in ("ali", "sara"):
+            service = services[f"slicer-{rid}"]
+            for key in ("SLICER_STUDIO", "STUDIO_USER", "STUDIO_START_MODULE", "STUDIO_MODULE_PATHS"):
+                self.assertIn(key, service["environment"], f"{rid}: {key}")
+            self.assertEqual(service["environment"]["STUDIO_USER"], rid)
+            mounts = {v["target"]: v for v in service["volumes"]}
+            self.assertIn("/modules/0", mounts)
+            self.assertTrue(mounts["/modules/0"].get("read_only"), "module mount must be read-only")
+            self.assertIn("/workspace", mounts)
+            self.assertIn("/home/user/.config", mounts)
+            self.assertEqual(mounts["/home/user/.config"]["type"], "volume")
+        command = services["portal"]["command"]
+        command = command if isinstance(command, str) else " ".join(command)
+        self.assertTrue(command.startswith("python /app/studio_portal.py serve"), command)
 
 
 if __name__ == "__main__":

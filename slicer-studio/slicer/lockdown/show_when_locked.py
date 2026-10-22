@@ -10,9 +10,13 @@ try:
     import slicer
     import studio_lockdown
 
-    assert studio_lockdown.is_installed(), "lockdown is not installed"
+    if not studio_lockdown.is_installed():
+        raise RuntimeError("lockdown is not installed")
     window = slicer.util.mainWindow()
-    assert not window.menuBar().isVisible(), "menu bar is visible"
+    # isVisible() is always false before the window is shown; isHidden() is
+    # true only when the menu bar was explicitly hidden.
+    if not window.menuBar().isHidden():
+        raise RuntimeError("menu bar is not hidden")
 except BaseException as error:
     sys.stderr.write("start-studio: refusing to show an unlocked Slicer: %r\n" % (error,))
     sys.stderr.flush()

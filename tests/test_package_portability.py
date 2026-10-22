@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEXT_SUFFIXES = {".cmd", ".json", ".md", ".ps1", ".py", ".svg", ".txt"}
+
+
+def _candidate_files() -> list[Path]:
+    """Files git tracks or would track; git-ignored scratch is skipped. Walks the tree without git."""
+    try:
+        done = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            cwd=PROJECT_ROOT, capture_output=True, timeout=60, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return [path for path in PROJECT_ROOT.rglob("*") if path.is_file()]
+    names = [n for n in done.stdout.decode("utf-8", "surrogateescape").split("\0") if n]
+    return [path for path in (PROJECT_ROOT / n for n in names) if path.is_file()]
 
 
 class PackagePortabilityTests(unittest.TestCase):
@@ -21,10 +35,9 @@ class PackagePortabilityTests(unittest.TestCase):
     def test_only_review_config_contains_drive_letter_paths(self) -> None:
         drive_path = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]")
         offenders: list[str] = []
-        for path in PROJECT_ROOT.rglob("*"):
+        for path in _candidate_files():
             if (
-                not path.is_file()
-                or path.name == "review-config.json"
+                path.name == "review-config.json"
                 or (path.suffix.casefold() not in TEXT_SUFFIXES and path.name != "CMakeLists.txt")
             ):
                 continue

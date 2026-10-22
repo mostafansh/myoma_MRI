@@ -43,6 +43,24 @@ class PortalCoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def token(self, user_id):
+        return portal_core.sign_session(user_id, SECRET, now=1000.0, password_hash=self.users[user_id].password_hash)
+
+    def test_session_is_bound_to_the_current_password_hash(self):
+        token = self.token("mostafa")
+        self.assertEqual(self.app.user_for(token).id, "mostafa")
+        self.users["mostafa"] = User("mostafa", "Mostafa", portal_core.hash_password("pw"), False)
+        self.assertIsNone(self.app.user_for(token), "same password, new salt: the old session must end")
+        self.assertEqual(self.app.check_auth(token, "/mostafa/").location, "/login")
+        self.assertEqual(self.app.user_for(self.token("mostafa")).id, "mostafa")
+
+    def test_session_without_binding_is_rejected(self):
+        import json
+        payload = portal_core._b64e(json.dumps({"r": "mostafa", "exp": 5000.0}).encode("utf-8"))
+        token = payload + "." + portal_core._mac(SECRET, payload)
+        self.assertIsNone(portal_core.read_session_claims(token, SECRET, now=1000.0))
+        self.assertIsNone(self.app.user_for(token))
+
     def test_password_round_trip_and_format(self):
         stored = portal_core.hash_password("s3cret")
         self.assertTrue(stored.startswith("scrypt$16384$8$1$"))
@@ -51,7 +69,7 @@ class PortalCoreTests(unittest.TestCase):
         self.assertFalse(portal_core.verify_password("s3cret", "-"))
 
     def test_session_rejects_tamper_and_expiry(self):
-        token = portal_core.sign_session("mostafa", SECRET, now=1000.0)
+        token = portal_core.sign_session("mostafa", SECRET, now=1000.0, password_hash="h")
         self.assertEqual(portal_core.read_session(token, SECRET, now=1000.0 + 43199), "mostafa")
         self.assertIsNone(portal_core.read_session(token, SECRET, now=1000.0 + 43201))
         self.assertIsNone(portal_core.read_session(token, b"x" * 32, now=1001.0))
@@ -80,7 +98,7 @@ class PortalCoreTests(unittest.TestCase):
         self.assertTrue(portal_core.authorize(User("boss", "B", "-", True), "/ali/vnc.html"))
 
     def test_check_auth_outcomes(self):
-        token = portal_core.sign_session("mostafa", SECRET, now=1000.0)
+        token = self.token("mostafa")
         self.assertEqual(self.app.check_auth(None, "/mostafa/").location, "/login")
         self.assertEqual(self.app.check_auth(token, "/user2/").status, 403)
         self.assertEqual(self.app.check_auth(token, "/mostafa/vnc.html").status, 200)
@@ -126,6 +144,20 @@ class PortalCoreTests(unittest.TestCase):
         self.assertEqual(portal_core.landing_path(self.users["boss"]), "/admin")
         self.assertTrue(portal_core.dataset_available(self.data_root))
         self.assertFalse(portal_core.dataset_available(self.root / "nope"))
+
+    def test_dataset_available_needs_only_one_entry_of_any_name(self):
+        other = self.root / "other"
+        self.assertFalse(portal_core.dataset_available(other))  # missing
+        other.mkdir()
+        self.assertFalse(portal_core.dataset_available(other))  # empty
+        (other / "case_a").mkdir()
+        self.assertTrue(portal_core.dataset_available(other))  # no sub-* folder needed
+        flat = self.root / "flat"
+        flat.mkdir()
+        (flat / "scan.nrrd").write_bytes(b"x")
+        self.assertTrue(portal_core.dataset_available(flat))
+        (self.root / "afile").write_bytes(b"x")
+        self.assertFalse(portal_core.dataset_available(self.root / "afile"))  # a file, not a directory
 
     def test_read_progress_accepts_exact_shape(self):
         p = self.root / "progress.json"; p.write_text('{"total": 3, "done": 1, "in_progress": 1, "needs_attention": 0}', encoding="utf-8")
@@ -204,7 +236,7 @@ class PortalCoreTests(unittest.TestCase):
 
     def test_check_auth_without_dataset_skips_unavailable(self):
         app = portal_core.PortalApp(self.users, SECRET, workspaces_root=self.workspaces_root, data_root=None, clock=lambda: 1000.0)
-        token = portal_core.sign_session("mostafa", SECRET, now=1000.0)
+        token = self.token("mostafa")
         self.assertEqual(app.check_auth(token, "/mostafa/vnc.html").status, 200)
 
     def test_concurrent_wrong_logins_cannot_exceed_the_attempt_budget(self):

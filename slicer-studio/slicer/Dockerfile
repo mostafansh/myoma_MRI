@@ -33,6 +33,9 @@ COPY slicer-studio/slicer/start-studio.sh /usr/local/bin/start-studio.sh
 RUN chmod 0755 /usr/local/bin/start-studio.sh
 
 RUN useradd --uid 1000 --create-home --shell /bin/bash user
+# Named volumes mounted over a missing path are created root-owned, so every
+# volume target under /home/user must exist here, owned by the image user.
+RUN mkdir -p /home/user/.config && chown user:user /home/user/.config
 USER user
 ENV HOME=/home/user \
     DISPLAY=:1 \

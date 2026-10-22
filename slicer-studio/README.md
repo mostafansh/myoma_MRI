@@ -43,7 +43,9 @@ dataset, if your module uses one.
    `netplwiz`, untick "Users must enter a user name and password to use this
    computer", apply, and enter the server account's password once. (This stores
    the password on the machine; use a dedicated local account for the server.)
-4. Firewall. Allow port 443 from the local subnet only:
+4. Firewall. Do this before the first `studio.py up` (section 5): once the
+   studio is running, anything that can reach the server on port 443 can reach
+   the login page. Allow port 443 from the local subnet only:
 
    ```powershell
    New-NetFirewallRule -DisplayName "Slicer Studio" -Direction Inbound -Protocol TCP -LocalPort 443 -RemoteAddress 192.168.0.0/24 -Action Allow
@@ -157,7 +159,9 @@ must be outside the repository (`init` refuses a folder inside it).
 
    `status` lists `caddy`, `portal` and one `slicer-<id>` per user as running,
    then each user's progress. The compose project is named from the deployment
-   folder, `studio-<folder name>`.
+   folder, `studio-<folder name>`. Deploy folder names must therefore be
+   unique: two deployments whose folders have the same name would get the same
+   project name and share volumes and containers.
 
 `<deploy-dir>/users` and `<deploy-dir>/portal` hold user results, password
 hashes and the session secret. Do not share or commit them.
@@ -182,12 +186,17 @@ set and logs the error.
 - Add a user: prepare the workspace (section 5, step 2), `add-user`, then `up`
   to start that user's Slicer.
 - Reset a password: run `add-user <deploy-dir> <id>` again. The old password
-  stops working at once, but sessions already signed in stay valid until they
-  expire (up to 12 hours).
-- Remove a user: `remove-user <deploy-dir> <id>`, then `up` to stop their Slicer
-  and remove its container and network. Their cookie stops working at once. Their
-  workspace in `<deploy-dir>/users/<id>` stays on disk; delete or archive it
-  yourself.
+  stops working at once, and so do that user's signed-in sessions: a session is
+  bound to the password hash it was issued for, so the user signs in again with
+  the new password.
+- Remove a user: `remove-user <deploy-dir> <id>`, then `up`, which removes that
+  user's Slicer container (`--remove-orphans`). Their cookie stops working at
+  once, and so does a cookie from before a remove and re-add of the same id.
+  Docker does not remove the user's network or their `settings-<id>` volume
+  (their Slicer settings); `remove-user` prints the exact
+  `docker volume rm` and `docker network rm` commands to run after `up` if you
+  want them gone. Their workspace in `<deploy-dir>/users/<id>` stays on disk;
+  delete or archive it yourself.
 
 ## 7. Laptop certificate
 
@@ -214,7 +223,9 @@ certificate must be re-exported and reinstalled. `studio.py down` and `up` keep 
 
 `slicer-studio/backup-workspaces.ps1` copies all users' workspaces and
 `portal/users.json` into a timestamped folder on the backup drive and keeps the
-newest 7 (`-Keep`). `secret.key` is deliberately not copied. Try it once by
+newest 7 (`-Keep`). `secret.key` is deliberately not copied. The backup folder
+holds `users.json`, which contains the users' password hashes, so treat the
+backup drive and folder as sensitive. Try it once by
 hand, then register it daily at 02:00, running as the server account (replace
 the placeholders):
 
@@ -272,7 +283,10 @@ admin page shows a dash.
 - Two logins as the same user share one screen: both see and control the same
   Slicer.
 - Logout does not revoke a copied session token; it stays valid for up to 12
-  hours. Removing the user does revoke it at once.
+  hours. Resetting the user's password, or removing the user (also remove and
+  re-add with the same id), ends that user's sessions at once.
+- An admin can open any user's Slicer screen: the authorization check lets the
+  admin through to every user's route.
 - Level 1 lockdown is UI only. A dock created after startup is not guarded until
   the next start, and Copy/Paste and other unnamed Slicer shortcuts survive.
 - Startup lockdown: it runs from `SLICERRC` at Slicer startup. Screenshots taken

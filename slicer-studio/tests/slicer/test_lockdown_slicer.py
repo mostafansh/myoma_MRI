@@ -94,6 +94,8 @@ def test_install() -> None:
     assert studio_lockdown.is_installed()
     assert studio_lockdown._keep["connected"], "install() did not wire keep_on_module"
     assert not slicer.util.mainWindow().menuBar().visible
+    # show_when_locked.py relies on isHidden(): isVisible() is false before the window is shown.
+    assert slicer.util.mainWindow().menuBar().isHidden(), "install() did not explicitly hide the menu bar"
     assert slicer.util.selectedModule() == "Data"
     slicer.util.selectModule("Welcome")
     slicer.app.processEvents()

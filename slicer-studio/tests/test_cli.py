@@ -16,7 +16,7 @@ STUDIO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(STUDIO))
 
 import studio  # noqa: E402
-from studio_lib.deployment import load_deployment  # noqa: E402
+from studio_lib.deployment import load_deployment, project_name  # noqa: E402
 
 import portal_core  # noqa: E402  (studio_lib puts slicer-studio/portal on sys.path)
 
@@ -148,10 +148,21 @@ class CliTests(unittest.TestCase):
         code, out, _ = self.cli("remove-user", deploy, "ali")
         self.assertEqual(code, 0)
         self.assertIn(f'Run "studio.py up {deploy}" to stop their Slicer.', out)
+        project = project_name(deploy.resolve())
+        self.assertIn(f"  docker volume rm {project}_settings-ali", out.splitlines())
+        self.assertIn(f"  docker network rm {project}_net-ali", out.splitlines())
         self.assertEqual(self.users(deploy), {})
         self.assertTrue((deploy / "users" / "ali").is_dir())
         code, _, _ = self.cli("remove-user", deploy, "ali")
         self.assertEqual(code, 2)
+
+    def test_remove_admin_prints_no_docker_cleanup(self) -> None:
+        deploy = self.init()
+        self.cli("add-user", deploy, "boss", "--admin", answers=("password1", "password1"))
+        code, out, _ = self.cli("remove-user", deploy, "boss")
+        self.assertEqual(code, 0)
+        self.assertNotIn("docker volume rm", out)
+        self.assertNotIn("docker network rm", out)
 
     def test_render_prints_paths(self) -> None:
         deploy = self.init()

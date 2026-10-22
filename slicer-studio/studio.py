@@ -18,7 +18,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 from studio_lib.deployment import (  # noqa: E402
-    Deployment, load_deployment, missing_workspace_files)
+    Deployment, load_deployment, missing_workspace_files, project_name)
 from studio_lib.manifest import ConfigError  # noqa: E402
 from studio_lib.render import render  # noqa: E402
 
@@ -148,10 +148,16 @@ def cmd_remove_user(args, ctx) -> int:
     users = _load_users(dep)
     if args.id not in users:
         raise CliError(f"no such user '{args.id}'")
+    was_admin = users[args.id].admin
     del users[args.id]
     portal_core.save_users(_users_path(dep), users)
     print(f"Removed user {args.id}; their workspace in {dep.users_dir / args.id} was kept.")
     print(f'Run "studio.py up {args.deploy}" to stop their Slicer.')
+    if not was_admin:
+        project = project_name(Path(dep.root).resolve())
+        print("Docker keeps their settings volume and network after that. To delete them too, run:")
+        print(f"  docker volume rm {project}_settings-{args.id}")
+        print(f"  docker network rm {project}_net-{args.id}")
     return EXIT_OK
 
 
