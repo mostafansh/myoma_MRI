@@ -1,4 +1,4 @@
-"""Tests for studio/backup-readers.ps1, the nightly results backup."""
+"""Tests for slicer-studio/backup-workspaces.ps1, the nightly workspace backup."""
 
 from __future__ import annotations
 
@@ -9,21 +9,22 @@ import unittest
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = PROJECT_ROOT / "studio" / "backup-readers.ps1"
+STUDIO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = STUDIO_ROOT / "backup-workspaces.ps1"
 
 
 class StudioBackupTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
-        self.readers = self.root / "readers"
-        case = self.readers / "mostafa" / "case1"
+        self.deploy = self.root / "deploy"
+        self.users = self.deploy / "users"
+        case = self.users / "alice" / "case1"
         case.mkdir(parents=True)
         (case / "annotations.json").write_text('{"ok": true}', encoding="utf-8")
-        self.portal = self.root / "portal-data"
+        self.portal = self.deploy / "portal"
         self.portal.mkdir()
-        (self.portal / "readers.json").write_text("{}", encoding="utf-8")
+        (self.portal / "users.json").write_text("{}", encoding="utf-8")
         (self.portal / "secret.key").write_text("secret", encoding="utf-8")
         self.backup = self.root / "backup"
         self.backup.mkdir()
@@ -32,7 +33,7 @@ class StudioBackupTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def _run(
-        self, readers: Path | None = None, portal: Path | None = None
+        self, deploy: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [
@@ -40,10 +41,8 @@ class StudioBackupTests(unittest.TestCase):
                 "-NoProfile",
                 "-File",
                 str(SCRIPT),
-                "-ReadersRoot",
-                str(readers or self.readers),
-                "-PortalDataDir",
-                str(portal or self.portal),
+                "-DeployDir",
+                str(deploy or self.deploy),
                 "-BackupRoot",
                 str(self.backup),
             ],
@@ -53,14 +52,14 @@ class StudioBackupTests(unittest.TestCase):
         )
 
     def _snapshots(self) -> list[Path]:
-        return sorted(p for p in self.backup.glob("readers-*") if p.is_dir())
+        return sorted(p for p in self.backup.glob("workspaces-*") if p.is_dir())
 
-    def test_backup_copies_results_and_readers_file(self) -> None:
+    def test_backup_copies_workspaces_and_users_file(self) -> None:
         result = self._run()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         latest = self._snapshots()[-1]
-        self.assertTrue((latest / "readers" / "mostafa" / "case1" / "annotations.json").is_file())
-        self.assertTrue((latest / "readers.json").is_file())
+        self.assertTrue((latest / "users" / "alice" / "case1" / "annotations.json").is_file())
+        self.assertTrue((latest / "users.json").is_file())
         self.assertFalse((latest / "secret.key").exists())
 
     def test_backup_keeps_only_the_newest_seven(self) -> None:
@@ -76,7 +75,7 @@ class StudioBackupTests(unittest.TestCase):
             self.assertNotIn(name, remaining)
 
     def test_prune_leaves_unrelated_folders_alone(self) -> None:
-        other = self.backup / "readers-notes"
+        other = self.backup / "workspaces-notes"
         other.mkdir()
         keep = self.backup / "photos"
         keep.mkdir()
@@ -86,17 +85,19 @@ class StudioBackupTests(unittest.TestCase):
         self.assertTrue(keep.is_dir())
         self.assertEqual(len(self._snapshots()) - 1, 7)
 
-    def test_missing_readers_file_warns_but_backs_up(self) -> None:
-        (self.portal / "readers.json").unlink()
+    def test_missing_users_file_warns_but_backs_up(self) -> None:
+        (self.portal / "users.json").unlink()
         result = self._run()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn("readers.json", result.stdout + result.stderr)
+        self.assertIn("users.json", result.stdout + result.stderr)
         latest = self._snapshots()[-1]
-        self.assertTrue((latest / "readers" / "mostafa" / "case1" / "annotations.json").is_file())
-        self.assertFalse((latest / "readers.json").exists())
+        self.assertTrue((latest / "users" / "alice" / "case1" / "annotations.json").is_file())
+        self.assertFalse((latest / "users.json").exists())
 
-    def test_backup_fails_on_missing_source(self) -> None:
-        result = self._run(readers=self.root / "does-not-exist")
+    def test_backup_fails_on_missing_users_folder(self) -> None:
+        empty = self.root / "empty-deploy"
+        empty.mkdir()
+        result = self._run(deploy=empty)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(list(self.backup.iterdir()), [])
 
@@ -107,7 +108,7 @@ class StudioBackupTests(unittest.TestCase):
         self.assertEqual(len(before), 2)
 
         # Hold a source file open with no sharing so robocopy cannot read it.
-        locked = self.readers / "mostafa" / "case1" / "locked.bin"
+        locked = self.users / "alice" / "case1" / "locked.bin"
         locked.write_bytes(b"x")
         kernel32 = ctypes.windll.kernel32
         kernel32.CreateFileW.restype = ctypes.c_void_p
