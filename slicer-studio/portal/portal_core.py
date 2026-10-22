@@ -14,6 +14,7 @@ import os
 import posixpath
 import re
 import secrets
+import stat
 import sys
 import threading
 import time
@@ -238,13 +239,28 @@ def authorize(user: User, forwarded_uri: str) -> bool:
 
 def read_progress(path: Path) -> dict[str, int] | None:
     """Parse a module's progress.json; None unless it is exactly the agreed shape."""
+    flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+             | getattr(os, "O_NONBLOCK", 0))
     try:
-        path = Path(path)
-        if path.stat().st_size > PROGRESS_MAX_BYTES:
+        fd = os.open(path, flags)
+    except (OSError, ValueError):
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
-        data = json.loads(path.read_text(encoding="utf-8"))
+        raw = b""
+        while len(raw) <= PROGRESS_MAX_BYTES:
+            chunk = os.read(fd, PROGRESS_MAX_BYTES + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+        if len(raw) > PROGRESS_MAX_BYTES:
+            return None
+        data = json.loads(raw.decode("utf-8"))
     except (OSError, ValueError, RecursionError):
         return None
+    finally:
+        os.close(fd)
     if not isinstance(data, dict) or set(data) != set(PROGRESS_KEYS):
         return None
     for value in data.values():

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
+import threading
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -138,6 +141,51 @@ class PortalCoreTests(unittest.TestCase):
         p.write_bytes(b"{" + b" " * (2 * 1024 * 1024) + b"}")          # > 1 MiB is refused unread
         self.assertIsNone(portal_core.read_progress(p))
         self.assertIsNone(portal_core.read_progress(self.root / "missing.json"))
+
+    def test_read_progress_bounded_read_just_over_cap(self):
+        p = self.root / "progress.json"
+        p.write_text('{"total": 1, "done": 0, "in_progress": 0, "needs_attention": 0}', encoding="utf-8")
+        real_fstat = os.fstat
+        grown = []
+
+        def fstat_then_grow(fd):
+            result = real_fstat(fd)
+            if not grown:
+                grown.append(1)
+                with open(p, "ab") as handle:
+                    handle.write(b" " * (portal_core.PROGRESS_MAX_BYTES + 1))
+            return result
+
+        with mock.patch.object(os, "fstat", fstat_then_grow):
+            self.assertIsNone(portal_core.read_progress(p))
+
+    def test_read_progress_refuses_symlink(self):
+        target = self.root / "real.json"
+        target.write_text('{"total": 1, "done": 0, "in_progress": 0, "needs_attention": 0}', encoding="utf-8")
+        link = self.root / "progress.json"
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not permitted")
+        if not hasattr(os, "O_NOFOLLOW"):
+            self.skipTest("no O_NOFOLLOW")
+        self.assertIsNone(portal_core.read_progress(link))
+
+    def test_read_progress_fifo_returns_promptly(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("no mkfifo")
+        fifo = self.root / "progress.json"
+        os.mkfifo(fifo)
+        result = []
+        t = threading.Thread(target=lambda: result.append(portal_core.read_progress(fifo)), daemon=True)
+        t.start(); t.join(5)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(result, [None])
+
+    def test_read_progress_directory_returns_none(self):
+        d = self.root / "progress.json"
+        d.mkdir()
+        self.assertIsNone(portal_core.read_progress(d))
 
     def test_progress_rows_use_progress_json_only(self):
         pw = portal_core.hash_password("pw")
