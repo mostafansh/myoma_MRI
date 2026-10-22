@@ -119,6 +119,35 @@ class RenderTests(unittest.TestCase):
         self.assertIn(_q(str(self.dep.users_dir.resolve()) + ":/workspaces:ro"), text)
         self.assertIn("--users-root /workspaces", text)
 
+    def test_two_module_paths_are_colon_separated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dep, _ = _write_fixture(Path(tmp))
+            mod = dep.manifest.path
+            (mod.parent / "Second").mkdir()
+            data = json.loads(mod.read_text(encoding="utf-8"))
+            data["module_paths"] = ["HelloStudio", "Second"]
+            mod.write_text(json.dumps(data), encoding="utf-8")
+            text = render_compose(load_deployment(dep.root), ["ali"])
+        self.assertIn('STUDIO_MODULE_PATHS: "/modules/0:/modules/1"', text)
+        self.assertIn(":/modules/0:ro", text)
+        self.assertIn(":/modules/1:ro", text)
+
+    def test_id_with_trailing_newline_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            render_compose(self.dep, ["ali\n"])
+        with self.assertRaises(ValueError):
+            render_caddyfile(["ali\n"], ADDR)
+
+    def test_non_ascii_env_values_are_escaped(self) -> None:
+        bs = chr(92)
+        raw = "a" + chr(0x85) + "b" + chr(0x7f) + "c"
+        with tempfile.TemporaryDirectory() as tmp:
+            dep, _ = _write_fixture(Path(tmp), env={"N": raw})
+            text = render_compose(dep, ["ali"])
+        self.assertIn('N: "a' + bs + 'u0085b' + bs + 'u007fc"', text)
+        self.assertNotIn(chr(0x85), text)
+        self.assertNotIn(chr(0x7f), text)
+
     def test_dataset_only_when_used(self) -> None:
         text = render_compose(self.dep, ["ali"])
         self.assertIn(":/data:ro", text)

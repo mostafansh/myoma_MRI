@@ -81,7 +81,7 @@ def load_users(path: Path) -> dict[str, User]:
         if not isinstance(entry, dict):
             raise PortalError("User entry must be an object")
         rid = entry.get("id")
-        if not isinstance(rid, str) or not USER_ID_RE.match(rid):
+        if not isinstance(rid, str) or not USER_ID_RE.fullmatch(rid):
             raise PortalError(f"Invalid user id: {rid!r}")
         if rid in RESERVED_IDS:
             raise PortalError(f"User id is reserved: {rid}")

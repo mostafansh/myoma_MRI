@@ -19,7 +19,7 @@ from .manifest import expand_env
 
 def _check_ids(user_ids: list[str]) -> None:
     for uid in user_ids:
-        if not isinstance(uid, str) or not USER_ID_RE.match(uid):
+        if not isinstance(uid, str) or not USER_ID_RE.fullmatch(uid):
             raise ValueError(f"Invalid user id: {uid!r}")
         if uid in RESERVED_IDS:
             raise ValueError(f"Reserved user id: {uid!r}")
@@ -27,7 +27,8 @@ def _check_ids(user_ids: list[str]) -> None:
 
 def _value(text: str) -> str:
     """Quote a compose value verbatim: compose interpolates '$', so it is doubled."""
-    return json.dumps(text.replace("$", "$$"), ensure_ascii=False)
+    # ensure_ascii escapes U+0085 and friends; DEL is ASCII so json leaves it, escape it by hand.
+    return json.dumps(text.replace("$", "$$"), ensure_ascii=True).replace(chr(127), chr(92) + "u007f")
 
 
 def _q(text: str) -> str:
@@ -79,7 +80,7 @@ def render_compose(deployment: Deployment, user_ids: list[str]) -> str:
         lines.append(f"      - {_q(dataset + ':/data:ro')}")
     lines += ["    networks:", "      - edge"]
 
-    module_paths = ",".join(f"/modules/{n}" for n in range(len(manifest.module_dirs)))
+    module_paths = ":".join(f"/modules/{n}" for n in range(len(manifest.module_dirs)))
     env = {
         "SLICER_STUDIO": "1",
         "STUDIO_START_MODULE": manifest.start_module,

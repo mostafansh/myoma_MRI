@@ -99,7 +99,8 @@ class PortalCoreTests(unittest.TestCase):
         path = self.path
         ok = '{"id": "ali", "display_name": "Ali", "password_hash": "-", "admin": false}'
         for text in ("", "{", '{"users": [{"id": "Bad Id", "display_name": "x", "password_hash": "-", "admin": false}]}',
-                     '{"users": [' + ok + "," + ok + "]}"):
+                     '{"users": [' + ok + "," + ok + "]}",
+                     '{"users": [{"id": "ali\n", "display_name": "x", "password_hash": "-", "admin": false}]}'):
             with self.subTest(text=text[:20]), self.assertRaises(portal_core.PortalError):
                 path.write_text(text, encoding="utf-8")
                 portal_core.load_users(path)
