@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-RESERVED_ENV = frozenset({"SLICER_STUDIO", "STUDIO_START_MODULE", "STUDIO_MODULE_PATHS", "STUDIO_TITLE"})
+RESERVED_ENV = frozenset({"SLICER_STUDIO", "STUDIO_START_MODULE", "STUDIO_MODULE_PATHS", "STUDIO_TITLE", "STUDIO_USER"})
 KNOWN_KEYS = {"schema", "name", "title", "module_paths", "start_module",
               "uses_dataset", "env", "workspace_requires"}
 REQUIRED_KEYS = ("schema", "name", "title", "module_paths", "start_module")

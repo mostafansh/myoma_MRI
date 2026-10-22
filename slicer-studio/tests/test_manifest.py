@@ -105,7 +105,7 @@ class ManifestTests(unittest.TestCase):
 
     def test_env_names(self):
         for bad in ("A=B", "1A", "A B", "", "SLICER_STUDIO", "STUDIO_START_MODULE",
-                    "STUDIO_MODULE_PATHS", "STUDIO_TITLE", "A\n"):
+                    "STUDIO_MODULE_PATHS", "STUDIO_TITLE", "STUDIO_USER", "A\n"):
             with self.assertRaisesRegex(ConfigError, "env", msg=repr(bad)):
                 self.load(env={bad: "x"})
         self.load(env={"_ok1": "x", "Ab_9": "y"})

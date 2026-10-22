@@ -44,8 +44,8 @@ def workspace_path() -> Path:
     return Path(os.environ.get("STUDIO_WORKSPACE", "/workspace"))
 
 
-def user_label(workspace: Path) -> str:
-    return os.environ.get("STUDIO_USER", "") or workspace.name
+def user_label() -> str:
+    return os.environ.get("STUDIO_USER", "") or "—"
 
 
 class HelloStudio(ScriptedLoadableModule):
@@ -76,7 +76,7 @@ class HelloStudioWidget(ScriptedLoadableModuleWidget):
         ScriptedLoadableModuleWidget.setup(self)
         self.logic = HelloStudioLogic()
         workspace = workspace_path()
-        self.layout.addWidget(qt.QLabel(f"User: {user_label(workspace)}"))
+        self.layout.addWidget(qt.QLabel(f"User: {user_label()}"))
         self.layout.addWidget(qt.QLabel(f"User workspace: {workspace}"))
         self.countLabel = qt.QLabel("")
         self.layout.addWidget(self.countLabel)

@@ -119,6 +119,15 @@ class RenderTests(unittest.TestCase):
         self.assertIn(_q(str(self.dep.users_dir.resolve()) + ":/workspaces:ro"), text)
         self.assertIn("--users-root /workspaces", text)
 
+    def test_each_service_gets_only_its_own_studio_user(self) -> None:
+        text = render_compose(self.dep, ["ali", "bob"])
+        ali = text[text.index("  slicer-ali:"):text.index("  slicer-bob:")]
+        bob = text[text.index("  slicer-bob:"):text.index("\nnetworks:\n")]
+        self.assertIn('STUDIO_USER: "ali"', ali)
+        self.assertNotIn('STUDIO_USER: "bob"', ali)
+        self.assertIn('STUDIO_USER: "bob"', bob)
+        self.assertNotIn('STUDIO_USER: "ali"', bob)
+
     def test_two_module_paths_are_colon_separated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             dep, _ = _write_fixture(Path(tmp))

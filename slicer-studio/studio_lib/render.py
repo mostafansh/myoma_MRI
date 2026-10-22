@@ -95,6 +95,7 @@ def render_compose(deployment: Deployment, user_ids: list[str]) -> str:
             "    init: true",
             "    environment:",
         ]
+        lines.append(f"      STUDIO_USER: {_value(uid)}")
         lines += [f"      {key}: {_value(value)}" for key, value in env.items()]
         lines.append("    volumes:")
         lines += [f"      - {_q(_host(d) + ':/modules/' + str(n) + ':ro')}"

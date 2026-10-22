@@ -74,7 +74,7 @@ What the studio guarantees to every module:
 - Slicer 5.10.0 in a locked-down full-screen window, opened on `start_module`.
 - `module_paths` mounted read-only at `/modules/0`, `/modules/1`, and so on.
 - A private per-user workspace at `/workspace`, read-write, included in backups.
-- `SLICER_STUDIO=1` and `STUDIO_START_MODULE=<start_module>` in the environment.
+- `SLICER_STUDIO=1`, `STUDIO_START_MODULE=<start_module>` and `STUDIO_USER=<id>` in the environment.
 
 What a module may optionally do: write `/workspace/progress.json`:
 
@@ -203,7 +203,7 @@ New mounts and environment:
 - The dataset is mounted at `/data:ro` only if `uses_dataset` is true.
 - `users/<id>` is mounted at `/workspace`.
 - The `env` placeholders are expanded.
-- `SLICER_STUDIO=1`, `STUDIO_START_MODULE` and `STUDIO_MODULE_PATHS` are set.
+- `SLICER_STUDIO=1`, `STUDIO_START_MODULE`, `STUDIO_MODULE_PATHS` and `STUDIO_USER=<id>` are set.
 
 ### Backup
 

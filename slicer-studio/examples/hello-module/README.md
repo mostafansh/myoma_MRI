@@ -15,9 +15,12 @@ state there and write files atomically (temp file, then `os.replace`).
 To show progress in the portal, write `/workspace/progress.json` with exactly four
 non-negative integers: `{"total": 10, "done": 3, "in_progress": 0, "needs_attention": 0}`.
 
-The studio sets `SLICER_STUDIO=1` inside the container. A module can test for it to
+The studio sets `STUDIO_USER` (the user's id) and `SLICER_STUDIO=1` inside the container. A module can test for it to
 turn on studio-only behaviour (locked-down UI, fixed paths) and stay a normal
 module when run in plain Slicer.
 
-Run it by pointing a deployment's `studio.json` module setting
-at this folder (see the studio CLI).
+Run it (use an absolute `--module` path; a relative one resolves against the deploy dir):
+
+    python slicer-studio/studio.py init <deploy-dir> --module <path>/studio-module.json --server-address <addr>
+    python slicer-studio/studio.py add-user <deploy-dir> <id>
+    python slicer-studio/studio.py up <deploy-dir>
