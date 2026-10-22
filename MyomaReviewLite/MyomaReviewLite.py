@@ -671,7 +671,50 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             segment.SetColor(*colors[label_value])
         actual = [segmentation.GetNthSegmentID(index) for index in range(segmentation.GetNumberOfSegments())]
         validate_fixed_segment_ids(actual)
+        self._hold_labelmaps_to_sagittal_grid()
         self.segment_ids = dict(FIXED_SEGMENT_IDS)
+
+    def _hold_labelmaps_to_sagittal_grid(self) -> None:
+        """Put every labelmap layer on the sagittal grid.
+
+        AddEmptySegment leaves an empty layer on an identity (axis-aligned
+        1 mm) grid, while edits land on the sagittal grid.  Saving collapses
+        the layers into one by resampling, which on an oblique sagittal
+        dropped the reader's edits.  Layers sharing one grid merge losslessly.
+        """
+        sagittal = self.volume_nodes.get("sagittal")
+        if sagittal is None or self.segmentation_node is None:
+            return
+        self.segmentation_node.SetReferenceImageGeometryParameterFromVolumeNode(sagittal)
+        matrix = vtk.vtkMatrix4x4()
+        sagittal.GetIJKToRASMatrix(matrix)
+        reference = slicer.vtkOrientedImageData()
+        reference.SetImageToWorldMatrix(matrix)
+        reference.SetExtent(sagittal.GetImageData().GetExtent())
+        segmentation = self.segmentation_node.GetSegmentation()
+        for layer in range(segmentation.GetNumberOfLayers()):
+            labelmap = segmentation.GetLayerDataObject(layer)
+            if labelmap is None:
+                continue
+            layer_matrix = vtk.vtkMatrix4x4()
+            labelmap.GetImageToWorldMatrix(layer_matrix)
+            if all(
+                abs(layer_matrix.GetElement(row, column) - matrix.GetElement(row, column)) < 1e-4
+                for row in range(4) for column in range(4)
+            ):
+                continue
+            extent = labelmap.GetExtent()
+            if extent[0] > extent[1] or extent[2] > extent[3] or extent[4] > extent[5]:
+                labelmap.SetImageToWorldMatrix(matrix)
+                continue
+            # A draft saved before this fix: resample it once onto the grid.
+            resampled = slicer.vtkOrientedImageData()
+            if not slicer.vtkOrientedImageDataResample.ResampleOrientedImageToReferenceOrientedImage(
+                labelmap, reference, resampled, False
+            ):
+                raise RuntimeError("segmentation could not be resampled onto the sagittal grid")
+            labelmap.DeepCopy(resampled)
+        self.segmentation_node.Modified()
 
     def setup_segment_editor(self, parent: Any = None) -> Any:
         if not SLICER_AVAILABLE or self.segmentation_node is None:
