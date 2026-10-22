@@ -28,17 +28,15 @@ ENV PATH=/opt/slicer:$PATH
 # Slicer download above stays cached.
 RUN apt-get update && apt-get install -y --no-install-recommends         libxcb-shape0 libhwloc15 libcups2 libpcre2-16-0 xauth     && rm -rf /var/lib/apt/lists/*
 
-COPY MyomaReviewLite/ /opt/MyomaReviewLite/
-COPY studio/slicer/start-studio.sh /usr/local/bin/start-studio.sh
+COPY slicer-studio/slicer/lockdown /opt/studio/lockdown
+COPY slicer-studio/slicer/start-studio.sh /usr/local/bin/start-studio.sh
 RUN chmod 0755 /usr/local/bin/start-studio.sh
 
-RUN useradd --uid 1000 --create-home --shell /bin/bash reader
-USER reader
-ENV HOME=/home/reader \
+RUN useradd --uid 1000 --create-home --shell /bin/bash user
+USER user
+ENV HOME=/home/user \
     DISPLAY=:1 \
-    MYOMA_REVIEW_LITE_CASE=/review/queue.json \
-    MYOMA_REVIEW_LITE_DATA_ROOT=/data \
-    MYOMA_REVIEW_LITE_STUDIO=1
+    SLICER_STUDIO=1
 
 RUN xvfb-run -a Slicer --version
 
