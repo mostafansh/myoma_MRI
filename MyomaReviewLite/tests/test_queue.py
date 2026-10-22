@@ -181,6 +181,23 @@ class QueueNeighbourTests(unittest.TestCase):
         self.assertIsNone(summary.neighbour("sub-1", -1))
         self.assertIsNone(summary.neighbour("nope", +1))
 
+    def test_progress_counts_maps_statuses(self):
+        from MyomaReviewLiteLib.queue import progress_counts
+
+        statuses = (
+            [QueueStatus.COMPLETE] * 2
+            + [QueueStatus.IN_PROGRESS]
+            + [QueueStatus.ATTENTION]
+            + [QueueStatus.NEW] * 3
+        )
+        summary = QueueSummary(
+            tuple(QueueEntry(f"sub-{i}", status) for i, status in enumerate(statuses))
+        )
+        self.assertEqual(
+            progress_counts(summary),
+            {"total": 7, "done": 2, "in_progress": 1, "needs_attention": 1},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

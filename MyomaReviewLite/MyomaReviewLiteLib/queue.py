@@ -77,6 +77,18 @@ class QueueEntry:
     diagnostic: str | None = None
 
 
+def progress_counts(summary: "QueueSummary") -> dict[str, int]:
+    """The counts the studio portal shows for a reader's queue."""
+
+    counts = summary.counts
+    return {
+        "total": len(summary.entries),
+        "done": counts[QueueStatus.COMPLETE],
+        "in_progress": counts[QueueStatus.IN_PROGRESS],
+        "needs_attention": counts[QueueStatus.ATTENTION],
+    }
+
+
 def numeric_case_key(case_id: str) -> tuple[Any, ...]:
     """Sort subject IDs naturally while retaining deterministic lexical fallback."""
 

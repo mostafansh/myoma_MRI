@@ -91,7 +91,9 @@ from MyomaReviewLiteLib.figo_card import FigoCard, card_position, figo_label, mi
 from MyomaReviewLiteLib.view_tools import ReviewViewTools
 from MyomaReviewLiteLib.correction_tools import ReviewCorrectionTools
 from MyomaReviewLiteLib.correction_panel import CorrectionPanel
-from MyomaReviewLiteLib import studio_mode, theme
+from MyomaReviewLiteLib import theme
+from MyomaReviewLiteLib.queue import progress_counts
+from MyomaReviewLiteLib.storage import _atomic_bytes as _atomic_write_bytes
 from MyomaReviewLiteLib.fonts import load_bundled_fonts
 from MyomaReviewLiteLib.panel_model import (
     CASE_FILTER_STATUSES,
@@ -192,6 +194,12 @@ MOUSE_BUTTON_LABELS: dict[int, str] = {
 # Left/Right clicks a reviewer must always keep for normal editing.
 MOUSE_BUTTON_RESERVED = (0x0001, 0x0002)
 MOUSE_BUTTON_SETTINGS_PREFIX = "MyomaReviewLite/MouseShortcuts/"
+
+
+def _studio_mode() -> bool:
+    """True when running inside the Slicer studio (it sets SLICER_STUDIO=1)."""
+
+    return os.environ.get("SLICER_STUDIO") == "1"
 
 
 def _mouse_button_label(value: int) -> str:
@@ -408,6 +416,25 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         if self.read_only:
             raise StorageError("completed cases are read-only")
         self.storage.save_draft(self.state, segmentation_source)
+        self._write_progress()
+
+    def _write_progress(self) -> None:
+        """Publish queue counts as ``progress.json`` for the studio portal.
+
+        Never raises: a progress failure must not fail the save that called it.
+        """
+
+        try:
+            summary = self.refresh_queue()
+            if summary is None or self.dataset_manifest is None:
+                return
+            content = (
+                json.dumps(progress_counts(summary), indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8")
+            _atomic_write_bytes(self.dataset_manifest.output_root / "progress.json", content)
+        except Exception:
+            print("MyomaReviewLite: could not write progress.json", file=sys.stderr)
+            traceback.print_exc()
 
     def ai_mask_path(self) -> Path:
         """The only read of the AI mask path in this module.
@@ -429,6 +456,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             raise StorageError("completed cases are read-only")
         self.state.reveal()
         self.storage.save_draft(self.state)
+        self._write_progress()
         return self.ai_mask_path()
 
     def publish_early_stop(self, status: str) -> dict[str, Any]:
@@ -438,7 +466,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         self.storage.publish_early_stop(annotation)
         self.final_annotation = annotation
         self.read_only = True
-        self.refresh_queue()
+        self._write_progress()
         return annotation
 
     def publish_complete(self, corrected_labelmap: str | Path | bytes | bytearray) -> dict[str, Any]:
@@ -457,7 +485,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             raise
         self.final_annotation = annotation
         self.read_only = True
-        self.refresh_queue()
+        self._write_progress()
         return annotation
 
     def reopen_complete(self, segmentation_source: str | Path | bytes | bytearray | None = None) -> ReviewState:
@@ -1201,8 +1229,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._disable_oblique_rotate()
         self._hide_data_probe()
         self._hide_module_panel_boilerplate()
-        if studio_mode.is_studio_mode():
-            studio_mode.lock_down(slicer.util.mainWindow())
         self.autosave_timer = qt.QTimer()
         self.autosave_timer.setInterval(60_000)
         self.autosave_timer.connect("timeout()", self.on_autosave_timeout)
@@ -1605,7 +1631,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.manifest_button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
         self.manifest_button.connect("clicked()", self.choose_manifest)
         manifest_row.addWidget(self.manifest_button)
-        if studio_mode.is_studio_mode():
+        if _studio_mode():
             self.manifest_button.setVisible(False)
         cases_layout.addLayout(manifest_row)
 
@@ -2078,8 +2104,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._released_action_shortcuts = []
 
     def enter(self) -> None:
-        if studio_mode.is_studio_mode():
-            studio_mode.lock_down(slicer.util.mainWindow())
         self.app_style.enter()
         self._hide_panel_chrome()
         # The module panel re-shows its help box after enter() runs.
@@ -2103,8 +2127,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def exit(self) -> None:
         self.app_style.exit()
         self.app_branding.exit()
-        studio = studio_mode.is_studio_mode()
-        if not studio:
+        if not _studio_mode():
             self._restore_panel_chrome()
         # The card belongs to the module's views; leaving the module saves
         # and closes it rather than leaving it floating over another module.
@@ -2126,9 +2149,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._apply_roi_selection()
         if self.click_selector is not None:
             self.click_selector.unbind_views()
-        if studio:
-            # A reader never leaves the review module; bring it straight back.
-            qt.QTimer.singleShot(0, lambda: slicer.util.selectModule("MyomaReviewLite"))
 
     def _show_page(self, index: int) -> None:
         if self._has_unresolved_roi():
@@ -2238,7 +2258,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._restore_annotation(False)
 
     def choose_manifest(self) -> None:
-        if studio_mode.is_studio_mode():
+        if _studio_mode():
             return
         path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), "Open MyomaReviewLite case manifest", "", "JSON (*.json)")
         if path:
