@@ -157,11 +157,68 @@ def test_progress_json_after_save() -> None:
             slicer.mrmlScene.Clear(0)
 
 
+def test_progress_json_after_reopen() -> None:
+    """Completing a case counts it done; reopening it must stop counting it."""
+    os.environ.pop(ENV, None)
+    slicer.mrmlScene.Clear(0)
+    case = _source_manifest().cases[0]
+    original_question = qt.QMessageBox.question
+    qt.QMessageBox.question = staticmethod(lambda *_a, **_k: qt.QMessageBox.Yes)
+    with tempfile.TemporaryDirectory() as temporary:
+        reader = Path(temporary) / "reader"
+        reader.mkdir()
+        queue_path = reader / "queue.json"
+        queue_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "manifest_type": "dataset",
+                    "study_id": "HOOKS",
+                    "reader_id": "hooks",
+                    "output_root": ".",
+                    "cases": [
+                        {
+                            "case_id": case.case_id,
+                            "volumes": {n: str(p) for n, p in case.volumes.items()},
+                            "ai_mask": str(case.ai_mask),
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        widget = _new_widget()
+        widget.draw_tool = LiteRectangleDrawTool(widget)
+        try:
+            widget.open_case(queue_path)
+            progress = widget.logic.dataset_manifest.output_root / "progress.json"
+            first = widget.logic.state.add_lesion((0.0, 0.0, 0.0), (20.0, 20.0, 20.0))
+            widget.rebuild_roi_nodes()
+            widget._on_card_figo(first, {"kind": "standard", "type": 3})
+            widget.on_reveal_ai()
+            widget.on_complete()
+            done = json.loads(progress.read_text(encoding="utf-8"))
+            assert done["done"] == 1 and done["in_progress"] == 0, done
+
+            widget.open_case(queue_path, case.case_id)
+            assert widget.logic.read_only and not widget.reopen_button.isHidden(), "completed case did not open"
+            widget.on_reopen_case()
+            assert not widget.logic.read_only, "the case did not reopen"
+            reopened = json.loads(progress.read_text(encoding="utf-8"))
+            assert reopened["done"] == 0 and reopened["in_progress"] == 1, reopened
+            assert reopened == progress_counts(widget.logic.refresh_queue()), reopened
+        finally:
+            qt.QMessageBox.question = original_question
+            widget.cleanup()
+            slicer.mrmlScene.Clear(0)
+
+
 _saved_env = os.environ.get(ENV)
 try:
     test_studio_on()
     test_studio_off()
     test_progress_json_after_save()
+    test_progress_json_after_reopen()
 except Exception:
     traceback.print_exc()
     sys.stderr.flush()

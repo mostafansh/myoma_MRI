@@ -497,7 +497,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         self.state = state
         self.final_annotation = None
         self.read_only = False
-        self.refresh_queue()
+        self._write_progress()
         return state
 
     def load_registered_volumes(self) -> None:

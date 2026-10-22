@@ -9,7 +9,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "slicer-studio"))
 
-from studio_lib.manifest import load_manifest  # noqa: E402
+from studio_lib.manifest import expand_env, load_manifest  # noqa: E402
 
 
 class StudioManifestTests(unittest.TestCase):
@@ -18,6 +18,10 @@ class StudioManifestTests(unittest.TestCase):
         self.assertEqual(manifest.start_module, "MyomaReviewLite")
         self.assertIs(manifest.uses_dataset, True)
         self.assertEqual(manifest.workspace_requires, ("queue.json",))
+        self.assertEqual(
+            expand_env(manifest),
+            {"MYOMA_REVIEW_LITE_CASE": "/workspace/queue.json", "MYOMA_REVIEW_LITE_DATA_ROOT": "/data"},
+        )
 
 
 if __name__ == "__main__":
