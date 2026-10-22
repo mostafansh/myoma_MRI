@@ -28,7 +28,7 @@ for _name in ("question", "warning", "critical", "information"):
 
 if sys.platform.startswith("linux"):
     # Headless Xvfb has no window manager, so Slicer stays at its 1200x570
-    # default and the slice views come out narrower than the FIGO card.
+    # default and the slice views come out narrower than a test expects.
     # Windows runs the same tests in a maximised window.
     import slicer
 

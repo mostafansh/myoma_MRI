@@ -20,6 +20,8 @@ _GUARD_PROPERTY = "studioLocked"
 
 # State of the keep-on-module hook; the signal is connected at most once.
 _keep = {"module": None, "connected": False, "quitting": False}
+# True only after install() has locked the window and pinned the start module.
+_installed = False
 
 
 def is_studio_mode(environ: Optional[Mapping[str, str]] = None) -> bool:
@@ -88,16 +90,37 @@ def keep_on_module(module_name: str) -> None:
     slicer.util.mainWindow().moduleSelector().connect("moduleSelected(QString)", _on_module_selected)
 
 
+def is_installed() -> bool:
+    """True once install() fully succeeded in this process."""
+    return _installed
+
+
 def install(environ: Optional[Mapping[str, str]] = None, main_window: Any = None) -> None:
-    """In studio mode, lock the main window and pin the start module."""
+    """In studio mode, lock the main window, select the start module and pin it.
+
+    Raises when the start module cannot be selected: an unlocked fallback module
+    (Welcome) must never be served.
+    """
+    global _installed
     source = os.environ if environ is None else environ
     if not is_studio_mode(source):
         return
-    if main_window is None:
-        import slicer
+    import slicer
 
+    if main_window is None:
         main_window = slicer.util.mainWindow()
     lock_down(main_window)
     start = source.get(START_ENV, "")
     if start:
+        # The selector reports whatever name it was given, even for a module
+        # that does not exist, so ask the module manager as well.
+        if slicer.app.moduleManager().module(start) is None:
+            raise RuntimeError(f"start module {start!r} is not loaded in this Slicer")
+        slicer.util.selectModule(start)
+        if slicer.util.selectedModule() != start:
+            raise RuntimeError(
+                f"start module {start!r} could not be selected "
+                f"(current module: {slicer.util.selectedModule()!r})"
+            )
         keep_on_module(start)
+    _installed = True

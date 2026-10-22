@@ -85,19 +85,39 @@ def test_keep_on_module() -> None:
 
 
 def test_install() -> None:
+    # Runs first: nothing else may have wired the keep-on-module hook yet, so
+    # this proves install() itself does it.
+    assert not studio_lockdown.is_installed()
+    assert not studio_lockdown._keep["connected"]
     env = {ENV: "1", studio_lockdown.START_ENV: "Data"}
     studio_lockdown.install(env)
+    assert studio_lockdown.is_installed()
+    assert studio_lockdown._keep["connected"], "install() did not wire keep_on_module"
     assert not slicer.util.mainWindow().menuBar().visible
+    assert slicer.util.selectedModule() == "Data"
     slicer.util.selectModule("Welcome")
     slicer.app.processEvents()
     slicer.app.processEvents()
     assert slicer.util.selectedModule() == "Data"
 
 
+def test_install_unknown_module_raises() -> None:
+    env = {ENV: "1", studio_lockdown.START_ENV: "NoSuchModule"}
+    try:
+        studio_lockdown.install(env)
+    except RuntimeError as error:
+        assert "NoSuchModule" in str(error), str(error)
+    else:
+        raise AssertionError("install() accepted an unknown start module")
+    assert not studio_lockdown.is_installed()
+    assert not studio_lockdown._keep["connected"]
+
+
 try:
+    test_install_unknown_module_raises()
+    test_install()
     test_lock_down()
     test_keep_on_module()
-    test_install()
 except Exception:
     traceback.print_exc()
     sys.stderr.flush()

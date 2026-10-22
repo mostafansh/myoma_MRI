@@ -13,10 +13,23 @@
 # possible in principle; with SLICERRC none was seen at 0.5 s sampling.
 # The env var is chosen over ~/.slicerrc.py because a mounted home folder
 # cannot hide it.
+#
+# Slicer logs an exception from a startup script and carries on, which would
+# serve an unlocked window. So any failure ends the process; the supervisor in
+# start-studio.sh then restarts it.
+import os
 import sys
 
-sys.path.insert(0, "/opt/studio/lockdown")
+try:
+    sys.path.insert(0, "/opt/studio/lockdown")
 
-import studio_lockdown
+    import studio_lockdown
 
-studio_lockdown.install()
+    studio_lockdown.install()
+except BaseException:
+    import traceback
+
+    sys.stderr.write("studio startup FAILED, exiting:\n" + traceback.format_exc() + "\n")
+    sys.stderr.flush()
+    sys.stdout.flush()
+    os._exit(1)

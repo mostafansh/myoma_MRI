@@ -10,7 +10,15 @@ for var in STUDIO_MODULE_PATHS STUDIO_START_MODULE; do
 done
 
 # One --additional-module-paths argument per colon-separated path.
-IFS=: read -r -a module_paths <<< "$STUDIO_MODULE_PATHS"
+module_paths=()
+IFS=: read -r -a raw_paths <<< "$STUDIO_MODULE_PATHS"
+for path in "${raw_paths[@]}"; do
+    [ -n "$path" ] && module_paths+=("$path")
+done
+if [ "${#module_paths[@]}" -eq 0 ]; then
+    echo "start-studio: STUDIO_MODULE_PATHS has no usable path" >&2
+    exit 1
+fi
 
 # Lockdown runs from Slicer's startup script (see /opt/studio/lockdown/startup.py).
 export SLICER_STUDIO=1
@@ -41,11 +49,23 @@ done
 supervise x11vnc -display :1 -localhost -rfbport 5900 -forever -shared -nopw -noclipboard -nosetclipboard -quiet
 supervise websockify --web /usr/share/novnc 6080 localhost:5900
 
-# No window manager runs on the virtual display, so showFullScreen alone leaves
-# Slicer at its small default size; setGeometry fills the 1920x1080 screen.
+# Nothing a session plants may persist into the next one: drop the saved module
+# and extension search paths from the user's settings before each launch.
+scrub_settings() {
+    local ini=/home/user/.config/slicer.org/Slicer.ini
+    [ -f "$ini" ] || return 0
+    awk '/^\[/ { section = $0 }
+         section == "[Modules]" && /^AdditionalPaths/ { next }
+         section == "[Extensions]" && /InstallPath/ { next }
+         { print }' "$ini" > "$ini.tmp" && mv "$ini.tmp" "$ini"
+}
+
+# show_when_locked.py refuses (exit 1) to show an unlocked Slicer; this loop then
+# restarts Slicer. It also sizes the window: no window manager runs here.
 while kill -0 "$xvfb_pid" 2>/dev/null; do
+    scrub_settings
     /opt/slicer/Slicer --no-splash --additional-module-paths "${module_paths[@]}" \
-        --python-code "import os; slicer.util.selectModule(os.environ['STUDIO_START_MODULE']); w = slicer.util.mainWindow(); w.showFullScreen(); w.setGeometry(0, 0, 1920, 1080)"
+        --python-code "exec(open('/opt/studio/lockdown/show_when_locked.py').read())"
     sleep 2
 done
 echo "start-studio: Xvfb exited" >&2
