@@ -195,6 +195,20 @@ MOUSE_BUTTON_RESERVED = (0x0001, 0x0002)
 MOUSE_BUTTON_SETTINGS_PREFIX = "MyomaReviewLite/MouseShortcuts/"
 
 
+def disable_slice_rotate(slice_widget: Any) -> None:
+    """Turn off Ctrl + left-drag "rotate slice to oblique" in one slice view.
+
+    The gesture has crashed Slicer itself (an access violation in its
+    MRMLDisplayableManager) and this viewer only shows fixed planes. It must
+    run once the view exists: the module's views are created when the first
+    case opens, not when the module is set up.
+    """
+    view = slice_widget.sliceView()
+    style = view.interactorObserver() if hasattr(view, "interactorObserver") else view.interactor().GetInteractorStyle()
+    if style is not None and hasattr(style, "SetActionEnabled") and hasattr(style, "Rotate"):
+        style.SetActionEnabled(style.Rotate, False)
+
+
 def _mouse_button_label(value: int) -> str:
     if not value:
         return "(none)"
@@ -518,6 +532,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             widget = layout_manager.sliceWidget(view_name)
             if widget is not None:
                 theme.style_slice_bar(widget)
+                disable_slice_rotate(widget)
             node = self.volume_nodes.get(plane)
             if widget is None or node is None:
                 continue
@@ -1507,13 +1522,9 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         for view_name in VIEW_NAMES.values():
             try:
                 slice_widget = manager.sliceWidget(view_name)
-                if slice_widget is None:
-                    continue
-                view = slice_widget.sliceView()
-                interactor = view.interactor()
-                style = view.interactorObserver() if hasattr(view, "interactorObserver") else interactor.GetInteractorStyle()
-                if style is not None and hasattr(style, "SetActionEnabled") and hasattr(style, "Rotate"):
-                    style.SetActionEnabled(style.Rotate, False)
+                if slice_widget is not None:
+                    # Views made later (on the first case) get this in activate_layout.
+                    disable_slice_rotate(slice_widget)
             except Exception:
                 traceback.print_exc()
         try:
