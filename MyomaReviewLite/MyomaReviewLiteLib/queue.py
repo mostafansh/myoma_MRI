@@ -75,6 +75,8 @@ class QueueEntry:
     case_id: str
     status: QueueStatus
     diagnostic: str | None = None
+    # The reader left a question for the senior reviewer (case or myoma).
+    has_question: bool = False
 
 
 def numeric_case_key(case_id: str) -> tuple[Any, ...]:
@@ -123,7 +125,7 @@ def _validate_draft(
 
 def _validate_annotation(
     payload: Mapping[str, Any], manifest: DatasetManifest, case_id: str
-) -> str:
+) -> tuple[str, ReviewState]:
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise ValidationError("annotations.json schema_version is unsupported")
     _non_empty_text(payload.get("module_version"), "module_version")
@@ -148,7 +150,7 @@ def _validate_annotation(
         raise ValidationError("complete annotation must reference corrected_labels.nii.gz")
     if status != "complete" and corrected is not None:
         raise ValidationError("early-stop annotation cannot reference corrected labels")
-    return status
+    return status, state
 
 
 def classify_case(manifest: DatasetManifest, case_id: str) -> QueueEntry:
@@ -176,7 +178,7 @@ def classify_case(manifest: DatasetManifest, case_id: str) -> QueueEntry:
                 "final annotation conflicts with remaining draft artifacts",
             )
         try:
-            status = _validate_annotation(
+            status, state = _validate_annotation(
                 _load_json_object(storage.annotation_path), manifest, case_id
             )
         except (OSError, ValueError, TypeError) as exc:
@@ -193,7 +195,7 @@ def classify_case(manifest: DatasetManifest, case_id: str) -> QueueEntry:
                 QueueStatus.ATTENTION,
                 "early-stop annotation conflicts with corrected_labels.nii.gz",
             )
-        return QueueEntry(case_id, QueueStatus.COMPLETE)
+        return QueueEntry(case_id, QueueStatus.COMPLETE, has_question=state.has_questions)
 
     if presence["corrected_labelmap"]:
         return QueueEntry(
@@ -214,7 +216,7 @@ def classify_case(manifest: DatasetManifest, case_id: str) -> QueueEntry:
                 QueueStatus.ATTENTION,
                 "blind draft conflicts with draft.seg.nrrd",
             )
-        return QueueEntry(case_id, QueueStatus.IN_PROGRESS)
+        return QueueEntry(case_id, QueueStatus.IN_PROGRESS, has_question=state.has_questions)
     if presence["draft_segmentation"]:
         return QueueEntry(
             case_id,
@@ -250,6 +252,24 @@ class QueueSummary:
         for entry in self.entries:
             if entry.status in {QueueStatus.NEW, QueueStatus.IN_PROGRESS}:
                 return entry
+        return None
+
+    def neighbour(self, case_id: str, step: int) -> QueueEntry | None:
+        """The nearest openable case before (step -1) or after (+1) ``case_id``.
+
+        Attention cases cannot be opened, so they are skipped; the list does
+        not wrap, and an unknown ``case_id`` has no neighbour.
+        """
+        index = next(
+            (i for i, entry in enumerate(self.entries) if entry.case_id == case_id), None
+        )
+        if index is None:
+            return None
+        index += step
+        while 0 <= index < len(self.entries):
+            if self.entries[index].status is not QueueStatus.ATTENTION:
+                return self.entries[index]
+            index += step
         return None
 
     def next_unfinished(self, after_case_id: str) -> QueueEntry | None:

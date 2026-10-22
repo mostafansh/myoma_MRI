@@ -23,7 +23,7 @@ def test_true_planes_sources_and_contrast() -> None:
     logic = MyomaReviewLiteLogic()
     parent = qt.QWidget()
     controller = ReviewViewTools(logic, parent)
-    assert not controller.widget.enabled
+    assert not controller.alt_drag.bound
     arrays = {}
     for index, plane in enumerate(VIEW_NAMES):
         volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", plane)
@@ -33,7 +33,22 @@ def test_true_planes_sources_and_contrast() -> None:
         logic.volume_nodes[plane] = volume
     logic.activate_layout()
     controller.refresh()
-    assert controller.widget.enabled
+    assert controller.alt_drag.bound
+
+    # The module's views are stripped down: no corner text, no extra bar buttons.
+    for name in VIEW_NAMES.values():
+        slice_widget = slicer.app.layoutManager().sliceWidget(name)
+        assert not slice_widget.sliceView().cornerAnnotation().GetVisibility(), f"{name} shows corner text"
+        bar = slice_widget.sliceController()
+        for part in ("PinButton", "MaximizeViewButton", "FitToWindowToolButton"):
+            button = bar.findChild(qt.QWidget, part)
+            # Slicer may show it again on layout changes; it stays zero-sized.
+            assert not button.isVisible() or button.width == 0, f"{name} shows {part}"
+        assert not bar.findChild(qt.QWidget, "SliceOffsetSlider").spinBoxVisible
+        # Ctrl + left-drag would rotate the slice to an oblique plane, which
+        # crashes Slicer; it is off as soon as the views exist.
+        style = slice_widget.sliceView().interactorObserver()
+        assert not style.GetActionEnabled(style.Rotate), f"{name} still rotates on Ctrl + drag"
 
     # Restore an incorrectly selected source and a genuinely oblique slice.
     for plane, name in VIEW_NAMES.items():
@@ -60,20 +75,11 @@ def test_true_planes_sources_and_contrast() -> None:
         assert display.GetWindow() == (300 if plane == "axial" else 500)
         assert display.GetLevel() == (750 if plane == "axial" else 250)
         assert np.array_equal(slicer.util.arrayFromVolume(volume), arrays[plane])
-    controller.target_combo.currentIndex = controller.target_combo.findData("axial")
-    assert controller.window_spin.value == 300
-    controller.window_spin.value = 200
-    assert logic.volume_nodes["axial"].GetDisplayNode().GetWindow() == 200
+    assert logic.volume_nodes["axial"].GetDisplayNode().GetWindow() == 300
     assert logic.volume_nodes["sagittal"].GetDisplayNode().GetWindow() == 500
 
-    # External native-display changes also update the numeric controls.
-    logic.volume_nodes["axial"].GetDisplayNode().SetWindowLevel(444, 222)
-    assert controller.window_spin.value == 444
-    assert controller.level_spin.value == 222
     controller.set_contrast("all", automatic=True)
     assert all(node.GetDisplayNode().GetAutoWindowLevel() for node in logic.volume_nodes.values())
-    assert controller.auto_check.checked
-    assert not controller.window_spin.enabled
     try:
         controller.set_contrast("all", automatic=False, window=0, level=1)
     except ValueError:
@@ -82,12 +88,12 @@ def test_true_planes_sources_and_contrast() -> None:
         raise AssertionError("Nonpositive windows must be rejected")
 
     controller.cleanup()
-    assert not controller._observations
+    assert not controller.alt_drag.bound
     for volume in logic.volume_nodes.values():
         slicer.mrmlScene.RemoveNode(volume)
     logic.volume_nodes = {}
     controller.refresh()
-    assert not controller.widget.enabled
+    assert not controller.alt_drag.bound
     controller.cleanup()
     parent.deleteLater()
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -156,6 +157,47 @@ class CaseStorage:
         _atomic_bytes(self.corrected_labelmap_path, _read_source(corrected_labelmap))
         _atomic_bytes(self.annotation_path, _json_bytes(annotation))
         self.remove_drafts()
+
+    def reopen_complete(
+        self,
+        segmentation: str | Path | bytes | bytearray | None = None,
+    ) -> ReviewState:
+        """Return a completed case to the post-reveal correction phase.
+
+        The published results are copied to ``reopened/<UTC stamp>/`` first;
+        removing annotations.json is the commit point, so a failure before it
+        leaves the case complete.
+        """
+
+        annotation = self.load_annotation()
+        if annotation is None:
+            raise StorageError(f"case {self.case_id} is not complete")
+        if annotation.get("status") != "complete":
+            raise ImmutableCaseError("early-stop outcomes cannot be reopened")
+        try:
+            state = ReviewState.reopen_from_annotation(annotation)
+        except (TypeError, ValueError) as exc:
+            raise StorageError(f"annotations.json cannot be reopened: {exc}") from exc
+        if state.case_id != self.case_id:
+            raise StorageError("annotation case_id does not match the selected case")
+        corrected = _read_source(self.corrected_labelmap_path)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        backup = self.case_directory / "reopened" / stamp
+        try:
+            backup.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            raise StorageError(f"could not create backup folder: {backup}") from exc
+        _atomic_bytes(backup / "annotations.reopened.json", self.annotation_path.read_bytes())
+        _atomic_bytes(backup / "corrected_labels.reopened.nii.gz", corrected)
+        if segmentation is not None:
+            _atomic_bytes(self.draft_segmentation_path, _read_source(segmentation))
+        _atomic_bytes(self.draft_path, _json_bytes(state.to_draft()))
+        try:
+            self.annotation_path.unlink()
+            self.corrected_labelmap_path.unlink()
+        except OSError as exc:
+            raise StorageError("could not remove the completed results") from exc
+        return state
 
     def publish_early_stop(self, annotation: dict[str, Any]) -> None:
         self._refuse_if_complete()

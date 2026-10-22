@@ -8,7 +8,9 @@ import unittest
 from pathlib import Path
 
 from MyomaReviewLiteLib import (
+    CaseStorage,
     DatasetManifest,
+    QueueEntry,
     QueueStatus,
     QueueSummary,
     ReviewState,
@@ -154,6 +156,54 @@ class QueueSummaryTests(unittest.TestCase):
         self.assertIsNone(summary.first_unfinished())
         self.assertIsNone(summary.next_unfinished("sub-00001"))
         self.assertEqual(summary.counts[QueueStatus.COMPLETE], 2)
+
+
+    def test_cases_with_questions_are_flagged(self) -> None:
+        manifest = self._manifest(("sub-00001", "sub-00002", "sub-00003"))
+        asking = ReviewState.new("LUIS_FIGO", "reader_a", "sub-00001", started_at=STAMP)
+        asking.set_question("Which series is the true sagittal?")
+        directory = self.output / "sub-00001"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "draft.json").write_text(json.dumps(asking.to_draft()), encoding="utf-8")
+        self._write_draft("sub-00002")
+        finished = ReviewState.new("LUIS_FIGO", "reader_a", "sub-00003", started_at=STAMP)
+        finished.set_question("Was zero myomas right?")
+        finished.confirm_zero_myomas(True)
+        finished.reveal(revealed_at=STAMP)
+        directory = self.output / "sub-00003"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "annotations.json").write_text(json.dumps(finished.complete(completed_at=STAMP)), encoding="utf-8")
+        (directory / "corrected_labels.nii.gz").write_bytes(b"labels")
+
+        summary = QueueSummary.scan(manifest)
+
+        self.assertTrue(summary.entry("sub-00001").has_question)
+        self.assertFalse(summary.entry("sub-00002").has_question)
+        self.assertTrue(summary.entry("sub-00003").has_question)
+        self.assertIs(summary.entry("sub-00003").status, QueueStatus.COMPLETE)
+
+    def test_reopened_complete_case_is_in_progress(self) -> None:
+        manifest = self._manifest(("sub-00001",))
+        self._write_complete("sub-00001")
+        CaseStorage(self.output, "sub-00001").reopen_complete(b"segmentation")
+
+        summary = QueueSummary.scan(manifest)
+
+        self.assertIs(summary.entry("sub-00001").status, QueueStatus.IN_PROGRESS)
+
+
+class QueueNeighbourTests(unittest.TestCase):
+    def test_neighbour_skips_attention_and_never_wraps(self):
+        summary = QueueSummary((
+            QueueEntry("sub-1", QueueStatus.COMPLETE),
+            QueueEntry("sub-2", QueueStatus.ATTENTION, "x"),
+            QueueEntry("sub-3", QueueStatus.NEW),
+        ))
+        self.assertEqual(summary.neighbour("sub-1", +1).case_id, "sub-3")
+        self.assertEqual(summary.neighbour("sub-3", -1).case_id, "sub-1")
+        self.assertIsNone(summary.neighbour("sub-3", +1))
+        self.assertIsNone(summary.neighbour("sub-1", -1))
+        self.assertIsNone(summary.neighbour("nope", +1))
 
 
 if __name__ == "__main__":

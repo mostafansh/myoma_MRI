@@ -51,6 +51,5 @@ An explicit `--data-root` overrides the configured dataset root.
   folder when recovering or moving the package, and never place reader output
   inside the source dataset.
 
-AI masks must contain only labels 0–4. The correction editor uses fixed labels
-0–6; labels 5 and 6 are the cervix and cesarean scar niche and are created as
-empty correction segments when a case is revealed.
+AI masks must contain only labels 0–4, and the correction editor uses the same
+fixed labels 0–4.
