@@ -7,7 +7,9 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-NAME_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+NAME_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+RESERVED_ENV = frozenset({"SLICER_STUDIO", "STUDIO_START_MODULE", "STUDIO_MODULE_PATHS", "STUDIO_TITLE"})
 KNOWN_KEYS = {"schema", "name", "title", "module_paths", "start_module",
               "uses_dataset", "env", "workspace_requires"}
 REQUIRED_KEYS = ("schema", "name", "title", "module_paths", "start_module")
@@ -88,8 +90,8 @@ def load_manifest(path: Path) -> ModuleManifest:
     if type(data["schema"]) is not int or data["schema"] != 1:
         raise _fail(path, "schema", "must be the integer 1")
     name = data["name"]
-    if not isinstance(name, str) or not NAME_RE.match(name):
-        raise _fail(path, "name", f"must match {NAME_RE.pattern}")
+    if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+        raise _fail(path, "name", "must match ^[a-z][a-z0-9-]{0,31}$")
     for key in ("title", "start_module"):
         if not isinstance(data[key], str) or not data[key].strip():
             raise _fail(path, key, "must be a non-empty string")
@@ -102,8 +104,12 @@ def load_manifest(path: Path) -> ModuleManifest:
     if not isinstance(env, dict):
         raise _fail(path, "env", "must be an object of strings")
     for k, v in env.items():
-        if not isinstance(k, str) or not k or not isinstance(v, str):
-            raise _fail(path, f"env.{k}", "name and value must be strings")
+        if not isinstance(k, str) or not ENV_KEY_RE.fullmatch(k):
+            raise _fail(path, f"env.{k}", "variable name must match [A-Za-z_][A-Za-z0-9_]*")
+        if k in RESERVED_ENV:
+            raise _fail(path, f"env.{k}", "reserved name, set by the studio")
+        if not isinstance(v, str):
+            raise _fail(path, f"env.{k}", "value must be a string")
 
     requires = data.get("workspace_requires", [])
     if not isinstance(requires, list):
@@ -123,6 +129,8 @@ def load_manifest(path: Path) -> ModuleManifest:
         resolved = (base / item).resolve()
         if not resolved.is_relative_to(base):
             raise _fail(path, "module_paths", f"{item!r} resolves outside the manifest's folder")
+        if resolved == base:
+            raise _fail(path, "module_paths", f"{item!r} is the manifest's own folder; list a subfolder")
         if not resolved.is_dir():
             raise _fail(path, "module_paths", f"{item!r} is not an existing folder")
         dirs.append(resolved)

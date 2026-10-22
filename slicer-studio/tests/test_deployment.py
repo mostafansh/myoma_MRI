@@ -45,7 +45,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(d.dataset, self.top / "data")
         self.assertEqual(d.server_address, "192.168.0.201")
         self.config(dataset="../data")
-        self.assertEqual(load_deployment(self.root).dataset.resolve(), (self.top / "data").resolve())
+        self.assertEqual(load_deployment(self.root).dataset, (self.top / "data").resolve())
         self.assertEqual(d.users_dir, self.root / "users")
         self.assertEqual(d.portal_dir, self.root / "portal")
         self.assertEqual(d.generated_dir, self.root / "generated")
@@ -62,6 +62,12 @@ class DeploymentTests(unittest.TestCase):
             load_deployment(self.root)
         self.config()
         self.assertIsNone(load_deployment(self.root).dataset)
+
+    def test_dataset_must_be_an_existing_folder(self):
+        self.manifest(True)
+        self.config(dataset=str(self.top / "nodata"))
+        with self.assertRaisesRegex(ConfigError, "dataset"):
+            load_deployment(self.root)
 
     def test_unknown_and_missing_keys(self):
         self.manifest(False)

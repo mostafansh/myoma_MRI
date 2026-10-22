@@ -80,7 +80,7 @@ def load_deployment(root: Path) -> Deployment:
     if manifest.uses_dataset:
         if "dataset" not in data:
             raise _fail(path, "dataset", "required because the module uses a dataset")
-        dataset = resolve("dataset")
+        dataset = resolve("dataset").resolve()
         if not dataset.is_dir():
             raise _fail(path, "dataset", f"{str(dataset)!r} is not an existing folder")
     elif "dataset" in data:

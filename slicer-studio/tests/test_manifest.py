@@ -67,7 +67,7 @@ class ManifestTests(unittest.TestCase):
             self.assertIn("studio-module.json", str(cm.exception))
 
     def test_name_and_types(self):
-        for changes, key in [({"name": "Bad Name"}, "name"), ({"module_paths": "x"}, "module_paths"),
+        for changes, key in [({"name": "Bad Name"}, "name"), ({"name": "hello\n"}, "name"), ({"module_paths": "x"}, "module_paths"),
                              ({"module_paths": []}, "module_paths"), ({"uses_dataset": "yes"}, "uses_dataset"),
                              ({"env": {"A": 3}}, "env"), ({"schema": 2}, "schema"),
                              ({"schema": True}, "schema"), ({"env": []}, "env")]:
@@ -97,6 +97,19 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "module_paths"):
             self.load(module_paths=["link"])
 
+    def test_module_path_may_not_be_the_manifest_folder(self):
+        (self.root / "x").mkdir()
+        for bad in (".", "./", "x/.."):
+            with self.assertRaisesRegex(ConfigError, "module_paths", msg=bad):
+                self.load(module_paths=[bad])
+
+    def test_env_names(self):
+        for bad in ("A=B", "1A", "A B", "", "SLICER_STUDIO", "STUDIO_START_MODULE",
+                    "STUDIO_MODULE_PATHS", "STUDIO_TITLE", "A\n"):
+            with self.assertRaisesRegex(ConfigError, "env", msg=repr(bad)):
+                self.load(env={bad: "x"})
+        self.load(env={"_ok1": "x", "Ab_9": "y"})
+
     def test_module_path_must_be_a_folder(self):
         (self.root / "afile").write_text("x", encoding="utf-8")
         for bad in ("missing", "afile"):
@@ -113,6 +126,9 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "env.D"):
             self.load(env={"D": "{workspace"})
         self.assertEqual(expand_env(self.load(env={"E": "{{x}}"})), {"E": "{x}"})
+        self.assertEqual(expand_env(self.load(env={"F": "{{{workspace}}}"})), {"F": "{/workspace}"})
+        with self.assertRaisesRegex(ConfigError, "env.G"):
+            self.load(env={"G": "{workspace}}"})
 
     def test_workspace_requires_are_relative_names(self):
         for bad in ("../x", "/abs", "", "a/../b", "C:" + "/x", "a\\b"):
