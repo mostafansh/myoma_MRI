@@ -293,7 +293,7 @@ def test_module_mounts_and_env(self):
         self.assertIn(line, text)
 def test_dataset_only_when_used(self)               # uses_dataset false -> no ":/data:ro" and no "--data-root"
 def test_paths_with_spaces_and_dollar_are_quoted(self):
-    # dataset folder "data $HOME x" -> appears as "…/data $$HOME x:/data:ro" inside double quotes
+    # dataset folder "data $HOME set" -> appears as "…/data $$HOME set" + ":/data:ro" inside double quotes
 def test_render_warns_for_unprepared_users(self):
     # manifest workspace_requires ["queue.json"]; ali has it, sara's folder lacks it, tom's folder missing
     result = render(dep)
