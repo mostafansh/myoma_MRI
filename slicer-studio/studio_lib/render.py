@@ -64,7 +64,9 @@ def render_compose(deployment: Deployment, user_ids: list[str]) -> str:
         "      - edge",
     ]
     lines += [f"      - net-{uid}" for uid in user_ids]
-    portal_command = "--users-root /workspaces" + (" --data-root /data" if dataset else "")
+    # A compose `command` replaces the image's whole CMD, so it spells out the program too.
+    portal_command = ("python /app/studio_portal.py serve --data-dir /portal --users-root /workspaces"
+                      + (" --data-root /data" if dataset else "") + " --port 9000")
     lines += [
         "  portal:",
         "    image: slicer-studio-portal",

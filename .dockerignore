@@ -2,6 +2,3 @@
 **/*.pyc
 .git
 .superpowers
-studio/readers
-studio/portal-data
-studio/generated

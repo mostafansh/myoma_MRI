@@ -118,6 +118,7 @@ class RenderTests(unittest.TestCase):
         self.assertIn(_q(str(self.dep.users_dir.resolve() / "ali") + ":/workspace"), text)
         self.assertIn(_q(str(self.dep.users_dir.resolve()) + ":/workspaces:ro"), text)
         self.assertIn("--users-root /workspaces", text)
+        self.assertIn("command: \"python /app/studio_portal.py serve --data-dir /portal ", text)
 
     def test_each_service_gets_only_its_own_studio_user(self) -> None:
         text = render_compose(self.dep, ["ali", "bob"])

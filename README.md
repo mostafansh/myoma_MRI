@@ -6,7 +6,12 @@ Mostafa's queue and review results are stored under `mostafa`.
 The pilot controls and the workflow for all requested annotation and
 segmentation features are documented in [PILOT_FEATURE_GUIDE.md](PILOT_FEATURE_GUIDE.md).
 
-To run the review as a multi-reader browser studio on a local network, see [studio/README.md](studio/README.md).
+To run the review as a multi-reader browser studio on a local network, see
+[slicer-studio/README.md](slicer-studio/README.md). This package is a studio
+module: its manifest is [studio-module.json](studio-module.json) at the root of
+this folder. Prepare each reader's queue with
+`python reader_queue.py create --reader-id <id> --study-id <study> --reader-dir <deploy-dir>/users/<id>`
+(add `--case-list <file>` for a subset), then `add-user` and `up` as the studio guide describes.
 
 ## Set up or move the package
 
