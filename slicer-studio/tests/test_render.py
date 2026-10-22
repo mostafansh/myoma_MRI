@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import re
 import shutil
@@ -11,46 +12,76 @@ import tempfile
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJECT_ROOT / "studio"))
-sys.path.insert(0, str(PROJECT_ROOT / "slicer-studio" / "portal"))
+from studio_lib.deployment import load_deployment  # noqa: E402
+from studio_lib.manifest import ConfigError  # noqa: E402
+from studio_lib.render import _q, render, render_caddyfile, render_compose  # noqa: E402
 
-import portal_core  # noqa: E402
-import studio_config  # noqa: E402
+import portal_core  # noqa: E402  (studio_lib puts slicer-studio/portal on sys.path)
+
+ADDR = "192.168.0.201"
 
 
-class StudioConfigTests(unittest.TestCase):
+def _write_fixture(top: Path, uses_dataset: bool = True, requires=(), dataset_name: str = "data",
+                   env=None, users=("ali",)):
+    """Build a module, a dataset and a deployment folder; return (deployment, module_dir)."""
+    mod = top / "mod"
+    (mod / "HelloStudio").mkdir(parents=True)
+    (mod / "studio-module.json").write_text(json.dumps({
+        "schema": 1, "name": "hello", "title": "Hello Studio", "module_paths": ["HelloStudio"],
+        "start_module": "HelloStudio", "uses_dataset": uses_dataset,
+        "env": {"A": "{workspace}/q.json"} if env is None else env,
+        "workspace_requires": list(requires)}), encoding="utf-8")
+    root = top / "deploy"
+    (root / "portal").mkdir(parents=True)
+    cfg = {"schema": 1, "module": str(mod / "studio-module.json"), "server_address": ADDR}
+    if uses_dataset:
+        (top / dataset_name).mkdir()
+        cfg["dataset"] = str(top / dataset_name)
+    (root / "studio.json").write_text(json.dumps(cfg), encoding="utf-8")
+    table = {u: portal_core.User(u, u.title(), portal_core.hash_password("pw-" + u + "-12345"), False)
+             for u in users}
+    portal_core.save_users(root / "portal" / "users.json", table)
+    return load_deployment(root), (mod / "HelloStudio").resolve()
+
+
+class RenderTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.top = Path(self.temporary.name)
+        self.dep, self.mod_dir = _write_fixture(self.top)
 
-    def test_compose_has_one_slicer_per_reader_and_readonly_dataset(self) -> None:
-        text = studio_config.render_compose(["ali", "mostafa"], "/srv/data", "/srv/readers", "/srv/portal", "192.168.0.201")
+    def test_compose_has_one_slicer_per_user_and_readonly_dataset(self) -> None:
+        text = render_compose(self.dep, ["ali", "mostafa"])
         self.assertIn("slicer-ali:", text)
         self.assertIn("slicer-mostafa:", text)
         self.assertEqual(text.count(":/data:ro"), 3)
         self.assertEqual(len(re.findall(r'"[^"]*:443:443"', text)), 1)
-        self.assertIn('      - "192.168.0.201:443:443"', text)
+        self.assertIn(f'      - "{ADDR}:443:443"', text)
         self.assertNotIn('- "443:443"', text)
         self.assertNotIn("6080:", text)
         self.assertIn("caddy:2.8", text)
+        self.assertIn("image: slicer-studio-slicer", text)
+        self.assertIn("image: slicer-studio-portal", text)
+        self.assertIn("settings-ali:/home/user/.config", text)
 
     def test_compose_has_project_name_and_init_for_every_slicer(self) -> None:
-        text = studio_config.render_compose(["ali", "sara"], "/d", "/r", "/p", "192.168.0.201")
-        self.assertRegex(text, r"(?m)^name: myoma-studio$")
+        text = render_compose(self.dep, ["ali", "sara"])
+        self.assertRegex(text, r"(?m)^name: studio-deploy$")
         for rid in ("ali", "sara"):
             block = re.search(rf"^  slicer-{rid}:\n((?:    .*\n)+)", text, re.M).group(1)
             self.assertIn("    init: true\n", block)
 
     def test_compose_rejects_bad_server_address(self) -> None:
-        with self.assertRaises(ValueError):
-            studio_config.render_compose(["ali"], "/d", "/r", "/p", "1.2.3.4\n  x: y")
+        bad = dataclasses.replace(self.dep, server_address="1.2.3.4\n  x: y")
+        with self.assertRaises(ConfigError):
+            render_compose(bad, ["ali"])
 
-    def test_caddyfile_guards_every_reader_route(self) -> None:
-        text = studio_config.render_caddyfile(["ali", "mostafa"], "192.168.0.201")
-        self.assertIn(chr(10) + "192.168.0.201 {", text)
+    def test_caddyfile_guards_every_user_route(self) -> None:
+        text = render_caddyfile(["ali", "mostafa"], ADDR)
+        self.assertIn(chr(10) + ADDR + " {", text)
         self.assertIn("tls internal", text)
         self.assertNotIn("trusted_proxies", text)
         for rid in ("ali", "mostafa"):
@@ -60,50 +91,70 @@ class StudioConfigTests(unittest.TestCase):
             self.assertLess(guard, proxy)
 
     def test_render_skips_admins_and_rejects_bad_ids(self) -> None:
-        portal_data = self.root / "portal-data"
-        portal_data.mkdir()
-        readers = {
-            "ali": portal_core.User("ali", "Ali", portal_core.hash_password("pw-ali-12345"), False),
-            "boss": portal_core.User("boss", "Boss", portal_core.hash_password("pw-boss-12345"), True),
-        }
-        portal_core.save_users(portal_data / "readers.json", readers)
-        config = self.root / "review-config.json"
-        config.write_text(json.dumps({"dataset_root": "/srv/data"}), encoding="utf-8")
-        out = self.root / "out"
-        result = subprocess.run(
-            [sys.executable, str(PROJECT_ROOT / "studio" / "studio_config.py"), "render",
-             "--server-address", "192.168.0.201", "--review-config", str(config),
-             "--portal-data", str(portal_data), "--readers-root", str(self.root / "readers"),
-             "--out", str(out)],
-            capture_output=True, text=True,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        compose = (out / "docker-compose.yml").read_text(encoding="utf-8")
-        caddy = (out / "Caddyfile").read_text(encoding="utf-8")
+        users = portal_core.load_users(self.dep.portal_dir / "users.json")
+        users["boss"] = portal_core.User("boss", "Boss", portal_core.hash_password("pw-boss-12345"), True)
+        portal_core.save_users(self.dep.portal_dir / "users.json", users)
+        result = render(self.dep)
+        self.assertEqual(result.user_ids, ["ali"])
+        compose = (self.dep.generated_dir / "docker-compose.yml").read_text(encoding="utf-8")
+        caddy = (self.dep.generated_dir / "Caddyfile").read_text(encoding="utf-8")
         self.assertIn("slicer-ali:", compose)
         self.assertNotIn("slicer-boss", compose)
         self.assertNotIn("slicer-boss", caddy)
         with self.assertRaises(ValueError):
-            studio_config.render_compose(["Bad Id"], "/d", "/r", "/p", "192.168.0.201")
+            render_compose(self.dep, ["Bad Id"])
         with self.assertRaises(ValueError):
-            studio_config.render_compose(["admin"], "/d", "/r", "/p", "192.168.0.201")
+            render_compose(self.dep, ["admin"])
         with self.assertRaises(ValueError):
-            studio_config.render_caddyfile(["Bad Id"], "x")
+            render_caddyfile(["Bad Id"], "x")
 
-    def test_render_reads_dataset_root_from_review_config(self) -> None:
-        config = self.root / "review-config.json"
-        config.write_text(json.dumps({"dataset_root": "/srv/data"}), encoding="utf-8")
-        root = studio_config.read_dataset_root(config)
-        text = studio_config.render_compose(["ali"], root, "/r", "/p", "192.168.0.201")
-        self.assertIn('"/srv/data:/data:ro"', text)
+    def test_module_mounts_and_env(self) -> None:
+        text = render_compose(self.dep, ["ali"])
+        self.assertIn(_q(str(self.mod_dir) + ":/modules/0:ro"), text)
+        for line in ('SLICER_STUDIO: "1"', 'STUDIO_START_MODULE: "HelloStudio"',
+                     'STUDIO_MODULE_PATHS: "/modules/0"', 'A: "/workspace/q.json"'):
+            self.assertIn(line, text)
+        self.assertIn('STUDIO_TITLE: "Hello Studio"', text)
+        self.assertIn(_q(str(self.dep.users_dir.resolve() / "ali") + ":/workspace"), text)
+        self.assertIn(_q(str(self.dep.users_dir.resolve()) + ":/workspaces:ro"), text)
+        self.assertIn("--users-root /workspaces", text)
 
-    def test_relative_and_drive_dataset_roots(self) -> None:
-        drive = "M"
-        config = self.root / "review-config.json"
-        config.write_text(json.dumps({"dataset_root": "sub\\data"}), encoding="utf-8")
-        self.assertEqual(studio_config.read_dataset_root(config), (self.root / "sub" / "data").as_posix())
-        config.write_text(json.dumps({"dataset_root": drive + ":\\projects\\x y"}), encoding="utf-8")
-        self.assertEqual(studio_config.read_dataset_root(config), drive + ":/projects/x y")
+    def test_dataset_only_when_used(self) -> None:
+        text = render_compose(self.dep, ["ali"])
+        self.assertIn(":/data:ro", text)
+        self.assertIn("--data-root /data", text)
+        with tempfile.TemporaryDirectory() as tmp:
+            dep, _ = _write_fixture(Path(tmp), uses_dataset=False)
+            text = render_compose(dep, ["ali"])
+        self.assertNotIn(":/data:ro", text)
+        self.assertNotIn("--data-root", text)
+        self.assertIn("--users-root /workspaces", text)
+
+    def test_paths_with_spaces_and_dollar_are_quoted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dep, _ = _write_fixture(Path(tmp), dataset_name="data $HOME set", env={"P": "{dataset}/$X"})
+            text = render_compose(dep, ["ali"])
+        self.assertRegex(text, r'"[^"\n]*/data \$\$HOME set:/data:ro"')
+        self.assertNotRegex(text, r"[^$]\$HOME")
+        self.assertIn('P: "/data/$$X"', text)
+
+    def test_render_warns_for_unprepared_users(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            dep, _ = _write_fixture(Path(tmp), requires=["queue.json"], users=("ali", "sara", "tom"))
+            (dep.users_dir / "ali").mkdir(parents=True)
+            (dep.users_dir / "ali" / "queue.json").write_text("[]", encoding="utf-8")
+            (dep.users_dir / "sara").mkdir()
+            result = render(dep)
+            self.assertEqual(result.user_ids, ["ali", "sara", "tom"])
+            self.assertEqual(len(result.warnings), 2)
+            self.assertTrue((dep.generated_dir / "docker-compose.yml").is_file())
+            self.assertTrue((dep.generated_dir / "Caddyfile").is_file())
+
+    def test_render_writes_nothing_on_invalid_users_file(self) -> None:
+        (self.dep.portal_dir / "users.json").write_text("{", encoding="utf-8")
+        with self.assertRaises((ConfigError, portal_core.PortalError)):
+            render(self.dep)
+        self.assertFalse(self.dep.generated_dir.exists())
 
     @staticmethod
     def _service_networks(compose: str, service: str) -> set[str]:
@@ -111,8 +162,8 @@ class StudioConfigTests(unittest.TestCase):
         part = block.split("    networks:\n", 1)[1]
         return set(re.findall(r"^      - (\S+)$", part, re.M))
 
-    def test_readers_are_isolated_on_internal_networks(self) -> None:
-        text = studio_config.render_compose(["a", "b"], "/d", "/r", "/p", "192.168.0.201")
+    def test_users_are_isolated_on_internal_networks(self) -> None:
+        text = render_compose(self.dep, ["a", "b"])
         a = self._service_networks(text, "slicer-a")
         b = self._service_networks(text, "slicer-b")
         self.assertEqual(a, {"net-a"})
@@ -126,11 +177,11 @@ class StudioConfigTests(unittest.TestCase):
         self.assertNotRegex(text, r"(?m)^  edge:\n    internal")
 
     def test_caddyfile_sets_default_sni_for_ip_addresses(self) -> None:
-        text = studio_config.render_caddyfile(["ali"], "192.168.0.201")
-        self.assertTrue(text.startswith("{" + chr(10) + "    default_sni 192.168.0.201" + chr(10) + "}" + chr(10)))
+        text = render_caddyfile(["ali"], ADDR)
+        self.assertTrue(text.startswith("{" + chr(10) + f"    default_sni {ADDR}" + chr(10) + "}" + chr(10)))
 
     def test_caddyfile_orders_auth_before_strip_inside_route(self) -> None:
-        text = studio_config.render_caddyfile(["ali"], "192.168.0.201")
+        text = render_caddyfile(["ali"], ADDR)
         block = text[text.index("handle /ali/*"):]
         self.assertLess(block.index("route {"), block.index("forward_auth"))
         self.assertLess(block.index("forward_auth"), block.index("uri strip_prefix /ali"))
@@ -206,6 +257,7 @@ class DockerBackedTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.out = Path(self.temporary.name)
+        (self.out / "fx").mkdir()
 
     def _adapt(self) -> dict:
         result = subprocess.run(
@@ -222,13 +274,14 @@ class DockerBackedTests(unittest.TestCase):
 
     def test_real_caddy_authenticates_before_stripping_prefix(self) -> None:
         ids = ["ali", "sara"]
-        (self.out / "Caddyfile").write_text(studio_config.render_caddyfile(ids, "192.168.0.201"), encoding="utf-8")
+        (self.out / "Caddyfile").write_text(render_caddyfile(ids, ADDR), encoding="utf-8")
         adapted = self._adapt()
         for rid in ids:
             self.assertTrue(_auth_before_strip(adapted, rid), rid)
 
     def test_compose_config_is_valid(self) -> None:
-        compose = studio_config.render_compose(["ali", "sara"], "/srv/data", "/srv/readers", "/srv/portal", "192.168.0.201")
+        dep, _ = _write_fixture(self.out / "fx", users=("ali", "sara"))
+        compose = render_compose(dep, ["ali", "sara"])
         (self.out / "docker-compose.yml").write_text(compose, encoding="utf-8")
         result = subprocess.run(
             ["docker", "compose", "-f", str(self.out / "docker-compose.yml"), "config"],
