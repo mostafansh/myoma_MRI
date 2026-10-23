@@ -9,11 +9,13 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import nibabel as nib
 import numpy as np
 
 from MyomaReviewLiteLib import CaseStorage, DatasetManifest, QueueStatus, QueueSummary, ReviewState
+from MyomaReviewLiteLib import reader_queue
 from MyomaReviewLiteLib.reader_queue import (
     QueueCreationError,
     create_queue,
@@ -591,6 +593,84 @@ class ReaderQueueCreationTests(unittest.TestCase):
         self._set(["sub-1", "sub-2"], study_id="OTHER")
         payload = json.loads((self.reader_dir / "queue.json").read_text(encoding="utf-8"))
         self.assertEqual(payload["study_id"], "LUIS_FIGO")
+
+    def test_set_cases_works_when_launcher_is_on_another_drive(self) -> None:
+        for case_id in ("sub-1", "sub-2"):
+            self._make_case(case_id)
+        with mock.patch(
+            "MyomaReviewLiteLib.reader_queue.os.path.relpath",
+            side_effect=ValueError("path is on mount 'C:', start on mount 'L:'"),
+        ):
+            first = self._set(["sub-1"])
+            self.assertTrue(first.created)
+            self._set(["sub-1", "sub-2"])
+        self.assertEqual(self._queue_cases(), ["sub-1", "sub-2"])
+        self.assertFalse((self.reader_dir / "Start Review.cmd").exists())
+
+    def test_set_cases_does_not_need_a_launcher(self) -> None:
+        self._make_case("sub-1")
+        self._set(["sub-1"], launcher_path=self.root / "missing-launcher.ps1")
+        self.assertEqual(self._queue_cases(), ["sub-1"])
+        self.assertFalse((self.reader_dir / "Start Review.cmd").exists())
+
+    def test_create_uses_absolute_launcher_when_on_another_drive(self) -> None:
+        self._make_case("sub-1")
+        with mock.patch(
+            "MyomaReviewLiteLib.reader_queue.os.path.relpath",
+            side_effect=ValueError("path is on mount 'C:', start on mount 'L:'"),
+        ):
+            result = self._create()
+        self.assertTrue(result.created)
+        command = (self.reader_dir / "Start Review.cmd").read_text(encoding="utf-8")
+        self.assertIn(f'-File "{self.launcher.resolve()}"', command)
+        self.assertNotIn("%~dp0" + str(self.launcher.resolve()), command)
+
+    def test_set_cases_validates_images_only_for_added_cases(self) -> None:
+        for case_id in ("sub-1", "sub-2", "sub-3"):
+            self._make_case(case_id)
+        validated: list[str] = []
+        original = reader_queue._validate_case_images
+
+        def counting(case_id, paths):
+            validated.append(case_id)
+            return original(case_id, paths)
+
+        with mock.patch.object(reader_queue, "_validate_case_images", side_effect=counting):
+            self._set(["sub-1"])
+            self.assertEqual(validated, ["sub-1"])
+            validated.clear()
+            self._set(["sub-1", "sub-2"])
+            self.assertEqual(validated, ["sub-2"])
+            validated.clear()
+            self._set(["sub-1", "sub-2"])
+            self.assertEqual(validated, [])
+            self._set(["sub-2", "sub-3"])
+            self.assertEqual(validated, ["sub-3"])
+        self.assertEqual(self._queue_cases(), ["sub-2", "sub-3"])
+
+    def test_set_cases_still_rejects_a_bad_added_case(self) -> None:
+        self._make_case("sub-1")
+        self._make_case("sub-2", mask_values=(0, 7))
+        self._set(["sub-1"])
+        before = (self.reader_dir / "queue.json").read_bytes()
+        with self.assertRaisesRegex(QueueCreationError, "labels 0 through 4"):
+            self._set(["sub-1", "sub-2"])
+        self.assertEqual((self.reader_dir / "queue.json").read_bytes(), before)
+
+    def test_create_still_validates_every_case(self) -> None:
+        for case_id in ("sub-1", "sub-2"):
+            self._make_case(case_id)
+        validated: list[str] = []
+        original = reader_queue._validate_case_images
+
+        def counting(case_id, paths):
+            validated.append(case_id)
+            return original(case_id, paths)
+
+        self._create()
+        with mock.patch.object(reader_queue, "_validate_case_images", side_effect=counting):
+            self._create()
+        self.assertEqual(validated, ["sub-1", "sub-2"])
 
 
 if __name__ == "__main__":

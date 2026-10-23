@@ -241,11 +241,14 @@ def _manifest_payload(
     study_id: str,
     data_root: Path,
     case_ids: Sequence[str],
+    validated_case_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
+    """Build the queue payload; cases in ``validated_case_ids`` skip image checks."""
     cases = []
     for case_id in case_ids:
         paths = _expected_source_paths(data_root, case_id)
-        _validate_case_images(case_id, paths)
+        if case_id not in validated_case_ids:
+            _validate_case_images(case_id, paths)
         cases.append(
             {
                 "case_id": case_id,
@@ -292,16 +295,16 @@ def _atomic_text(path: Path, content: str) -> None:
 
 def _start_command(launcher_path: Path, reader_dir: Path) -> str:
     try:
-        relative_launcher = os.path.relpath(launcher_path, reader_dir)
-    except ValueError as exc:
-        raise QueueCreationError(
-            "generic launcher and reader directory must be on the same drive"
-        ) from exc
-    relative_launcher = relative_launcher.replace("/", "\\")
+        launcher_text = "%~dp0" + os.path.relpath(launcher_path, reader_dir)
+    except ValueError:
+        # Different drives on Windows: no relative path exists, so name the
+        # launcher by its absolute path instead.
+        launcher_text = str(launcher_path)
+    launcher_text = launcher_text.replace("/", "\\")
     return (
         "@echo off\r\n"
         "powershell.exe -NoProfile -ExecutionPolicy Bypass "
-        f'-File "%~dp0{relative_launcher}" -ReaderDir "%~dp0."\r\n'
+        f'-File "{launcher_text}" -ReaderDir "%~dp0."\r\n'
         "if errorlevel 1 pause\r\n"
     )
 
@@ -324,6 +327,27 @@ def create_queue(
     case_list: str | Path | Sequence[str] | None = None,
     launcher_path: str | Path | None = None,
 ) -> QueueCreationResult:
+    return _create_queue(
+        reader_id=reader_id,
+        study_id=study_id,
+        data_root=data_root,
+        reader_dir=reader_dir,
+        case_list=case_list,
+        launcher_path=launcher_path,
+        write_start=True,
+    )
+
+
+def _create_queue(
+    *,
+    reader_id: str,
+    study_id: str,
+    data_root: str | Path,
+    reader_dir: str | Path,
+    case_list: str | Path | Sequence[str] | None,
+    launcher_path: str | Path | None,
+    write_start: bool,
+) -> QueueCreationResult:
     try:
         normalized_reader_id = _identifier(reader_id, "reader_id")
         normalized_study_id = _identifier(study_id, "study_id")
@@ -335,13 +359,15 @@ def create_queue(
         raise QueueCreationError(f"data root is not a regular directory: {source}")
     if _is_inside(destination, source):
         raise QueueCreationError("reader output directory cannot be inside the source dataset")
-    launcher = Path(
-        launcher_path or destination.parent / "Start-MyomaReviewLite.ps1"
-    ).expanduser().resolve()
-    if launcher.is_symlink() or not launcher.is_file():
-        raise QueueCreationError(f"generic launcher is missing or unsafe: {launcher}")
     start_path = destination / "Start Review.cmd"
-    start_text = _start_command(launcher, destination)
+    start_text = ""
+    if write_start:
+        launcher = Path(
+            launcher_path or destination.parent / "Start-MyomaReviewLite.ps1"
+        ).expanduser().resolve()
+        if launcher.is_symlink() or not launcher.is_file():
+            raise QueueCreationError(f"generic launcher is missing or unsafe: {launcher}")
+        start_text = _start_command(launcher, destination)
 
     available = _discover_case_ids(source)
     requested = _read_case_list(case_list)
@@ -375,10 +401,13 @@ def create_queue(
     else:
         if _has_results(destination):
             raise QueueCreationError("result artifacts exist without a matching queue.json")
-        _atomic_text(start_path, start_text)
+        if write_start:
+            _atomic_text(start_path, start_text)
         _atomic_text(queue_path, expected_text)
 
-    if not start_path.is_file() or start_path.read_text(encoding="utf-8") != start_text:
+    if write_start and (
+        not start_path.is_file() or start_path.read_text(encoding="utf-8") != start_text
+    ):
         _atomic_text(start_path, start_text)
     return QueueCreationResult(queue_path, tuple(selected), created)
 
@@ -396,7 +425,11 @@ def set_cases(
 
     Removing a case that already has result artifacts is refused. An existing
     queue keeps its own reader_id and study_id. An empty list is allowed.
+    Only cases being added have their images validated; cases already in the
+    queue were validated when they were added. No ``Start Review.cmd`` is
+    written (VoxLab starts Slicer itself), so ``launcher_path`` is unused.
     """
+    del launcher_path
     destination = Path(reader_dir).expanduser().resolve()
     queue_path = destination / "queue.json"
     requested = _read_case_list(list(case_ids)) if len(case_ids) else []
@@ -405,13 +438,14 @@ def set_cases(
         if not selected:
             # An empty queue is represented by no queue.json at all.
             return QueueCreationResult(queue_path, (), False)
-        return create_queue(
+        return _create_queue(
             reader_id=reader_id,
             study_id=study_id,
             data_root=data_root,
             reader_dir=destination,
             case_list=selected,
-            launcher_path=launcher_path,
+            launcher_path=None,
+            write_start=False,
         )
     if queue_path.is_symlink() or not queue_path.is_file():
         raise QueueCreationError("conflicting queue.json is not a regular file")
@@ -455,6 +489,7 @@ def set_cases(
         study_id=str(existing.get("study_id")),
         data_root=source,
         case_ids=selected,
+        validated_case_ids=frozenset(current),
     )
     text = _json_text(payload)
     if text != original_text:
