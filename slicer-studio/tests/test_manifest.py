@@ -57,6 +57,11 @@ class ManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "modul_paths"):
             load_manifest(self.write(data))
 
+    def test_voxlab_block_is_ignored(self):
+        data = base()
+        data["voxlab"] = {"queue_tool": "reader_queue.py", "launcher": "Start-MyomaReviewLite.ps1"}
+        self.assertEqual(load_manifest(self.write(data)).name, data["name"])
+
     def test_required_keys(self):
         for key in ("schema", "name", "title", "module_paths", "start_module"):
             data = base()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -19,6 +20,7 @@ from MyomaReviewLiteLib.reader_queue import (
     load_review_config,
     main,
     migrate_paths,
+    set_cases,
 )
 
 
@@ -426,6 +428,152 @@ class ReaderQueueCreationTests(unittest.TestCase):
                     migrate_paths(reader_dir=self.reader_dir, data_root=self.data_root)
 
                 self.assertEqual(queue_path.read_bytes(), original)
+
+    def _set(self, case_ids, **overrides: object):
+        arguments = {
+            "reader_id": "reader_a",
+            "study_id": "LUIS_FIGO",
+            "data_root": self.data_root,
+            "reader_dir": self.reader_dir,
+            "launcher_path": self.launcher,
+            "case_ids": case_ids,
+        }
+        arguments.update(overrides)
+        return set_cases(**arguments)
+
+    def _queue_cases(self) -> list[str]:
+        payload = json.loads((self.reader_dir / "queue.json").read_text(encoding="utf-8"))
+        return [case["case_id"] for case in payload["cases"]]
+
+    def test_list_cases_json_orders_numerically(self) -> None:
+        for case_id in ("sub-10", "sub-2", "sub-1"):
+            self._make_case(case_id)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main(["list-cases", "--data-root", str(self.data_root), "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()), {"cases": ["sub-1", "sub-2", "sub-10"]})
+
+    def test_list_cases_without_subjects_exits_2(self) -> None:
+        self.data_root.mkdir()
+        code = main(["list-cases", "--data-root", str(self.data_root), "--json"])
+        self.assertEqual(code, 2)
+
+    def test_set_cases_creates_then_grows(self) -> None:
+        for case_id in ("sub-1", "sub-2"):
+            self._make_case(case_id)
+        first = self._set(["sub-1"])
+        self.assertTrue(first.created)
+        second = self._set(["sub-2", "sub-1"])
+        self.assertFalse(second.created)
+        self.assertEqual(self._queue_cases(), ["sub-1", "sub-2"])
+        self.assertEqual(second.case_ids, ("sub-1", "sub-2"))
+
+    def test_set_cases_same_list_is_unchanged(self) -> None:
+        for case_id in ("sub-1", "sub-2"):
+            self._make_case(case_id)
+        self._set(["sub-1", "sub-2"])
+        before = (self.reader_dir / "queue.json").read_bytes()
+        output = io.StringIO()
+        case_file = self.root / "cases.txt"
+        case_file.write_text("sub-1" + chr(10) + "sub-2" + chr(10), encoding="utf-8")
+        with redirect_stdout(output):
+            code = main([
+                "set-cases", "--reader-id", "reader_a", "--study-id", "LUIS_FIGO",
+                "--reader-dir", str(self.reader_dir), "--data-root", str(self.data_root),
+                "--case-list", str(case_file), "--json",
+            ])
+        self.assertEqual(code, 0)
+        report = json.loads(output.getvalue())
+        self.assertFalse(report["changed"])
+        self.assertEqual(report["cases"], ["sub-1", "sub-2"])
+        self.assertEqual(report["queue"], str(self.reader_dir.resolve() / "queue.json"))
+        self.assertEqual((self.reader_dir / "queue.json").read_bytes(), before)
+
+    def test_set_cases_cli_changed_true_when_growing(self) -> None:
+        for case_id in ("sub-1", "sub-2"):
+            self._make_case(case_id)
+        self._set(["sub-1"])
+        case_file = self.root / "cases.txt"
+        case_file.write_text("sub-1" + chr(10) + "sub-2" + chr(10), encoding="utf-8")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            main([
+                "set-cases", "--reader-id", "reader_a", "--study-id", "LUIS_FIGO",
+                "--reader-dir", str(self.reader_dir), "--data-root", str(self.data_root),
+                "--case-list", str(case_file), "--json",
+            ])
+        self.assertTrue(json.loads(output.getvalue())["changed"])
+
+    def test_set_cases_refuses_removing_touched_case(self) -> None:
+        for case_id in ("sub-1", "sub-2"):
+            self._make_case(case_id)
+        self._set(["sub-1", "sub-2"])
+        draft = self.reader_dir / "sub-1" / "draft.json"
+        draft.parent.mkdir(parents=True)
+        draft.write_text("{}", encoding="utf-8")
+        before = (self.reader_dir / "queue.json").read_bytes()
+        with self.assertRaisesRegex(QueueCreationError, "case has result artifacts: sub-1"):
+            self._set(["sub-2"])
+        self.assertEqual((self.reader_dir / "queue.json").read_bytes(), before)
+
+    def test_set_cases_removes_untouched_case(self) -> None:
+        for case_id in ("sub-1", "sub-2"):
+            self._make_case(case_id)
+        self._set(["sub-1", "sub-2"])
+        self._set(["sub-2"])
+        self.assertEqual(self._queue_cases(), ["sub-2"])
+
+    def test_set_cases_empty_list(self) -> None:
+        self._make_case("sub-1")
+        self._set(["sub-1"])
+        result = self._set([])
+        self.assertEqual(result.case_ids, ())
+        self.assertEqual(self._queue_cases(), [])
+
+    def test_set_cases_empty_list_cli_file(self) -> None:
+        self._make_case("sub-1")
+        self._set(["sub-1"])
+        case_file = self.root / "cases.txt"
+        case_file.write_text("", encoding="utf-8")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            code = main([
+                "set-cases", "--reader-id", "reader_a", "--study-id", "LUIS_FIGO",
+                "--reader-dir", str(self.reader_dir), "--data-root", str(self.data_root),
+                "--case-list", str(case_file), "--json",
+            ])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue())["cases"], [])
+
+    def test_set_cases_sources_are_portable(self) -> None:
+        for case_id in ("sub-1", "sub-2"):
+            self._make_case(case_id)
+        self._set(["sub-1"])
+        self._set(["sub-1", "sub-2"])
+        copy = self.root / "copy"
+        shutil.copytree(self.data_root, copy)
+        payload = json.loads((self.reader_dir / "queue.json").read_text(encoding="utf-8"))
+        manifest = DatasetManifest.from_file(
+            self.reader_dir / "queue.json", source_root=copy
+        )
+        self.assertEqual([c.case_id for c in manifest.cases], ["sub-1", "sub-2"])
+        for case in payload["cases"]:
+            self.assertFalse(Path(case["ai_mask"]).is_absolute())
+
+    def test_set_cases_unknown_id_raises(self) -> None:
+        self._make_case("sub-1")
+        with self.assertRaises(QueueCreationError):
+            self._set(["sub-1", "sub-99"])
+        self.assertFalse((self.reader_dir / "queue.json").exists())
+
+    def test_set_cases_keeps_reader_and_study_of_existing_queue(self) -> None:
+        for case_id in ("sub-1", "sub-2"):
+            self._make_case(case_id)
+        self._set(["sub-1"])
+        self._set(["sub-1", "sub-2"], study_id="OTHER")
+        payload = json.loads((self.reader_dir / "queue.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["study_id"], "LUIS_FIGO")
 
 
 if __name__ == "__main__":
