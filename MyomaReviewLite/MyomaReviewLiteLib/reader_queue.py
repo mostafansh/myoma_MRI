@@ -402,12 +402,15 @@ def set_cases(
     requested = _read_case_list(list(case_ids)) if len(case_ids) else []
     selected = sorted(requested or [], key=numeric_case_key)
     if not queue_path.exists():
-        return _create_for_cases(
+        if not selected:
+            # An empty queue is represented by no queue.json at all.
+            return QueueCreationResult(queue_path, (), False)
+        return create_queue(
             reader_id=reader_id,
             study_id=study_id,
             data_root=data_root,
             reader_dir=destination,
-            selected=selected,
+            case_list=selected,
             launcher_path=launcher_path,
         )
     if queue_path.is_symlink() or not queue_path.is_file():
@@ -423,12 +426,13 @@ def set_cases(
         str(case.get("case_id")) for case in existing["cases"] if isinstance(case, dict)
     ]
     source = Path(data_root).expanduser().resolve()
-    if source.is_symlink() or not source.is_dir():
-        raise QueueCreationError(f"data root is not a regular directory: {source}")
-    available = _discover_case_ids(source)
-    unknown = sorted(set(selected) - set(available), key=numeric_case_key)
-    if unknown:
-        raise QueueCreationError("unknown case IDs: " + ", ".join(unknown))
+    if selected:
+        if source.is_symlink() or not source.is_dir():
+            raise QueueCreationError(f"data root is not a regular directory: {source}")
+        available = _discover_case_ids(source)
+        unknown = sorted(set(selected) - set(available), key=numeric_case_key)
+        if unknown:
+            raise QueueCreationError("unknown case IDs: " + ", ".join(unknown))
     touched = sorted(
         {
             case_id
@@ -439,6 +443,13 @@ def set_cases(
     )
     if touched:
         raise QueueCreationError("case has result artifacts: " + ", ".join(touched))
+    if not selected:
+        queue_path.unlink()
+        try:
+            (destination / "Start Review.cmd").unlink()
+        except FileNotFoundError:
+            pass
+        return QueueCreationResult(queue_path, (), False)
     payload = _manifest_payload(
         reader_id=str(existing.get("reader_id")),
         study_id=str(existing.get("study_id")),
@@ -456,54 +467,6 @@ def _case_has_results(reader_dir: Path, case_id: str) -> bool:
     if not directory.is_dir():
         return False
     return any(path.name in _RESULT_NAMES for path in directory.rglob("*"))
-
-
-def _create_for_cases(
-    *,
-    reader_id: str,
-    study_id: str,
-    data_root: str | Path,
-    reader_dir: Path,
-    selected: list[str],
-    launcher_path: str | Path | None,
-) -> QueueCreationResult:
-    if selected:
-        return create_queue(
-            reader_id=reader_id,
-            study_id=study_id,
-            data_root=data_root,
-            reader_dir=reader_dir,
-            case_list=selected,
-            launcher_path=launcher_path,
-        )
-    # create_queue has no way to say "no cases", so build the empty queue here.
-    try:
-        normalized_reader_id = _identifier(reader_id, "reader_id")
-        normalized_study_id = _identifier(study_id, "study_id")
-    except ValueError as exc:
-        raise QueueCreationError(str(exc)) from exc
-    source = Path(data_root).expanduser().resolve()
-    if source.is_symlink() or not source.is_dir():
-        raise QueueCreationError(f"data root is not a regular directory: {source}")
-    if _is_inside(reader_dir, source):
-        raise QueueCreationError("reader output directory cannot be inside the source dataset")
-    launcher = Path(
-        launcher_path or reader_dir.parent / "Start-MyomaReviewLite.ps1"
-    ).expanduser().resolve()
-    if launcher.is_symlink() or not launcher.is_file():
-        raise QueueCreationError(f"generic launcher is missing or unsafe: {launcher}")
-    if _has_results(reader_dir):
-        raise QueueCreationError("result artifacts exist without a matching queue.json")
-    payload = _manifest_payload(
-        reader_id=normalized_reader_id,
-        study_id=normalized_study_id,
-        data_root=source,
-        case_ids=[],
-    )
-    _atomic_text(reader_dir / "Start Review.cmd", _start_command(launcher, reader_dir))
-    queue_path = reader_dir / "queue.json"
-    _atomic_text(queue_path, _json_text(payload))
-    return QueueCreationResult(queue_path, (), True)
 
 
 def queue_report(
@@ -756,7 +719,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 case_ids=_read_case_list_file(arguments.case_list),
                 launcher_path=_package_root() / "Start-MyomaReviewLite.ps1",
             )
-            changed = before != result.queue_path.read_bytes()
+            after = result.queue_path.read_bytes() if result.queue_path.is_file() else None
+            changed = before != after
             if arguments.as_json:
                 print(
                     json.dumps(

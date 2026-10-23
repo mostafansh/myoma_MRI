@@ -529,7 +529,21 @@ class ReaderQueueCreationTests(unittest.TestCase):
         self._set(["sub-1"])
         result = self._set([])
         self.assertEqual(result.case_ids, ())
-        self.assertEqual(self._queue_cases(), [])
+        self.assertFalse((self.reader_dir / "queue.json").exists())
+        self.assertFalse((self.reader_dir / "Start Review.cmd").exists())
+        again = self._set([])
+        self.assertFalse(again.created)
+
+    def test_set_cases_empty_list_refuses_when_case_touched(self) -> None:
+        self._make_case("sub-1")
+        self._set(["sub-1"])
+        draft = self.reader_dir / "sub-1" / "draft.json"
+        draft.parent.mkdir(parents=True)
+        draft.write_text("{}", encoding="utf-8")
+        before = (self.reader_dir / "queue.json").read_bytes()
+        with self.assertRaisesRegex(QueueCreationError, "case has result artifacts: sub-1"):
+            self._set([])
+        self.assertEqual((self.reader_dir / "queue.json").read_bytes(), before)
 
     def test_set_cases_empty_list_cli_file(self) -> None:
         self._make_case("sub-1")
@@ -544,7 +558,10 @@ class ReaderQueueCreationTests(unittest.TestCase):
                 "--case-list", str(case_file), "--json",
             ])
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(output.getvalue())["cases"], [])
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["cases"], [])
+        self.assertTrue(report["changed"])
+        self.assertFalse((self.reader_dir / "queue.json").exists())
 
     def test_set_cases_sources_are_portable(self) -> None:
         for case_id in ("sub-1", "sub-2"):
