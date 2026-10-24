@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "name": "myoma-review",
+  "title": "Myoma review",
+  "module_paths": ["MyomaReviewLite"],
+  "start_module": "MyomaReviewLite",
+  "uses_dataset": true,
+  "env": {
+    "MYOMA_REVIEW_LITE_CASE": "{workspace}/queue.json",
+    "MYOMA_REVIEW_LITE_DATA_ROOT": "{dataset}"
+  },
+  "workspace_requires": ["queue.json"]
+}

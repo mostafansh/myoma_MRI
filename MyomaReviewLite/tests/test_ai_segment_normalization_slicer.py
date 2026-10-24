@@ -61,8 +61,6 @@ def test_real_ai_masks_normalize_to_fixed_segments() -> None:
         "uterine_cavity": "uterine cavity",
         "myoma": "myoma",
         "nabothian_cyst": "Nabothian cyst",
-        "cervix": "cervix",
-        "cesarean_scar_niche": "cesarean scar niche",
     }
     manifest = _test_manifest()
     for case in manifest.cases[:2]:
@@ -139,8 +137,6 @@ def test_failed_reveal_draft_is_repaired() -> None:
         "uterine_cavity": "uterine cavity",
         "myoma": "myoma",
         "nabothian_cyst": "Nabothian cyst",
-        "cervix": "cervix",
-        "cesarean_scar_niche": "cesarean scar niche",
     }
 
 

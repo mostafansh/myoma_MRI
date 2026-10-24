@@ -23,7 +23,6 @@ sys.path.insert(0, str(MODULE_ROOT))
 import MyomaReviewLite as bundled_module  # noqa: E402
 from MyomaReviewLite import (  # noqa: E402
     LiteRectangleDrawTool,
-    LiteRoiLabelOverlay,
     MyomaReviewLiteWidget,
 )
 from MyomaReviewLiteLib import DatasetManifest  # noqa: E402
@@ -85,16 +84,29 @@ def test_queue_switching_and_corrected_restore() -> None:
         parent.setMRMLScene(slicer.mrmlScene)
         widget = MyomaReviewLiteWidget(parent)
         widget._build_ui()
-        widget.roi_overlay = LiteRoiLabelOverlay(widget)
         widget.draw_tool = LiteRectangleDrawTool(widget)
         try:
             widget.open_case(queue_path)
             assert widget.logic.case_id == first_case_id
 
+            # A case that was only opened leaves no draft, or the queue would
+            # report it as in progress.
             widget.open_case(queue_path, second_case_id)
-            assert (reader / first_case_id / "draft.json").is_file()
+            assert not (reader / first_case_id / "draft.json").exists()
             widget.open_case(queue_path, first_case_id)
-            assert (reader / second_case_id / "draft.json").is_file()
+            assert not (reader / second_case_id / "draft.json").exists()
+
+            # Work typed into a case is saved when the reader switches away.
+            widget.case_comment_edit.plainText = "queue smoke comment"
+            widget.open_case(queue_path, second_case_id)
+            first_draft = reader / first_case_id / "draft.json"
+            assert first_draft.is_file()
+            assert json.loads(first_draft.read_text(encoding="utf-8"))["comment"] == (
+                "queue smoke comment"
+            )
+            widget.open_case(queue_path, first_case_id)
+            assert widget.logic.state.comment == "queue smoke comment"
+            assert not (reader / second_case_id / "draft.json").exists()
 
             assert widget.logic.state is not None
             widget.logic.state.confirm_zero_myomas(True)

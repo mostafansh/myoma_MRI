@@ -15,7 +15,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 _MODULE_DIRECTORY = Path(__file__).resolve().parent
 if str(_MODULE_DIRECTORY) not in sys.path:
@@ -64,9 +64,8 @@ from MyomaReviewLiteLib import (  # noqa: E402
     CaseManifest,
     CaseStorage,
     DatasetManifest,
-    FIGOClassification,
-    FIGOKind,
     ImageGeometry,
+    QueueEntry,
     QueueStatus,
     QueueSummary,
     ReviewSaveCoordinator,
@@ -87,9 +86,26 @@ from MyomaReviewLiteLib.roi import (  # noqa: E402
     pick_box_at_point,
     stable_public_id,
 )
-from MyomaReviewLiteLib.domain import CORRECTION_LABEL_NAMES, validate_correction_mask_values
+from MyomaReviewLiteLib.domain import validate_correction_mask_values
+from MyomaReviewLiteLib.figo_card import FigoCard, card_position, figo_label, missing_figo_ids
 from MyomaReviewLiteLib.view_tools import ReviewViewTools
 from MyomaReviewLiteLib.correction_tools import ReviewCorrectionTools
+from MyomaReviewLiteLib.correction_panel import CorrectionPanel
+from MyomaReviewLiteLib import theme
+from MyomaReviewLiteLib.queue import progress_counts
+from MyomaReviewLiteLib.storage import _atomic_bytes as _atomic_write_bytes
+from MyomaReviewLiteLib.fonts import load_bundled_fonts
+from MyomaReviewLiteLib.panel_model import (
+    CASE_FILTER_STATUSES,
+    CASE_FILTERS,
+    DEFAULT_CASE_FILTER,
+    bottom_hint,
+    case_groups,
+    matches_case_search,
+    queue_strip_text,
+)
+
+ICON_DIR = Path(__file__).resolve().parent / "Resources" / "Icons"
 
 
 VIEW_NAMES = {
@@ -100,27 +116,28 @@ VIEW_NAMES = {
 VIEW_ORIENTATIONS = {"sagittal": "Sagittal", "axial": "Axial", "coronal": "Coronal"}
 SAFE_VOLUME_NAMES = {key: f"T2 {key.title()}" for key in VIEW_NAMES}
 CUSTOM_LAYOUT_ID = 735
+# Segment editor node reference to an auto-complete effect's preview
+# segmentation (ResultPreviewNodeReferenceRole in Slicer's SegmentEditorEffects).
+EFFECT_PREVIEW_REFERENCE_ROLE = "SegmentationResultPreview"
 FIXED_SEGMENT_IDS = {
     1: "uterine_wall",
     2: "uterine_cavity",
     3: "myoma",
     4: "nabothian_cyst",
-    5: "cervix",
-    6: "cesarean_scar_niche",
 }
-FIXED_SEGMENT_NAMES = {segment_id: CORRECTION_LABEL_NAMES[value] for value, segment_id in FIXED_SEGMENT_IDS.items()}
+FIXED_SEGMENT_NAMES = {segment_id: LABEL_NAMES[value] for value, segment_id in FIXED_SEGMENT_IDS.items()}
+# Segments of the former six-label set. Drafts saved before their removal still
+# carry them; loading drops them and their voxels become background.
+RETIRED_SEGMENT_IDS = ("cervix", "cesarean_scar_niche")
 
 # A markups ROI draws its slice outline at a hardcoded 3 px that no display-node
 # property feeds, so the visible box is a model node instead: its slice
 # intersection honours SliceIntersectionThickness, whose integer floor of 1 px is
 # the thinnest line a Slicer 2-D view can draw.
 ROI_OUTLINE_THICKNESS_PX = 1
-# The box being drawn or edited is drawn bolder rather than thicker-by-a-jump,
-# so the reader can tell it from the others without losing the T2 underneath.
-# 1 px is a hardware GL line while anything wider is shader-drawn, so on some
-# Windows displays 2 reads only slightly bolder than 1; raise this to 3 if the
-# difference is not obvious on the reading workstation.
-ROI_ACTIVE_OUTLINE_THICKNESS_PX = 2
+# Kept equal to ROI_OUTLINE_THICKNESS_PX by request: every box, including the
+# one currently being drawn or edited, draws at the thinnest possible line.
+ROI_ACTIVE_OUTLINE_THICKNESS_PX = 1
 ROI_OUTLINE_COLOR = (1.0, 0.85, 0.15)
 # Interaction handles stay hidden until a box is clicked, and are drawn smaller
 # than the 3.0 % default so they cover less of the T2 underneath.
@@ -129,37 +146,76 @@ ROI_PICK_TOLERANCE_MM = 1.0
 # A revealed box keeps its selection when a handle just outside it is clicked.
 ROI_ACTIVE_PICK_TOLERANCE_MM = 6.0
 
-# Case-browser filter/search, ported from the sibling BratsReviewLite
-# pilot's "Subjects" tab pattern so both pilots pick a case the same way.
-CASE_FILTERS = (
-    ("All", "all"),
-    ("Unfinished", "unfinished"),
-    ("Finished", "finished"),
-    ("Attention", "attention"),
+# page_stack pages: 0 is the box/FIGO page, 1 the segment correction page.
+# The Box / Segment switch above them flips between the two once AI is shown.
+BOX_PAGE, SEGMENT_PAGE = 0, 1
+
+# The reviewer-configurable keyboard shortcut panel. Each row is
+# (action id, label shown in the shortcut dialog, factory-default key
+# sequence, the widget method the shortcut activates, the attribute name of
+# a toolbar button to keep labelled with its current binding, and that
+# button's base text without the binding). Bindings are stored per-user in
+# QSettings under "MyomaReviewLite/Shortcuts/<action id>" so the defaults
+# below only apply the first time a reviewer opens the module.
+SHORTCUT_ACTIONS: tuple[tuple[str, str, str, str, str | None, str | None], ...] = (
+    ("undo", "Undo", "Ctrl+Z", "on_undo", None, None),
+    ("redo", "Redo", "Ctrl+Y", "on_redo", None, None),
+    ("redo_alt", "Redo (alternate)", "Ctrl+Shift+Z", "on_redo", None, None),
+    ("add_box", "Add myoma box", "", "on_add_box", "add_button", "＋  Add myoma box"),
+    ("delete_box", "Delete box", "", "on_delete_box", "delete_button", "Delete"),
+    ("save_draft", "Save draft", "", "on_save_draft", "save_draft_button", "Save draft"),
+    ("show_myomas", "Show segmented myomas", "V", "on_show_myomas", None, None),
+    ("toggle_roi_boxes", "Show / hide boxes", "Q", "on_toggle_roi_boxes", "show_roi_check", "Show ROI boxes"),
+    ("toggle_ai_mask", "Show / hide AI mask", "A", "on_toggle_ai_mask", None, None),
+    ("segment_1", "Pick uterine wall", "1", "on_pick_segment_1", None, None),
+    ("segment_2", "Pick uterine cavity", "2", "on_pick_segment_2", None, None),
+    ("segment_3", "Pick myoma", "3", "on_pick_segment_3", None, None),
+    ("segment_4", "Pick Nabothian cyst", "4", "on_pick_segment_4", None, None),
 )
-DEFAULT_CASE_FILTER = "all"
+SHORTCUT_SETTINGS_PREFIX = "MyomaReviewLite/Shortcuts/"
+# Mouse-button bindings, layered on the same action list as
+# SHORTCUT_ACTIONS above. Values are raw Qt::MouseButton bit values (not
+# looked up via `qt.Qt.*`, so this module keeps importing cleanly outside
+# Slicer too). On Windows, Qt only distinguishes two "extra" buttons
+# (the back/forward side buttons); anything past that is almost always
+# remapped to a keystroke by the mouse's own driver software rather than
+# reported as a real mouse button, so it already works as a keyboard
+# shortcut above instead. "(none)" (0) is not a real button and marks an
+# action as unbound.
+MOUSE_BUTTON_LABELS: dict[int, str] = {
+    0x0004: "Middle click",
+    0x0008: "Side button 1 (Back)",
+    0x0010: "Side button 2 (Forward)",
+    0x0040: "Extra button 3",
+    0x0080: "Extra button 4",
+    0x0100: "Extra button 5",
+    0x0200: "Extra button 6",
+}
+# Left/Right clicks a reviewer must always keep for normal editing.
+MOUSE_BUTTON_RESERVED = (0x0001, 0x0002)
+MOUSE_BUTTON_SETTINGS_PREFIX = "MyomaReviewLite/MouseShortcuts/"
+
+
+def _studio_mode() -> bool:
+    """True when running inside the Slicer studio (it sets SLICER_STUDIO=1)."""
+
+    return os.environ.get("SLICER_STUDIO") == "1"
+
+
+def _mouse_button_label(value: int) -> str:
+    if not value:
+        return "(none)"
+    return MOUSE_BUTTON_LABELS.get(value, f"Button (0x{value:X})")
 CASE_STATUS_TITLES = {
     QueueStatus.NEW: "New",
     QueueStatus.IN_PROGRESS: "In progress",
     QueueStatus.COMPLETE: "Finished",
     QueueStatus.ATTENTION: "Attention",
 }
-CASE_STATUS_COLORS = {
-    QueueStatus.NEW: "#546e7a",
-    QueueStatus.IN_PROGRESS: "#ef6c00",
-    QueueStatus.COMPLETE: "#2e7d32",
-    QueueStatus.ATTENTION: "#c62828",
-}
-CASE_FILTER_STATUSES = {
-    "all": frozenset(QueueStatus),
-    "unfinished": frozenset({QueueStatus.NEW, QueueStatus.IN_PROGRESS}),
-    "finished": frozenset({QueueStatus.COMPLETE}),
-    "attention": frozenset({QueueStatus.ATTENTION}),
-}
 
 
 def validate_fixed_segment_ids(segment_ids: Iterable[str]) -> dict[str, list[str]]:
-    """Require the six named correction segments.
+    """Require the four named correction segments.
 
     The returned diagnostic is useful to a Slicer UI error message and keeps
     missing/added segments actionable instead of silently normalizing them.
@@ -193,6 +249,23 @@ def validate_fixed_segments(segments: dict[str, str]) -> None:
 
 def validate_four_label_values(values: Iterable[Any]) -> None:
     validate_ai_mask_values(values)
+
+
+def slice_cuts_bounds(slice_node: Any, bounds: list[float]) -> bool:
+    """Whether the slice plane passes through the RAS box ``bounds``.
+
+    Projects the plane and the box's corners onto the slice normal rather
+    than comparing GetSliceOffset() with one RAS axis: the offset is the
+    plane's position along the normal, so a view whose normal points down an
+    axis (this module's sagittal is -R) reports the negated coordinate.
+    """
+
+    matrix = slice_node.GetSliceToRAS()
+    normal = [matrix.GetElement(row, 2) for row in range(3)]
+    plane = sum(normal[row] * matrix.GetElement(row, 3) for row in range(3))
+    reach = sum(abs(normal[row]) * (bounds[row * 2 + 1] - bounds[row * 2]) / 2.0 for row in range(3))
+    centre = sum(normal[row] * (bounds[row * 2] + bounds[row * 2 + 1]) / 2.0 for row in range(3))
+    return centre - reach - 1e-4 <= plane <= centre + reach + 1e-4
 
 
 class MyomaReviewLite(ScriptedLoadableModule):
@@ -343,6 +416,36 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         if self.read_only:
             raise StorageError("completed cases are read-only")
         self.storage.save_draft(self.state, segmentation_source)
+        self._write_progress()
+
+    def _write_progress(self) -> None:
+        """Publish queue counts as ``progress.json`` for the studio portal.
+
+        Never raises: a progress failure must not fail the save that called it.
+        """
+
+        try:
+            summary = self.refresh_queue()
+            if summary is None or self.dataset_manifest is None:
+                return
+            content = (
+                json.dumps(progress_counts(summary), indent=2, sort_keys=True) + "\n"
+            ).encode("utf-8")
+            _atomic_write_bytes(self.dataset_manifest.output_root / "progress.json", content)
+        except Exception:
+            print("MyomaReviewLite: could not write progress.json", file=sys.stderr)
+            traceback.print_exc()
+
+    def ai_mask_path(self) -> Path:
+        """The only read of the AI mask path in this module.
+
+        Level 2 replaces this method with a fetch from the reveal service, so
+        every caller must go through it rather than reading the manifest.
+        """
+
+        if self.manifest is None:
+            raise StorageError("no case is open")
+        return self.manifest.ai_mask
 
     def reveal_ai(self) -> Path:
         """Persist the exposed phase before returning the AI path to the UI."""
@@ -353,7 +456,8 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             raise StorageError("completed cases are read-only")
         self.state.reveal()
         self.storage.save_draft(self.state)
-        return self.manifest.ai_mask
+        self._write_progress()
+        return self.ai_mask_path()
 
     def publish_early_stop(self, status: str) -> dict[str, Any]:
         if self.storage is None or self.state is None:
@@ -362,7 +466,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         self.storage.publish_early_stop(annotation)
         self.final_annotation = annotation
         self.read_only = True
-        self.refresh_queue()
+        self._write_progress()
         return annotation
 
     def publish_complete(self, corrected_labelmap: str | Path | bytes | bytearray) -> dict[str, Any]:
@@ -381,8 +485,20 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             raise
         self.final_annotation = annotation
         self.read_only = True
-        self.refresh_queue()
+        self._write_progress()
         return annotation
+
+    def reopen_complete(self, segmentation_source: str | Path | bytes | bytearray | None = None) -> ReviewState:
+        """Return the open completed case to the post-reveal correction phase."""
+
+        if self.storage is None or not self.read_only:
+            raise StorageError("a completed case must be open")
+        state = self.storage.reopen_complete(segmentation_source)
+        self.state = state
+        self.final_annotation = None
+        self.read_only = False
+        self._write_progress()
+        return state
 
     def load_registered_volumes(self) -> None:
         if not SLICER_AVAILABLE or self.manifest is None:
@@ -437,6 +553,8 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         layout_manager.setLayout(CUSTOM_LAYOUT_ID)
         for plane, view_name in VIEW_NAMES.items():
             widget = layout_manager.sliceWidget(view_name)
+            if widget is not None:
+                theme.style_slice_bar(widget)
             node = self.volume_nodes.get(plane)
             if widget is None or node is None:
                 continue
@@ -455,7 +573,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             raise StorageError("AI mask cannot be loaded before reveal")
         if self.ai_mask_node is None:
             self.ai_mask_node = slicer.util.loadLabelVolume(
-                str(self.manifest.ai_mask), {"name": "AI mask (hidden source)", "singleFile": True}
+                str(self.ai_mask_path()), {"name": "AI mask (hidden source)", "singleFile": True}
             )
             if self.ai_mask_node is None:
                 raise RuntimeError("Slicer could not load the AI mask")
@@ -526,14 +644,16 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
         # can be repaired without discarding the imported label segments.
         legacy_placeholder_ids = []
         for label_value, stable_id in FIXED_SEGMENT_IDS.items():
-            if label_value > 4:
-                continue
             legacy_id = LABEL_NAMES[label_value]
             segment = segmentation.GetSegment(legacy_id)
             if segment is not None and str(segment.GetName()).lower() == stable_id.lower():
                 legacy_placeholder_ids.append(legacy_id)
         if len(legacy_placeholder_ids) == 4:
             for segment_id in legacy_placeholder_ids:
+                segmentation.RemoveSegment(segment_id)
+
+        for segment_id in RETIRED_SEGMENT_IDS:
+            if segmentation.GetSegment(segment_id) is not None:
                 segmentation.RemoveSegment(segment_id)
 
         # Imported labelmaps may expose their values as names such as "1",
@@ -544,7 +664,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
             for index in range(segmentation.GetNumberOfSegments())
         ]
         for label_value, stable_id in FIXED_SEGMENT_IDS.items():
-            label_name = CORRECTION_LABEL_NAMES[label_value]
+            label_name = LABEL_NAMES[label_value]
             found_id = stable_id if segmentation.GetSegment(stable_id) is not None else None
             aliases = {
                 label_name.lower(),
@@ -575,7 +695,7 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
                 raise ValidationError(f"normalized segment is unavailable: {stable_id}")
             segment.SetName(label_name)
             colors = {1: (0.85, 0.50, 0.50), 2: (1.0, 0.85, 0.2), 3: (0.2, 0.85, 0.3),
-                      4: (0.4, 0.7, 1.0), 5: (0.7, 0.4, 0.95), 6: (1.0, 0.45, 0.1)}
+                      4: (0.4, 0.7, 1.0)}
             segment.SetColor(*colors[label_value])
         actual = [segmentation.GetNthSegmentID(index) for index in range(segmentation.GetNumberOfSegments())]
         validate_fixed_segment_ids(actual)
@@ -661,7 +781,19 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
     def _clear_loaded_nodes(self) -> None:
         if not SLICER_AVAILABLE:
             return
-        for node in list(self.volume_nodes.values()) + [self.ai_mask_node, self.segmentation_node, self.segment_editor_node]:
+        # Fill between slices and Grow from seeds keep an unapplied result in a
+        # "<segmentation> preview" node that only Apply or Cancel removes; it
+        # holds every segment, so left behind it draws this case's labels on
+        # the next case, blind phase included.
+        preview_node = None
+        if self.segment_editor_node is not None:
+            preview_node = self.segment_editor_node.GetNodeReference(EFFECT_PREVIEW_REFERENCE_ROLE)
+        for node in list(self.volume_nodes.values()) + [
+            self.ai_mask_node,
+            preview_node,
+            self.segmentation_node,
+            self.segment_editor_node,
+        ]:
             if node is not None and node.GetScene() is slicer.mrmlScene:
                 slicer.mrmlScene.RemoveNode(node)
         self.volume_nodes = {}
@@ -671,123 +803,6 @@ class MyomaReviewLiteLogic(ScriptedLoadableModuleLogic):
 
 
 if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
-
-    class LiteRoiLabelOverlay:
-        """Display stable M## labels on every view whose slice intersects a box."""
-
-        def __init__(self, widget: "MyomaReviewLiteWidget") -> None:
-            self.widget = widget
-            self.entries: dict[int, dict[str, Any]] = {}
-            self.views: dict[str, dict[str, Any]] = {}
-            self.enabled = True
-
-        def set_enabled(self, enabled: bool) -> None:
-            self.enabled = bool(enabled)
-            self.refresh()
-
-        def bind_views(self) -> None:
-            self.unbind_views()
-            manager = slicer.app.layoutManager()
-            for view_name in VIEW_NAMES.values():
-                slice_widget = manager.sliceWidget(view_name)
-                if slice_widget is None:
-                    continue
-                slice_view = slice_widget.sliceView()
-                renderer = slice_view.renderWindow().GetRenderers().GetFirstRenderer()
-                if renderer is None:
-                    continue
-                slice_node = slice_widget.sliceLogic().GetSliceNode()
-                observer = slice_node.AddObserver(
-                    vtk.vtkCommand.ModifiedEvent,
-                    lambda _caller, _event, name=view_name: self.refresh_view(name),
-                )
-                self.views[view_name] = {"view": slice_view, "renderer": renderer, "slice_node": slice_node, "observer": observer}
-            for entry in self.entries.values():
-                self._create_actors(entry)
-            self.refresh()
-
-        def unbind_views(self) -> None:
-            for entry in self.entries.values():
-                for view_name, actor in list(entry["actors"].items()):
-                    binding = self.views.get(view_name)
-                    if binding:
-                        binding["renderer"].RemoveActor2D(actor)
-                entry["actors"].clear()
-            for binding in self.views.values():
-                try:
-                    binding["slice_node"].RemoveObserver(binding["observer"])
-                except Exception:
-                    pass
-            self.views.clear()
-
-        def clear(self) -> None:
-            self.unbind_views()
-            for entry in self.entries.values():
-                node = entry["node"]
-                if entry.get("node_observer") is not None:
-                    node.RemoveObserver(entry["node_observer"])
-            self.entries.clear()
-
-        def track(self, node: Any, public_id: str) -> None:
-            self.untrack(node)
-            observer = node.AddObserver(vtk.vtkCommand.ModifiedEvent, lambda *_: self.refresh())
-            entry = {"node": node, "public_id": public_id, "actors": {}, "node_observer": observer}
-            self.entries[id(node)] = entry
-            self._create_actors(entry)
-            self.refresh()
-
-        def untrack(self, node: Any) -> None:
-            entry = self.entries.pop(id(node), None)
-            if not entry:
-                return
-            for view_name, actor in entry["actors"].items():
-                binding = self.views.get(view_name)
-                if binding:
-                    binding["renderer"].RemoveActor2D(actor)
-            try:
-                node.RemoveObserver(entry["node_observer"])
-            except Exception:
-                pass
-
-        def _create_actors(self, entry: dict[str, Any]) -> None:
-            for view_name, binding in self.views.items():
-                if view_name in entry["actors"]:
-                    continue
-                actor = vtk.vtkTextActor()
-                actor.SetInput(entry["public_id"])
-                actor.PickableOff()
-                prop = actor.GetTextProperty()
-                prop.SetFontSize(16)
-                prop.BoldOn()
-                prop.SetColor(1.0, 0.93, 0.2)
-                binding["renderer"].AddActor2D(actor)
-                entry["actors"][view_name] = actor
-
-        def refresh(self) -> None:
-            for view_name in tuple(self.views):
-                self.refresh_view(view_name)
-
-        def refresh_view(self, view_name: str) -> None:
-            binding = self.views.get(view_name)
-            if binding is None:
-                return
-            axis = 0 if "Sagittal" in view_name else 1 if "Coronal" in view_name else 2
-            offset = float(binding["slice_node"].GetSliceOffset())
-            for row, entry in enumerate(sorted(self.entries.values(), key=lambda item: item["public_id"])):
-                actor = entry["actors"].get(view_name)
-                node = entry["node"]
-                bounds = [0.0] * 6
-                try:
-                    node.GetRASBounds(bounds)
-                except Exception:
-                    actor.SetVisibility(False)
-                    continue
-                visible = bounds[axis * 2] - 1e-4 <= offset <= bounds[axis * 2 + 1] + 1e-4
-                actor.SetVisibility(bool(visible and self.enabled))
-                if visible:
-                    actor.SetDisplayPosition(8, 12 + row * 22)
-            binding["view"].scheduleRender()
-
 
     class LiteRoiClickSelector:
         """Reveal one myoma box's handles when the reader clicks that box.
@@ -859,6 +874,14 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
                 traceback.print_exc()
 
 
+    def _draw_blocked_actions(style: Any) -> int:
+        """The slice-view actions a box drag would trigger: left-drag window/level."""
+
+        mask = 0
+        for name in ("AdjustWindowLevelBackground", "AdjustWindowLevelForeground"):
+            mask |= int(getattr(style, name, 0))
+        return mask
+
     class LiteRectangleDrawTool:
         """Corner drag tool that restores every temporarily disabled action."""
 
@@ -894,7 +917,9 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
                     if scalar is not None and hasattr(scalar, "GetAdjustBackgroundWindowLevelEnabled"):
                         scalar_states = (bool(scalar.GetAdjustBackgroundWindowLevelEnabled()), bool(scalar.GetAdjustForegroundWindowLevelEnabled()))
                     self.styles.append((style, "actions", (states, scalar, scalar_states)))
-                    style.SetActionEnabled(mask, False)
+                    # Only plain left-drag window/level competes with drawing;
+                    # zoom, pan and slice scrolling stay usable while placing.
+                    style.SetActionEnabled(_draw_blocked_actions(style), False)
                     if scalar_states is not None:
                         scalar.SetAdjustBackgroundWindowLevelEnabled(False)
                         scalar.SetAdjustForegroundWindowLevelEnabled(False)
@@ -961,11 +986,14 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
             end = (int(position[0]), int(position[1]))
             if max(abs(end[0] - self.start_xy[0]), abs(end[1] - self.start_xy[1])) < 5:
                 self.cancel()
+                # draw_tool.active just dropped to false with no draft box to
+                # follow it, so restore the other boxes and the normal cursor.
+                self.widget._apply_roi_selection()
                 return
             geometry = self.widget.rectangle_geometry(view_name, self.start_xy, end)
             update_id = self.update_lesion_id
             self.cancel()
-            self.widget.accept_rectangle(geometry, update_id)
+            self.widget.accept_rectangle(geometry, update_id, view_name)
 
 
     class LiteShiftCrosshairToggle(qt.QObject):
@@ -1004,33 +1032,76 @@ if SLICER_AVAILABLE:  # pragma: no cover - exercised in Slicer smoke tests
             return False
 
 
-else:
+    class LiteMouseButtonDispatcher(qt.QObject):
+        """Fires a bound action when one of its bound mouse buttons is pressed.
 
-    class LiteRoiLabelOverlay:  # pragma: no cover - only a fallback symbol
-        def __init__(self, widget: Any) -> None:
+        Installed application-wide (like LiteShiftCrosshairToggle) so a side
+        button works no matter which slice view or control has focus. Only
+        buttons a reviewer has explicitly bound are intercepted; unbound
+        buttons -- and Left/Right, which are never bindable -- always pass
+        through untouched.
+        """
+
+        def __init__(self, widget: "MyomaReviewLiteWidget") -> None:
+            super().__init__()
             self.widget = widget
+            # Qt::MouseButton value -> method name on ``widget``.
+            self.bindings: dict[int, str] = {}
+            self.enabled = False
+            self.installed = False
 
-        def bind_views(self) -> None:
-            pass
+        def install(self) -> None:
+            if self.installed:
+                return
+            slicer.app.installEventFilter(self)
+            self.installed = True
 
-        def unbind_views(self) -> None:
-            pass
+        def uninstall(self) -> None:
+            if not self.installed:
+                return
+            slicer.app.removeEventFilter(self)
+            self.installed = False
 
-        def clear(self) -> None:
-            pass
+        def eventFilter(self, obj: Any, event: Any) -> bool:
+            if not self.enabled or event.type() != qt.QEvent.MouseButtonPress:
+                return False
+            method_name = self.bindings.get(int(event.button()))
+            if method_name is None:
+                return False
+            method = getattr(self.widget, method_name, None)
+            if method is None:
+                return False
+            try:
+                method()
+            except Exception:
+                traceback.print_exc()
+            # Consumed: every bindable button does nothing else in this module,
+            # so nothing downstream needs to see the press too.
+            return True
 
-        def track(self, node: Any, public_id: str) -> None:
-            pass
 
-        def untrack(self, node: Any) -> None:
-            pass
+    class LiteMouseButtonCapture(qt.QObject):
+        """One-shot app-wide filter that reports the next mouse button pressed.
 
-        def refresh(self) -> None:
-            pass
+        Used by the shortcuts dialog's "Set mouse button..." control: armed on
+        click, it removes itself and reports the very next button pressed
+        anywhere in the application, mirroring how QKeySequenceEdit captures a
+        key combination.
+        """
 
-        def set_enabled(self, enabled: bool) -> None:
-            pass
+        def __init__(self, on_captured: Callable[[int], None]) -> None:
+            super().__init__()
+            self.on_captured = on_captured
 
+        def eventFilter(self, obj: Any, event: Any) -> bool:
+            if event.type() == qt.QEvent.MouseButtonPress:
+                slicer.app.removeEventFilter(self)
+                self.on_captured(int(event.button()))
+                return True
+            return False
+
+
+else:
 
     class LiteRoiClickSelector:  # pragma: no cover - only a fallback symbol
         def __init__(self, widget: Any) -> None:
@@ -1081,17 +1152,15 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.roi_outline_sources: dict[str, Any] = {}
         self.roi_live_sync: tuple[Any, int] | None = None
         self.roi_boxes_visible = True
+        # Q hides every box on the box page too; each page keeps its own choice.
+        self.box_page_boxes_shown = True
         self.active_roi_id: str | None = None
         self.active_roi_geometry: BoxGeometry | None = None
-        # Gates the blind page between "boxing" and "FIGO typing": the reader
-        # places every myoma box first, then explicitly moves on to FIGO.
-        self._boxing_stage_done = False
         self.roi_click_baseline: BoxGeometry | None = None
         self.committing_roi_geometry = False
         self.roi_transaction = RoiTransaction()
         self.roi_draft_node: Any = None
         self.roi_draft_update_id: str | None = None
-        self.roi_overlay: LiteRoiLabelOverlay | None = None
         self.draw_tool: LiteRectangleDrawTool | None = None
         self.click_selector: LiteRoiClickSelector | None = None
         self.segment_editor_widget: Any = None
@@ -1102,22 +1171,58 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.annotation_undo: list[dict[str, Any]] = []
         self.annotation_redo: list[dict[str, Any]] = []
         self.shortcuts: list[Any] = []
+        self._released_action_shortcuts: list[tuple[Any, list[Any]]] = []
+        self.shortcut_bindings: dict[str, Any] = {}
+        self.mouse_button_bindings: dict[str, int] = {}
+        self.mouse_button_dispatcher: Any = None
         self.view_tools: Any = None
         self.correction_tools: Any = None
         self.shift_crosshair_toggle: Any = None
         self._case_filter = DEFAULT_CASE_FILTER
+        # Slicer turns dark while this module is shown; see theme.DarkAppStyle.
+        self.app_style = theme.DarkAppStyle()
+        # ...and shows our name and logo instead of Slicer's; see theme.AppBranding.
+        self.app_branding = theme.AppBranding(
+            str(Path(__file__).resolve().parent / "Resources" / "Icons" / "MyomaReviewLite.svg")
+        )
+        self._hidden_panel_chrome: list[Any] = []
+        self._close_filter: Any = None
+        # Placing/redrawing a box swaps the slice-view cursor for a small
+        # yellow dot and hides every other myoma box so the reader gets an
+        # uncluttered view of the anatomy underneath; see _apply_roi_selection
+        # and _has_unresolved_roi.
+        self._place_box_cursor: Any = None
+        self._box_cursor_applied = False
+        # The on-image FIGO card (built in _build_ui), the view it sits in,
+        # and the observers that keep it beside its box.
+        self.figo_card: FigoCard | None = None
+        self._figo_card_view: str | None = None
+        # The saved FIGO the open card last showed; refresh_ui only pushes a
+        # different one, so a half-made 8/Hybrid choice survives a refresh.
+        self._figo_card_figo: dict[str, Any] | None = None
+        self._figo_card_observers: list[tuple[Any, int]] = []
+        self._last_view_name: str | None = None
+        self._card_escape_shortcuts: dict[str, Any] = {}
+
+    def onReload(self) -> None:
+        # Slicer's Reload re-reads only this file. Drop the helper package too,
+        # or the new widget code runs against the old MyomaReviewLiteLib classes.
+        for name in [
+            name for name in sys.modules
+            if name == "MyomaReviewLiteLib" or name.startswith("MyomaReviewLiteLib.")
+        ]:
+            del sys.modules[name]
+        super().onReload()
 
     def setup(self) -> None:
         super().setup()
         if not SLICER_AVAILABLE:
             return
+        # Before the stylesheet asks for it; a failed load falls back to Segoe UI.
+        load_bundled_fonts(Path(__file__).resolve().parent / "Resources" / "Fonts")
         self._build_ui()
-        for key, callback in (("Ctrl+Z", self.on_undo), ("Ctrl+Y", self.on_redo), ("Ctrl+Shift+Z", self.on_redo)):
-            shortcut = qt.QShortcut(qt.QKeySequence(key), slicer.util.mainWindow())
-            shortcut.connect("activated()", callback)
-            shortcut.enabled = False
-            self.shortcuts.append(shortcut)
-        self.roi_overlay = LiteRoiLabelOverlay(self)
+        self._install_shortcuts()
+        self._install_mouse_bindings()
         self.draw_tool = LiteRectangleDrawTool(self)
         self.click_selector = LiteRoiClickSelector(self)
         self._enable_synced_crosshair()
@@ -1132,6 +1237,81 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         launch_path = os.environ.get("MYOMA_REVIEW_LITE_CASE", "").strip()
         if launch_path:
             qt.QTimer.singleShot(0, lambda path=launch_path: self.open_case(path))
+
+    def _shortcut_setting_key(self, action_id: str) -> str:
+        return f"{SHORTCUT_SETTINGS_PREFIX}{action_id}"
+
+    def _shortcut_key_sequence(self, settings: Any, action_id: str, default_key: str) -> str:
+        stored = settings.value(self._shortcut_setting_key(action_id), default_key)
+        return str(stored) if stored is not None else ""
+
+    def _install_shortcuts(self) -> None:
+        # Bindings are per-reviewer: each one is read from QSettings (falling
+        # back to the factory default the first time) so the panel opened via
+        # "Keyboard shortcuts..." can rebind them without a restart.
+        settings = qt.QSettings()
+        for action_id, _label, default_key, method_name, *_ in SHORTCUT_ACTIONS:
+            key_text = self._shortcut_key_sequence(settings, action_id, default_key)
+            shortcut = qt.QShortcut(qt.QKeySequence(key_text), slicer.util.mainWindow())
+            shortcut.connect("activated()", getattr(self, method_name))
+            shortcut.enabled = False
+            self.shortcuts.append(shortcut)
+            self.shortcut_bindings[action_id] = shortcut
+        self._refresh_shortcut_button_labels()
+
+    def _mouse_button_setting_key(self, action_id: str) -> str:
+        return f"{MOUSE_BUTTON_SETTINGS_PREFIX}{action_id}"
+
+    def _mouse_button_value(self, settings: Any, action_id: str) -> int:
+        # No factory default here (unlike the keyboard bindings): not every
+        # mouse has a spare button, so a reviewer opts in explicitly instead
+        # of inheriting a binding that might not exist on their hardware.
+        stored = settings.value(self._mouse_button_setting_key(action_id), 0)
+        try:
+            return int(stored)
+        except (TypeError, ValueError):
+            return 0
+
+    def _install_mouse_bindings(self) -> None:
+        settings = qt.QSettings()
+        self.mouse_button_dispatcher = LiteMouseButtonDispatcher(self)
+        for action_id, _label, _default_key, method_name, *_ in SHORTCUT_ACTIONS:
+            value = self._mouse_button_value(settings, action_id)
+            self.mouse_button_bindings[action_id] = value
+            if value:
+                self.mouse_button_dispatcher.bindings[value] = method_name
+        self.mouse_button_dispatcher.install()
+        self._refresh_shortcut_button_labels()
+
+    def _refresh_shortcut_button_labels(self) -> None:
+        # Keeps each toolbar button's label showing its *current* binding
+        # (which may differ from the factory default once a reviewer has
+        # rebound it), rather than a stale hint baked in at build time.
+        for action_id, _label, _default_key, _method_name, button_attr, base_text in SHORTCUT_ACTIONS:
+            if button_attr is None:
+                continue
+            button = getattr(self, button_attr, None)
+            if button is None:
+                continue
+            shortcut = self.shortcut_bindings.get(action_id)
+            key_text = shortcut.key.toString() if shortcut is not None else ""
+            mouse_value = self.mouse_button_bindings.get(action_id, 0)
+            mouse_text = _mouse_button_label(mouse_value) if mouse_value else ""
+            hint = ", ".join(text for text in (key_text, mouse_text) if text)
+            button.text = f"{base_text} ({hint})" if hint else base_text
+        if getattr(self, "correction_panel", None) is not None:
+            keys = (("toggle_ai_mask", "mask"), ("show_myomas", "myomas"), ("toggle_roi_boxes", "boxes"))
+            bound = [
+                (self.shortcut_bindings[action_id].key.toString(), text)
+                for action_id, text in keys
+                if self.shortcut_bindings.get(action_id) is not None
+            ]
+            self.correction_panel.set_key_hint(" · ".join(f"{key} {text}" for key, text in bound if key))
+            self.correction_panel.set_segment_keys({
+                FIXED_SEGMENT_IDS[value]: self.shortcut_bindings[f"segment_{value}"].key.toString()
+                for value in (1, 2, 3, 4)
+                if self.shortcut_bindings.get(f"segment_{value}") is not None
+            })
 
     def _enable_synced_crosshair(self) -> None:
         # A small "+" that follows the mouse in whichever slice view is
@@ -1200,48 +1380,89 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 pass
 
     def _hide_module_panel_boilerplate(self) -> None:
-        # Stock Slicer boilerplate that has nothing to do with reading:
-        # the "Help & Acknowledgement" collapsible (built by the module
-        # panel itself from parent.helpText/acknowledgementText) and the
-        # "Reload & Test" collapsible (added by ScriptedLoadableModuleWidget
-        # only when Developer Mode is on, which some reading workstations
-        # have enabled). Both just eat vertical space above the actual
-        # module UI, so they are hidden the same way _hide_data_probe hides
-        # the Data Probe panel.
+        # The "Reload & Test" collapsible is added by ScriptedLoadableModuleWidget
+        # only when Developer Mode is on, which some reading workstations have
+        # enabled; it has nothing to do with reading. Slicer's own logo and
+        # "Help & Acknowledgement" box are handled in _hide_panel_chrome.
         if hasattr(self, "reloadCollapsibleButton"):
             try:
                 self._hide_widget(self.reloadCollapsibleButton)
             except Exception:
                 pass
+
+    # Slicer's own chrome around the module: the menu bar, the toolbars, the
+    # status bar (only its error-log button lives there), the
+    # logo above the module panel and the panel's "Help & Acknowledgement"
+    # box. The panel shows the help box again every time a module is
+    # selected, so all of it is hidden on every enter and given back on exit,
+    # where other modules expect it. Slicer saves which toolbars are shown when
+    # its window closes, so they also come back just before that (see
+    # _make_close_filter); otherwise plain Slicer would start without them.
+    # The logo spot stays: theme.AppBranding shows our name and logo there.
+    PANEL_CHROME_NAMES = ("HelpCollapsibleButton",)
+
+    def _panel_chrome_widgets(self) -> list[Any]:
+        try:
+            main_window = slicer.util.mainWindow()
+        except Exception:
+            return []
+        if main_window is None:
+            return []
+        widgets = [main_window.menuBar(), main_window.statusBar()]
+        widgets += [bar for bar in main_window.findChildren(qt.QToolBar) if bar.parent() is main_window]
+        for name in self.PANEL_CHROME_NAMES:
+            widget = main_window.findChild(qt.QWidget, name)
+            if widget is not None:
+                widgets.append(widget)
+        return widgets
+
+    def _hide_panel_chrome(self) -> None:
+        for widget in self._panel_chrome_widgets():
+            if widget is None or widget.isHidden():
+                continue
+            widget.visible = False
+            if not any(widget is hidden for hidden in self._hidden_panel_chrome):
+                self._hidden_panel_chrome.append(widget)
+        self._set_close_filter(True)
+
+    def _restore_panel_chrome(self) -> None:
+        for widget in self._hidden_panel_chrome:
+            try:
+                widget.visible = True
+            except Exception:
+                pass
+        self._hidden_panel_chrome = []
+        self._set_close_filter(False)
+
+    def _set_close_filter(self, on: bool) -> None:
         try:
             main_window = slicer.util.mainWindow()
         except Exception:
             return
         if main_window is None:
             return
-        seen: set[int] = set()
+        if self._close_filter is None:
+            self._close_filter = self._make_close_filter()
         try:
-            widget = slicer.util.findChild(main_window, "HelpCollapsibleButton")
+            if on:
+                main_window.installEventFilter(self._close_filter)
+            else:
+                main_window.removeEventFilter(self._close_filter)
         except Exception:
-            widget = None
-        if widget is not None:
-            seen.add(id(widget))
-            self._hide_widget(widget)
-        try:
-            candidates = list(slicer.util.findChildren(main_window, className="ctkCollapsibleButton"))
-        except Exception:
-            candidates = []
-        hidden_titles = {"help & acknowledgement", "reload && test", "reload & test"}
-        for candidate in candidates:
-            if id(candidate) in seen:
-                continue
-            try:
-                title = str(candidate.text).strip().lower()
-            except Exception:
-                continue
-            if title in hidden_titles:
-                seen.add(id(candidate))
-                self._hide_widget(candidate)
+            pass
+
+    def _make_close_filter(self) -> Any:
+        """Give Slicer its chrome back before the closing window saves its layout."""
+
+        widget = self
+
+        class _CloseFilter(qt.QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == qt.QEvent.Close:
+                    widget._restore_panel_chrome()
+                return False
+
+        return _CloseFilter()
 
     @staticmethod
     def _hide_widget(widget: Any) -> None:
@@ -1290,45 +1511,95 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.shift_crosshair_toggle.install()
 
     def _build_ui(self) -> None:
+        # The look lives in MyomaReviewLiteLib/theme.py: widgets here only get
+        # a "role" and the panel stylesheet decides how each role is drawn.
+        self.parent.objectName = theme.PANEL_OBJECT_NAME
+        self.parent.setAttribute(qt.Qt.WA_StyledBackground, True)
+        self.parent.setStyleSheet(theme.PANEL_QSS)
+        self.layout.setContentsMargins(10, 8, 10, 8)
+
+        # --- Header: the open case between previous / next case buttons ---
         header = qt.QHBoxLayout()
-        self.manifest_button = qt.QPushButton("Open case manifest")
-        self.manifest_button.connect("clicked()", self.choose_manifest)
-        header.addWidget(self.manifest_button)
-        self.case_header = qt.QLabel("No case open")
-        header.addWidget(self.case_header, 1)
+        header.setSpacing(6)
+        self.prev_case_button = self._icon_button("chevron-left.svg", "Previous case", self.on_previous_case)
+        header.addWidget(self.prev_case_button)
+        title_block = qt.QVBoxLayout()
+        title_block.setSpacing(0)
+        self.study_label = theme.set_role(qt.QLabel("Myoma review"), "title")
+        self.study_label.alignment = qt.Qt.AlignCenter
+        title_block.addWidget(self.study_label)
+        self.case_header = theme.set_role(qt.QLabel("No case open"), "muted")
+        self.case_header.alignment = qt.Qt.AlignCenter
+        title_block.addWidget(self.case_header)
+        header.addLayout(title_block, 1)
+        self.next_case_button = self._icon_button("chevron-right.svg", "Next case", self.on_next_case)
+        header.addWidget(self.next_case_button)
         self.layout.addLayout(header)
-        self.status_label = qt.QLabel("Open one prepared case to begin.")
-        self.status_label.wordWrap = True
-        self.layout.addWidget(self.status_label)
 
-        # Two focus states, not one long scroll: picking a case and
-        # annotating it are different tasks and never need to be on screen
-        # at once. Choosing a case jumps here to "Annotation"; see
-        # _focus_annotation_tab. Ported from the BratsReviewLite
-        # Subjects/Annotation tab split.
-        self.tab_widget = qt.QTabWidget()
-        self.layout.addWidget(self.tab_widget, 1)
+        # --- Queue strip: progress at a glance; clicking it opens the drawer ---
+        self.queue_toggle = theme.set_role(qt.QToolButton(), "strip")
+        self.queue_toggle.checkable = True
+        self.queue_toggle.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self.queue_toggle.setMinimumHeight(52)
+        self.queue_toggle.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.queue_toggle.connect("toggled(bool)", self._on_queue_toggled)
+        strip_layout = qt.QVBoxLayout(self.queue_toggle)
+        strip_layout.setContentsMargins(10, 8, 10, 8)
+        strip_layout.setSpacing(6)
+        strip_row = qt.QHBoxLayout()
+        strip_row.addWidget(qt.QLabel("Queue"))
+        strip_row.addStretch(1)
+        self.progress_label = theme.set_role(qt.QLabel(""), "muted")
+        strip_row.addWidget(self.progress_label)
+        arrow = qt.QLabel()
+        arrow.setPixmap(qt.QIcon(str(ICON_DIR / "chevron-down.svg")).pixmap(14, 14))
+        strip_row.addWidget(arrow)
+        strip_layout.addLayout(strip_row)
+        self.progress_bar = qt.QFrame()
+        self.progress_bar.setFixedHeight(4)
+        self.progress_bar.setStyleSheet(f"background: {theme.FIELD}; border-radius: 2px;")
+        bar_layout = qt.QHBoxLayout(self.progress_bar)
+        bar_layout.setContentsMargins(0, 0, 0, 0)
+        bar_layout.setSpacing(0)
+        self.progress_segments: dict[QueueStatus, Any] = {}
+        for status in (QueueStatus.COMPLETE, QueueStatus.IN_PROGRESS, QueueStatus.ATTENTION, QueueStatus.NEW):
+            segment = qt.QFrame()
+            colour = theme.STATUS_COLOURS[status.value][0]
+            segment.setStyleSheet(f"background: {colour}; border-radius: 0px;")
+            segment.visible = False
+            bar_layout.addWidget(segment)
+            self.progress_segments[status] = segment
+        strip_layout.addWidget(self.progress_bar)
+        # The strip's labels are decoration: clicks belong to the button.
+        for child in self.queue_toggle.findChildren(qt.QWidget):
+            child.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+        self.layout.addWidget(self.queue_toggle)
 
-        self.cases_tab = qt.QWidget()
-        cases_tab_layout = qt.QVBoxLayout(self.cases_tab)
-        self.tab_widget.addTab(self.cases_tab, "Cases")
-
+        # Picking a case and annotating it never need to be on screen at once,
+        # so the drawer takes the annotation's place while it is open.
+        self.content_stack = qt.QStackedWidget()
+        self.layout.addWidget(self.content_stack, 1)
         self.annotation_tab = qt.QWidget()
         annotation_layout = qt.QVBoxLayout(self.annotation_tab)
-        self.tab_widget.addTab(self.annotation_tab, "Annotation")
+        annotation_layout.setContentsMargins(0, 10, 0, 0)
+        annotation_layout.setSpacing(8)
+        self.content_stack.addWidget(self.annotation_tab)
+        self.queue_drawer = qt.QWidget()
+        cases_layout = qt.QVBoxLayout(self.queue_drawer)
+        cases_layout.setContentsMargins(0, 10, 0, 0)
+        cases_layout.setSpacing(8)
+        self.content_stack.addWidget(self.queue_drawer)
 
-        cases_box = qt.QGroupBox("Cases")
-        cases_layout = qt.QVBoxLayout(cases_box)
-        self.progress_label = qt.QLabel("")
-        cases_layout.addWidget(self.progress_label)
-
+        # --- Queue drawer: filter pills, search, grouped case rows, manifest ---
         filter_row = qt.QHBoxLayout()
+        filter_row.setSpacing(6)
         self.filter_buttons: dict[str, Any] = {}
         for title, key in CASE_FILTERS:
-            button = qt.QToolButton()
+            button = theme.set_role(qt.QToolButton(), "pill")
             button.text = title
             button.checkable = True
             button.checked = key == DEFAULT_CASE_FILTER
+            button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
             button.connect(
                 "clicked()", lambda _checked=False, name=key: self.on_case_filter(name)
             )
@@ -1342,193 +1613,540 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.case_search.connect("textChanged(QString)", self.on_case_search)
         cases_layout.addWidget(self.case_search)
 
-        self.case_list = qt.QListWidget()
-        self.case_list.alternatingRowColors = True
+        self.case_list = theme.set_role(qt.QListWidget(), "rows")
+        self.case_list.setItemDelegate(theme.make_row_delegate(self.case_list))
+        self.case_list.setMouseTracking(True)
         self.case_list.minimumHeight = 200
         self.case_list.connect("itemClicked(QListWidgetItem*)", self.on_case_chosen)
-        # The list is this tab's whole job now, so let it claim the room.
         cases_layout.addWidget(self.case_list, 1)
-        cases_tab_layout.addWidget(cases_box, 1)
+        self.case_empty_label = theme.set_role(qt.QLabel("No cases match"), "muted")
+        self.case_empty_label.alignment = qt.Qt.AlignCenter
+        self.case_empty_label.visible = False
+        cases_layout.addWidget(self.case_empty_label)
+
+        manifest_row = qt.QHBoxLayout()
+        self.manifest_label = theme.set_role(qt.QLabel(""), "muted")
+        manifest_row.addWidget(self.manifest_label, 1)
+        self.manifest_button = theme.set_role(qt.QPushButton("Open case manifest"), "link")
+        self.manifest_button.setCursor(qt.QCursor(qt.Qt.PointingHandCursor))
+        self.manifest_button.connect("clicked()", self.choose_manifest)
+        manifest_row.addWidget(self.manifest_button)
+        if _studio_mode():
+            self.manifest_button.setVisible(False)
+        cases_layout.addLayout(manifest_row)
 
         self.view_tools = ReviewViewTools(self.logic, self.parent)
         # Lets an Alt-drag disarm the Segment Editor for the drag's duration,
         # so adjusting the contrast can never also paint.
         self.view_tools.alt_drag.editor_provider = lambda: self.segment_editor_widget
-        annotation_layout.addWidget(self.view_tools.widget)
-        history_row = qt.QHBoxLayout()
-        self.undo_button = qt.QPushButton("Undo (Ctrl+Z)")
-        self.undo_button.connect("clicked()", self.on_undo)
-        self.redo_button = qt.QPushButton("Redo (Ctrl+Y)")
-        self.redo_button.connect("clicked()", self.on_redo)
-        history_row.addWidget(self.undo_button)
-        history_row.addWidget(self.redo_button)
-        annotation_layout.addLayout(history_row)
+        # No on-screen contrast panel: ReviewViewTools no longer builds one
+        # (Alt + left-drag in a slice view is the only way to adjust
+        # window/level now, see AltDragWindowLevel), so there is nothing of
+        # its to add to the layout here.
+
+        # --- Annotation: Box / Segment switch, read-only banner, the page, the action bar ---
+        # Segment stays off until AI is revealed; from then on both pages are open.
+        self.mode_bar = theme.set_role(qt.QFrame(), "switch")
+        mode_layout = qt.QHBoxLayout(self.mode_bar)
+        mode_layout.setContentsMargins(3, 3, 3, 3)
+        mode_layout.setSpacing(3)
+        self.mode_buttons: dict[int, Any] = {}
+        for page, title in ((BOX_PAGE, "Box"), (SEGMENT_PAGE, "Segment")):
+            button = theme.set_role(qt.QToolButton(), "switch")
+            button.text = title
+            button.checkable = True
+            button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+            button.connect("clicked()", lambda page=page: self._on_mode_clicked(page))
+            mode_layout.addWidget(button)
+            self.mode_buttons[page] = button
+        self.box_mode_button = self.mode_buttons[BOX_PAGE]
+        self.segment_mode_button = self.mode_buttons[SEGMENT_PAGE]
+        self.segment_mode_button.toolTip = "Opens once AI is revealed"
+        annotation_layout.addWidget(self.mode_bar)
+
+        self.readonly_banner = theme.set_role(qt.QFrame(), "banner")
+        banner_layout = qt.QVBoxLayout(self.readonly_banner)
+        banner_layout.setContentsMargins(12, 8, 12, 8)
+        banner_layout.setSpacing(2)
+        banner_layout.addWidget(theme.set_role(qt.QLabel("Finished"), "banner-title"))
+        banner_layout.addWidget(theme.set_role(qt.QLabel("Read-only. Nothing here can be changed."), "banner-text"))
+        self.readonly_banner.visible = False
+        annotation_layout.addWidget(self.readonly_banner)
+
+        # The case comment stays folded away until the reader wants it: an
+        # icon in the action bar opens it as a pop-over just above the bar
+        # (_position_comment_overlay), covering the page instead of pushing it.
+        self.comment_toggle = theme.set_role(qt.QToolButton(), "icon")
+        self.comment_toggle.checkable = True
+        self.comment_toggle.toolButtonStyle = qt.Qt.ToolButtonIconOnly
+        self.comment_toggle.setIconSize(qt.QSize(16, 16))
+        self.comment_toggle.setFixedSize(38, 34)
+        self.comment_toggle.connect("toggled(bool)", self.on_comment_toggled)
+        self.case_comment_box = theme.set_role(qt.QFrame(self.annotation_tab), "popover")
+        comment_box_layout = qt.QVBoxLayout(self.case_comment_box)
+        comment_box_layout.setContentsMargins(10, 10, 10, 10)
+        comment_box_layout.setSpacing(6)
+        comment_title_row = qt.QHBoxLayout()
+        comment_title_row.addWidget(theme.set_role(qt.QLabel("Case comment"), "strong"))
+        comment_title_row.addStretch(1)
+        comment_title_row.addWidget(theme.set_role(qt.QLabel("Esc to close"), "hint-muted"))
+        comment_box_layout.addLayout(comment_title_row)
+        self.case_comment_edit = qt.QPlainTextEdit()
+        self.case_comment_edit.placeholderText = "Comment on the whole case"
+        self.case_comment_edit.setFixedHeight(88)
+        comment_box_layout.addWidget(self.case_comment_edit)
+        self.case_comment_box.visible = False
+        self.case_comment_edit.visible = False
+        comment_escape = qt.QShortcut(qt.QKeySequence("Esc"), self.case_comment_box)
+        comment_escape.context = qt.Qt.WidgetWithChildrenShortcut
+        comment_escape.connect("activated()", lambda: setattr(self.comment_toggle, "checked", False))
+        self._comment_overlay_filter = self._make_comment_overlay_filter()
 
         self.page_stack = qt.QStackedWidget()
+        self.page_stack.connect("currentChanged(int)", lambda _index: self._on_page_changed())
         annotation_layout.addWidget(self.page_stack, 1)
+        # The blinded annotation page: boxes, FIGO (on the image card) and
+        # early stops live here; the same page is used after reveal.
         blind = qt.QWidget()
         blind_layout = qt.QVBoxLayout(blind)
-        self.blind_stack = qt.QStackedWidget()
-        blind_layout.addWidget(self.blind_stack, 1)
-
-        # --- Stage 1: myoma boxing. The reader places every box on this
-        # page first; FIGO typing only becomes reachable once they are done. ---
-        boxing_page = qt.QWidget()
-        boxing_layout = qt.QVBoxLayout(boxing_page)
-        self.lesion_list = qt.QListWidget()
+        blind_layout.setContentsMargins(0, 0, 0, 0)
+        blind_layout.setSpacing(6)
+        myoma_header = qt.QHBoxLayout()
+        self.myoma_section_label = theme.set_role(qt.QLabel("MYOMAS · 0"), "section")
+        myoma_header.addWidget(self.myoma_section_label)
+        myoma_header.addStretch(1)
+        self.myoma_edit_hint = theme.set_role(qt.QLabel("Click a box in the views to edit"), "hint-muted")
+        myoma_header.addWidget(self.myoma_edit_hint, 0, qt.Qt.AlignBottom)
+        blind_layout.addLayout(myoma_header)
+        # In place of the empty list until the first box is drawn.
+        self.empty_state = qt.QWidget()
+        empty_slot = qt.QVBoxLayout(self.empty_state)
+        empty_slot.setContentsMargins(0, 0, 0, 0)
+        empty_card = theme.set_role(qt.QFrame(), "empty")
+        empty_slot.addWidget(empty_card)
+        empty_slot.addStretch(1)
+        empty_layout = qt.QVBoxLayout(empty_card)
+        empty_layout.setContentsMargins(12, 18, 12, 18)
+        empty_layout.setSpacing(6)
+        empty_title = theme.set_role(qt.QLabel("No boxes yet"), "strong")
+        empty_text = theme.set_role(qt.QLabel("Draw a box around each myoma in any view."), "muted")
+        empty_text.wordWrap = True
+        for label in (empty_title, empty_text):
+            label.alignment = qt.Qt.AlignCenter
+            empty_layout.addWidget(label)
+        self.empty_add_button = theme.set_role(qt.QPushButton("＋  Add myoma box"), "primary")
+        self.empty_add_button.connect("clicked()", self.on_add_box)
+        empty_layout.addWidget(self.empty_add_button, 0, qt.Qt.AlignHCenter)
+        self.empty_state.visible = False
+        blind_layout.addWidget(self.empty_state, 1)
+        self.lesion_list = theme.set_role(qt.QListWidget(), "rows")
+        self.lesion_list.setItemDelegate(theme.make_row_delegate(self.lesion_list))
+        self.lesion_list.setMouseTracking(True)
         self.lesion_list.connect("currentRowChanged(int)", self._on_lesion_row_changed)
-        boxing_layout.addWidget(self.lesion_list, 1)
-        actions = qt.QHBoxLayout()
-        self.add_button = qt.QPushButton("Add myoma box")
+        self.lesion_list.connect("itemClicked(QListWidgetItem*)", self._on_lesion_item_clicked)
+        self._press_hit_current_row = False
+        self._lesion_list_filter = self._make_lesion_list_filter()
+        self.lesion_list.viewport().installEventFilter(self._lesion_list_filter)
+        list_escape = qt.QShortcut(qt.QKeySequence("Esc"), self.lesion_list)
+        list_escape.context = qt.Qt.WidgetShortcut
+        list_escape.connect("activated()", self.clear_lesion_selection)
+        blind_layout.addWidget(self.lesion_list, 1)
+        self.box_actions = qt.QWidget()
+        actions = qt.QHBoxLayout(self.box_actions)
+        actions.setContentsMargins(0, 0, 0, 0)
+        self.add_button = theme.set_role(qt.QPushButton("＋  Add myoma box"), "ghost")
         self.add_button.connect("clicked()", self.on_add_box)
-        self.redraw_button = qt.QPushButton("Redraw")
-        self.redraw_button.connect("clicked()", self.on_redraw_box)
         self.delete_button = qt.QPushButton("Delete")
+        self.delete_button.toolTip = "Delete the selected myoma box"
         self.delete_button.connect("clicked()", self.on_delete_box)
-        for button in (self.add_button, self.redraw_button, self.delete_button):
-            actions.addWidget(button)
-        boxing_layout.addLayout(actions)
-        roi_transaction_actions = qt.QHBoxLayout()
-        self.save_roi_button = qt.QPushButton("Save ROI")
-        self.save_roi_button.enabled = False
+        actions.addWidget(self.add_button, 1)
+        actions.addWidget(self.delete_button)
+        blind_layout.addWidget(self.box_actions)
+        # Only shown while a box is being placed or redrawn.
+        self.roi_edit_bar = qt.QWidget()
+        roi_transaction_actions = qt.QHBoxLayout(self.roi_edit_bar)
+        roi_transaction_actions.setContentsMargins(0, 0, 0, 0)
+        self.save_roi_button = theme.set_role(qt.QPushButton("Save ROI"), "primary")
         self.save_roi_button.connect("clicked()", self.save_roi_edit)
         self.cancel_roi_button = qt.QPushButton("Cancel ROI")
-        self.cancel_roi_button.enabled = False
         self.cancel_roi_button.connect("clicked()", self.cancel_roi_edit)
-        roi_transaction_actions.addWidget(self.save_roi_button)
+        roi_transaction_actions.addWidget(self.save_roi_button, 1)
         roi_transaction_actions.addWidget(self.cancel_roi_button)
-        boxing_layout.addLayout(roi_transaction_actions)
-        self.zero_check = qt.QCheckBox("Confirm zero myomas")
+        blind_layout.addWidget(self.roi_edit_bar)
+        self._set_roi_edit_buttons(False)
+        # Only asked before reveal; once AI is shown the answer is settled.
+        # Folded to one line unless the case has no boxes (_refresh_nothing_to_box).
+        self.nothing_to_box_section = theme.set_role(qt.QFrame(), "card")
+        nothing_layout = qt.QVBoxLayout(self.nothing_to_box_section)
+        nothing_layout.setContentsMargins(10, 6, 10, 8)
+        nothing_layout.setSpacing(6)
+        blind_layout.addWidget(self.nothing_to_box_section)
+        self.nothing_to_box_toggle = theme.set_role(qt.QToolButton(), "fold")
+        self.nothing_to_box_toggle.text = "Nothing to box? No uterus, wrong image, cannot assess"
+        self.nothing_to_box_toggle.checkable = True
+        self.nothing_to_box_toggle.toolButtonStyle = qt.Qt.ToolButtonTextBesideIcon
+        self.nothing_to_box_toggle.arrowType = qt.Qt.RightArrow
+        self.nothing_to_box_toggle.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self.nothing_to_box_toggle.connect("toggled(bool)", self._set_nothing_to_box_open)
+        nothing_layout.addWidget(self.nothing_to_box_toggle)
+        self.nothing_to_box_body = qt.QWidget()
+        body_layout = qt.QVBoxLayout(self.nothing_to_box_body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(6)
+        self.zero_check = theme.set_role(qt.QPushButton(), "choice")
+        self.zero_check.checkable = True
         self.zero_check.connect("toggled(bool)", self.on_zero_toggled)
-        boxing_layout.addWidget(self.zero_check)
-        self.continue_to_figo_button = qt.QPushButton("Done boxing → continue to FIGO typing")
-        self.continue_to_figo_button.connect("clicked()", self.on_continue_to_figo)
-        boxing_layout.addWidget(self.continue_to_figo_button)
-        self.blind_stack.addWidget(boxing_page)
-
-        # --- Stage 2: FIGO typing. Reachable only after boxing is done; the
-        # FIGO/type values are chosen from fixed options, never free-typed. ---
-        figo_page = qt.QWidget()
-        figo_page_layout = qt.QVBoxLayout(figo_page)
-        self.back_to_boxing_button = qt.QPushButton("← Back to myoma boxes")
-        self.back_to_boxing_button.connect("clicked()", self.on_back_to_boxing)
-        figo_page_layout.addWidget(self.back_to_boxing_button)
-        figo_form = qt.QFormLayout()
-        self.figo_lesion_combo = qt.QComboBox()
-        self.figo_lesion_combo.connect("currentIndexChanged(int)", self._on_figo_lesion_changed)
-        figo_form.addRow("Selected lesion", self.figo_lesion_combo)
-        self.figo_kind_combo = qt.QComboBox()
-        for kind in FIGOKind:
-            self.figo_kind_combo.addItem(kind.value, kind.value)
-        self.figo_kind_combo.connect("currentIndexChanged(int)", self._refresh_figo_controls)
-        figo_form.addRow("FIGO kind", self.figo_kind_combo)
-        self.figo_type_combo = qt.QComboBox()
-        for type_value in range(9):
-            self.figo_type_combo.addItem(str(type_value), type_value)
-        self.figo_type_combo.connect("currentIndexChanged(int)", self._refresh_figo_controls)
-        figo_form.addRow("Standard type", self.figo_type_combo)
-        self.figo_location_combo = qt.QComboBox()
-        for location in ("cervical", "round_ligament", "broad_ligament", "parasitic_or_other_extrauterine"):
-            self.figo_location_combo.addItem(location, location)
-        figo_form.addRow("Type 8 location", self.figo_location_combo)
-        self.figo_endometrial_combo = qt.QComboBox()
-        for type_value in range(9):
-            self.figo_endometrial_combo.addItem(str(type_value), type_value)
-        figo_form.addRow("Hybrid endometrial", self.figo_endometrial_combo)
-        self.figo_serosal_combo = qt.QComboBox()
-        for type_value in range(9):
-            self.figo_serosal_combo.addItem(str(type_value), type_value)
-        figo_form.addRow("Hybrid serosal", self.figo_serosal_combo)
-        self.figo_reason_combo = qt.QComboBox()
-        for reason in ("endometrial_interface_unclear", "serosal_interface_unclear", "both_interfaces_unclear", "otherwise_not_classifiable"):
-            self.figo_reason_combo.addItem(reason, reason)
-        figo_form.addRow("Uncertain reason", self.figo_reason_combo)
-        self.ddx_edit = qt.QLineEdit()
-        self.ddx_edit.maxLength = 4000
-        self.ddx_edit.placeholderText = "Reviewer differential diagnosis / notes"
-        figo_form.addRow("Myoma Ddx", self.ddx_edit)
-        self.apply_figo_button = qt.QPushButton("Save FIGO and Ddx")
-        self.apply_figo_button.connect("clicked()", self.on_apply_figo)
-        figo_form.addRow("", self.apply_figo_button)
-        figo_page_layout.addLayout(figo_form)
-
-        lower = qt.QHBoxLayout()
-        self.save_draft_button = qt.QPushButton("Save Draft")
-        self.save_draft_button.connect("clicked()", self.on_save_draft)
-        self.reveal_button = qt.QPushButton("Reveal AI")
-        self.reveal_button.connect("clicked()", self.on_reveal_ai)
-        self.return_correction_button = qt.QPushButton("Return to segmentation")
-        self.return_correction_button.connect("clicked()", lambda: self._show_page(1))
-        self.return_correction_button.visible = False
-        lower.addWidget(self.save_draft_button)
-        lower.addWidget(self.reveal_button)
-        lower.addWidget(self.return_correction_button)
-        figo_page_layout.addLayout(lower)
+        body_layout.addWidget(self.zero_check)
+        self._refresh_zero_text()
+        body_layout.addWidget(theme.set_role(qt.QLabel("Or stop this case early:"), "hint-muted"))
+        # Early stops answer "is there anything to box at all", so they sit
+        # with the zero-myoma confirmation.
         stops = qt.QHBoxLayout()
+        stops.setSpacing(6)
         self.early_stop_buttons = []
         for text_value, status in (("No uterus", "no_uterus"), ("Wrong image", "wrong_image"), ("Cannot assess", "cannot_assess")):
             button = qt.QPushButton(text_value)
             button.connect("clicked()", lambda _checked=False, value=status: self.on_early_stop(value))
-            stops.addWidget(button)
+            stops.addWidget(button, 1)
             self.early_stop_buttons.append(button)
-        figo_page_layout.addLayout(stops)
-        self.blind_stack.addWidget(figo_page)
+        body_layout.addLayout(stops)
+        self.early_stop_confirm = theme.set_role(qt.QFrame(), "confirm")
+        confirm_layout = qt.QVBoxLayout(self.early_stop_confirm)
+        confirm_layout.setContentsMargins(10, 8, 10, 8)
+        confirm_layout.setSpacing(6)
+        self.early_stop_question = theme.set_role(qt.QLabel(""), "strong")
+        self.early_stop_question.wordWrap = True
+        confirm_layout.addWidget(self.early_stop_question)
+        confirm_note = theme.set_role(
+            qt.QLabel("This is saved as the case's final outcome and the case is closed."), "hint-muted"
+        )
+        confirm_note.wordWrap = True
+        confirm_layout.addWidget(confirm_note)
+        confirm_row = qt.QHBoxLayout()
+        confirm_row.addStretch(1)
+        self.early_stop_cancel_button = qt.QPushButton("Cancel")
+        self.early_stop_cancel_button.connect("clicked()", self.cancel_early_stop)
+        confirm_row.addWidget(self.early_stop_cancel_button)
+        self.early_stop_confirm_button = theme.set_role(qt.QPushButton("End case"), "primary")
+        self.early_stop_confirm_button.connect("clicked()", self.on_confirm_early_stop)
+        confirm_row.addWidget(self.early_stop_confirm_button)
+        confirm_layout.addLayout(confirm_row)
+        self.early_stop_confirm.visible = False
+        self._pending_early_stop: str | None = None
+        body_layout.addWidget(self.early_stop_confirm)
+        self.nothing_to_box_body.visible = False
+        nothing_layout.addWidget(self.nothing_to_box_body)
+        self._nothing_to_box_case: str | None = None
         self.page_stack.addWidget(blind)
 
         correction = qt.QWidget()
         correction_layout = qt.QVBoxLayout(correction)
-        correction_actions = qt.QHBoxLayout()
-        self.edit_annotations_button = qt.QPushButton("Myomas / FIGO / Ddx")
-        self.edit_annotations_button.connect("clicked()", lambda: self._show_page(0))
-        correction_actions.addWidget(self.edit_annotations_button)
-        self.correction_save_button = qt.QPushButton("Save Draft")
-        self.correction_save_button.connect("clicked()", self.on_save_draft)
-        correction_actions.addWidget(self.correction_save_button)
-        correction_layout.addLayout(correction_actions)
+        correction_layout.setContentsMargins(0, 0, 0, 0)
+        correction_layout.setSpacing(6)
+        # Our own segment rows and tools; Slicer's Segment Editor works behind them.
+        self.correction_panel = CorrectionPanel(
+            ICON_DIR,
+            {FIXED_SEGMENT_IDS[value]: FIXED_SEGMENT_NAMES[FIXED_SEGMENT_IDS[value]] for value in (1, 2, 3, 4)},
+        )
+        correction_layout.addWidget(self.correction_panel.widget)
+        correction_layout.addStretch(1)
         self.show_roi_check = qt.QCheckBox("Show ROI boxes")
         self.show_roi_check.checked = False
         self.show_roi_check.connect("toggled(bool)", self.on_show_roi_toggled)
         correction_layout.addWidget(self.show_roi_check)
         self.correction_tools = ReviewCorrectionTools(self)
-        correction_layout.addWidget(self.correction_tools.widget)
-        self.segment_editor_host = qt.QWidget()
-        self.segment_editor_host_layout = qt.QVBoxLayout(self.segment_editor_host)
-        correction_layout.addWidget(self.segment_editor_host, 1)
-        self.complete_button = qt.QPushButton("Export corrected labels and complete")
-        self.complete_button.connect("clicked()", self.on_complete)
-        correction_layout.addWidget(self.complete_button)
         self.page_stack.addWidget(correction)
-        self._refresh_figo_controls()
+
+        # --- Action bar: what blocks or follows, then the page's actions ---
+        self.action_bar = theme.set_role(qt.QFrame(), "footer")
+        footer_layout = qt.QVBoxLayout(self.action_bar)
+        footer_layout.setContentsMargins(10, 8, 10, 10)
+        footer_layout.setSpacing(8)
+        self.status_label = theme.set_role(qt.QLabel("Open one prepared case to begin."), "hint-muted")
+        self.status_label.wordWrap = True
+        footer_layout.addWidget(self.status_label)
+        footer_row = qt.QHBoxLayout()
+        footer_row.setSpacing(6)
+        footer_row.addWidget(self.comment_toggle)
+        self.save_draft_button = qt.QPushButton("Save draft")
+        self.save_draft_button.connect("clicked()", self.on_save_draft)
+        footer_row.addWidget(self.save_draft_button)
+        self.reveal_button = theme.set_role(qt.QPushButton("Reveal AI  →"), "primary")
+        self.reveal_button.connect("clicked()", self.on_reveal_ai)
+        footer_row.addWidget(self.reveal_button, 1)
+        self.complete_button = theme.set_role(qt.QPushButton("Export corrected labels and complete"), "primary")
+        self.complete_button.connect("clicked()", self.on_complete)
+        footer_row.addWidget(self.complete_button, 1)
+        self.reopen_button = qt.QPushButton("Reopen case for editing")
+        self.reopen_button.toolTip = (
+            "Return this completed case to AI correction. The published results are "
+            "backed up, and the case must be completed again."
+        )
+        self.reopen_button.connect("clicked()", self.on_reopen_case)
+        footer_row.addWidget(self.reopen_button, 1)
+        self.footer_next_button = theme.set_role(qt.QPushButton("Next case  →"), "primary")
+        self.footer_next_button.connect("clicked()", self.on_next_case)
+        footer_row.addWidget(self.footer_next_button, 1)
+        footer_layout.addLayout(footer_row)
+        annotation_layout.addWidget(self.action_bar)
+        self._refresh_comment_toggle()
+        self.figo_card = FigoCard(
+            self._on_card_figo, self._on_card_text, self._on_card_closed, self._position_figo_card
+        )
+        # The card lives on a slice view, outside this panel's stylesheet.
+        self.figo_card.widget.setStyleSheet(theme.CARD_QSS)
+        # The per-view Esc shortcuts (_bind_card_escape_shortcuts) overlap the
+        # card's own while focus is in the card; whichever Qt picks must close.
+        for shortcut in self.figo_card.widget.findChildren(qt.QShortcut):
+            shortcut.connect("activatedAmbiguously()", self.close_figo_card)
+        self._on_page_changed()
+
+    def _icon_button(self, icon_name: str, tooltip: str, slot: Callable[[], None]) -> Any:
+        button = theme.set_role(qt.QToolButton(), "icon")
+        button.setIcon(qt.QIcon(str(ICON_DIR / icon_name)))
+        button.setIconSize(qt.QSize(16, 16))
+        button.setFixedSize(32, 32)
+        button.toolTip = tooltip
+        button.setAccessibleName(tooltip)
+        button.enabled = False
+        button.connect("clicked()", slot)
+        return button
+
+    def _on_queue_toggled(self, checked: bool) -> None:
+        self.content_stack.setCurrentIndex(1 if checked else 0)
+        if checked:
+            self._refresh_case_list()
+            self.case_search.setFocus()
+
+    def _set_roi_edit_buttons(self, active: bool) -> None:
+        """Enable Save/Cancel ROI, and show their bar, only while a box is open for editing."""
+
+        self.save_roi_button.enabled = active
+        self.cancel_roi_button.enabled = active
+        self.roi_edit_bar.visible = active
+
+    def _style_lesion_item(self, item: Any, lesion_id: str, figo: Any) -> None:
+        """A myoma row: its ID, and a green FIGO tag or an amber "FIGO ?" one."""
+
+        colours = theme.FIGO_SET_COLOURS if figo is not None else theme.FIGO_MISSING_COLOURS
+        item.setData(theme.ROW_TITLE, lesion_id)
+        item.setData(theme.ROW_TAG, figo_label(figo))
+        item.setData(theme.ROW_COLOURS, list(colours))
+
+    def _refresh_myoma_count(self) -> None:
+        count = self.lesion_list.count
+        self.myoma_section_label.text = f"MYOMAS · {count}"
+        self._refresh_empty_state()
+
+    def _refresh_empty_state(self) -> None:
+        """No boxes and still free to draw one: the empty card replaces the list."""
+
+        count = self.lesion_list.count
+        editable = bool(self.add_button.enabled) and not self.logic.read_only
+        empty = count == 0 and editable
+        self.empty_state.visible = empty
+        self.empty_add_button.enabled = empty
+        self.lesion_list.visible = not empty
+        self.box_actions.visible = not empty
+        self.myoma_edit_hint.visible = count > 0 and editable
+
+    def _on_page_changed(self) -> None:
+        self._refresh_action_bar()
+        self._position_comment_overlay()
+
+    def _on_mode_clicked(self, page: int) -> None:
+        """Box shows the box/FIGO page, Segment the correction page (after reveal)."""
+        if page == SEGMENT_PAGE and self.logic.segmentation_node is None:
+            self._refresh_action_bar()
+            return
+        # A refused switch (a box still being placed) leaves the page as it is.
+        self._show_page(page)
+        self._refresh_action_bar()
+
+    def _set_hint(self, text_value: str, tone: str) -> None:
+        self.status_label.text = text_value
+        self._set_role_state(self.status_label, "role", f"hint-{tone}")
+
+    @staticmethod
+    def _set_role_state(widget: Any, name: str, value: str) -> None:
+        """Set a dynamic property the stylesheet reads, and redraw with it."""
+        if widget.property(name) == value:
+            return
+        widget.setProperty(name, value)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+    def _set_nothing_to_box_open(self, opened: bool) -> None:
+        self.nothing_to_box_toggle.blockSignals(True)
+        self.nothing_to_box_toggle.checked = bool(opened)
+        self.nothing_to_box_toggle.blockSignals(False)
+        self.nothing_to_box_toggle.arrowType = qt.Qt.DownArrow if opened else qt.Qt.RightArrow
+        self.nothing_to_box_body.visible = bool(opened)
+
+    def _refresh_action_bar(self) -> None:
+        """Step states, the banner, and which of the action bar's buttons show."""
+        if not hasattr(self, "action_bar"):
+            return
+        state = self.logic.state
+        read_only = self.logic.read_only
+        complete_record = bool(
+            read_only and (self.logic.final_annotation or {}).get("status") == "complete"
+        )
+        on_correction = self.page_stack.currentIndex == 1
+        revealed = self.logic.segmentation_node is not None
+        self.box_mode_button.enabled = state is not None or read_only
+        self.segment_mode_button.enabled = revealed
+        for page, button in self.mode_buttons.items():
+            button.checked = page == self.page_stack.currentIndex
+        self.readonly_banner.visible = complete_record
+        blind = state is not None and state.phase == ReviewPhase.BLIND.value
+        self.reveal_button.visible = not read_only and blind and not on_correction
+        self.complete_button.visible = not read_only and on_correction
+        self.save_draft_button.visible = not read_only
+        self.reopen_button.visible = complete_record
+        self.footer_next_button.visible = read_only
+        self.footer_next_button.enabled = self.next_case_button.enabled
+
+    def _position_comment_overlay(self) -> None:
+        """Lay the open comment box just above the action bar, over the page."""
+
+        box = self.case_comment_box
+        if box.isHidden():
+            return
+        height = box.sizeHint.height()
+        bar_top = self.action_bar.mapTo(self.annotation_tab, qt.QPoint(0, 0)).y()
+        top = max(bar_top - 6 - height, 0)
+        box.setGeometry(12, top, max(self.annotation_tab.width - 24, 120), height)
+        box.raise_()
+
+    def _set_comment_overlay_tracking(self, on: bool) -> None:
+        """While the box is open: follow the bar's moves, and fold the box
+        when the reader clicks anywhere else. Installed only while open, so Qt
+        never holds the filter through a Python object that dies first."""
+
+        app = qt.QApplication.instance()
+        try:
+            if on:
+                self.action_bar.installEventFilter(self._comment_overlay_filter)
+                app.installEventFilter(self._comment_overlay_filter)
+            else:
+                self.action_bar.removeEventFilter(self._comment_overlay_filter)
+                app.removeEventFilter(self._comment_overlay_filter)
+        except Exception:
+            pass
+
+    def _fold_comment_if_clicked_outside(self, clicked: Any) -> None:
+        if not isinstance(clicked, qt.QWidget):
+            # The same press also passes through its window; judge it once,
+            # at the widget that receives it.
+            return
+        for own in (self.case_comment_box, self.comment_toggle):
+            # The bar's own click already toggles the box.
+            if clicked is own or own.isAncestorOf(clicked):
+                return
+        # After the click is handled, so it still reaches what was clicked.
+        qt.QTimer.singleShot(0, lambda: setattr(self.comment_toggle, "checked", False))
+
+    def _make_comment_overlay_filter(self) -> Any:
+        widget = self
+
+        class _CommentOverlayFilter(qt.QObject):
+            def eventFilter(self, obj, event):
+                kind = event.type()
+                if kind == qt.QEvent.MouseButtonPress:
+                    widget._fold_comment_if_clicked_outside(obj)
+                elif kind in (qt.QEvent.Move, qt.QEvent.Resize) and obj is widget.action_bar:
+                    widget._position_comment_overlay()
+                return False
+
+        return _CommentOverlayFilter()
 
     def _focus_annotation_tab(self) -> None:
-        """Switch to the Annotation tab once a case is loaded and ready.
+        """Close the queue drawer once a case is loaded and ready.
 
         Called after every successful case load (case picked from the list,
-        case manifest chosen, or launched via the case env var) so the
-        reviewer always lands on the review screen, not the browser.
+        previous/next, case manifest chosen, or launched via the case env var)
+        so the reviewer always lands on the review screen, not the browser.
         """
-        if hasattr(self, "tab_widget") and hasattr(self, "annotation_tab"):
-            self.tab_widget.setCurrentWidget(self.annotation_tab)
+        if hasattr(self, "content_stack"):
+            self.queue_toggle.checked = False
+            self.content_stack.setCurrentIndex(0)
+
+    def _claim_shortcut_keys(self) -> None:
+        """Take our keys away from Slicer's own menu actions while we are open.
+
+        Slicer's Edit > Undo / Redo already own Ctrl+Z / Ctrl+Y. Two shortcuts
+        on one key are ambiguous to Qt, which then runs neither, so the menu
+        actions lose just those keys until ``_release_shortcut_keys``.
+        """
+
+        self._release_shortcut_keys()
+        main_window = slicer.util.mainWindow()
+        if main_window is None:
+            return
+        ours = [shortcut.key for shortcut in self.shortcuts if not shortcut.key.isEmpty()]
+        for action in main_window.findChildren(qt.QAction):
+            current = list(action.shortcuts())
+            kept = [
+                sequence for sequence in current
+                if not any(sequence.matches(key) == qt.QKeySequence.ExactMatch for key in ours)
+            ]
+            if len(kept) != len(current):
+                self._released_action_shortcuts.append((action, current))
+                action.setShortcuts(kept)
+
+    def _release_shortcut_keys(self) -> None:
+        for action, shortcuts in self._released_action_shortcuts:
+            try:
+                action.setShortcuts(shortcuts)
+            except Exception:
+                pass
+        self._released_action_shortcuts = []
 
     def enter(self) -> None:
+        self.app_style.enter()
+        self._hide_panel_chrome()
+        # The module panel re-shows its help box after enter() runs.
+        qt.QTimer.singleShot(0, self._hide_panel_chrome)
+        self.app_branding.enter()
+        # Slicer's module panel resets its layout margins after setup; put ours back.
+        self.layout.setContentsMargins(10, 8, 10, 8)
         for shortcut in self.shortcuts:
             shortcut.enabled = True
+        self._claim_shortcut_keys()
+        if self.mouse_button_dispatcher is not None:
+            self.mouse_button_dispatcher.enabled = True
         if self.view_tools is not None:
             self.view_tools.refresh()
         if self.click_selector is not None:
             # Not gated on existing boxes: the reader may draw the first one
             # after coming back, and nothing else re-binds the observers.
             self.click_selector.bind_views()
+        self._bind_card_escape_shortcuts()
 
     def exit(self) -> None:
+        self.app_style.exit()
+        self.app_branding.exit()
+        if not _studio_mode():
+            self._restore_panel_chrome()
+        # The card belongs to the module's views; leaving the module saves
+        # and closes it rather than leaving it floating over another module.
+        self.close_figo_card()
         for shortcut in self.shortcuts:
             shortcut.enabled = False
+        self._release_shortcut_keys()
+        if self.mouse_button_dispatcher is not None:
+            self.mouse_button_dispatcher.enabled = False
         if self.segment_editor_widget is not None:
             self.segment_editor_widget.setActiveEffectByName("")
         if self.draw_tool is not None:
             self.draw_tool.cancel()
         if self.roi_nodes:
             self.set_active_roi(None)
+        # set_active_roi(None) no-ops when nothing was selected, which would
+        # otherwise leave a cancelled drag's cursor/hidden boxes stuck; make
+        # the reset explicit and unconditional here instead.
+        self._apply_roi_selection()
         if self.click_selector is not None:
             self.click_selector.unbind_views()
 
@@ -1536,10 +2154,17 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if self._has_unresolved_roi():
             self._show_error("Save or cancel the current myoma box first.")
             return
+        self.close_figo_card()
         if self.segment_editor_widget is not None:
             self.segment_editor_widget.setActiveEffectByName("")
+        changed = index != self.page_stack.currentIndex
         self.page_stack.setCurrentIndex(index)
-        self._set_roi_visibility(index == 0 or bool(self.show_roi_check.checked))
+        if changed and index == 0:
+            # The FIGO page opens on every box; picking one narrows to it.
+            self.clear_lesion_selection()
+        self._set_roi_visibility(
+            self.box_page_boxes_shown if index == BOX_PAGE else bool(self.show_roi_check.checked)
+        )
 
     def _remember_annotation(self) -> None:
         if self.logic.state is not None:
@@ -1554,23 +2179,67 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.cancel_roi_edit()
             if self.draw_tool is not None:
                 self.draw_tool.cancel()
+            # draw_tool.cancel() above can itself flip _has_unresolved_roi()
+            # from true to false (an aborted drag with no draft box yet), so
+            # the cursor/hidden-boxes reset has to run again here.
+            self._apply_roi_selection()
             return
+        source = self.annotation_undo if undo else self.annotation_redo
+        step_ready = bool(source) and source[-1]["phase"] == self.logic.state.phase
+        if not step_ready and not (undo and self._has_unbanked_edit()):
+            # Nothing to restore: leave an open card (and a half-made choice
+            # on it) alone rather than closing and reopening it.
+            return
+        # The flush below closes an open card (banking its typed text as its
+        # own undo step); bring it back afterwards for the same box, refreshed
+        # from the restored state, unless the undo removed that box.
+        card = self.figo_card
+        reopen = (card.lesion_id, self._figo_card_view) if card is not None and card.is_open else None
         # Give the drag its own undo entry, or this keystroke would throw it
         # away and revert whatever the reader did before it instead.
         self._flush_pending_roi_drag()
-        source, target = (self.annotation_undo, self.annotation_redo) if undo else (self.annotation_redo, self.annotation_undo)
-        if not source:
-            return
-        previous = source[-1]
-        if previous["phase"] != self.logic.state.phase:
-            return
-        target.append(self.logic.state.to_draft())
-        next_number = self.logic.state.next_lesion_number
-        self.logic.state = ReviewState.from_draft(source.pop())
-        self.logic.state.next_lesion_number = max(next_number, self.logic.state.next_lesion_number)
-        self.rebuild_roi_nodes()
-        self._write_current_draft()
-        self.refresh_ui()
+        try:
+            source, target = (self.annotation_undo, self.annotation_redo) if undo else (self.annotation_redo, self.annotation_undo)
+            if not source:
+                return
+            previous = source[-1]
+            if previous["phase"] != self.logic.state.phase:
+                return
+            target.append(self.logic.state.to_draft())
+            next_number = self.logic.state.next_lesion_number
+            self.logic.state = ReviewState.from_draft(source.pop())
+            self.logic.state.next_lesion_number = max(next_number, self.logic.state.next_lesion_number)
+            self.rebuild_roi_nodes()
+            self._write_current_draft()
+            self.refresh_ui()
+        finally:
+            if reopen is not None and reopen[0] in self.logic.state.lesions:
+                self.set_active_roi(reopen[0])
+                self.open_figo_card(*reopen)
+
+    def _has_unbanked_edit(self) -> bool:
+        """Whether the flush would add an undo step: a dragged box or card text."""
+
+        card = self.figo_card
+        if card is not None and card.has_unsaved_text():
+            return True
+        lesion_id = self.active_roi_id
+        node = self.roi_nodes.get(lesion_id) if lesion_id else None
+        previous = self.active_roi_geometry
+        if (
+            node is None
+            or previous is None
+            or node.GetScene() is not slicer.mrmlScene
+            or not self._roi_edits_allowed()
+        ):
+            return False
+        current = self._roi_geometry_or_none(node)
+        return current is not None and any(
+            abs(new - old) > 1e-4
+            for new, old in zip(
+                current.center_ras + current.size_mm, previous.center_ras + previous.size_mm
+            )
+        )
 
     def on_undo(self) -> None:
         if self.logic.read_only:
@@ -1589,65 +2258,62 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._restore_annotation(False)
 
     def choose_manifest(self) -> None:
+        if _studio_mode():
+            return
         path = qt.QFileDialog.getOpenFileName(slicer.util.mainWindow(), "Open MyomaReviewLite case manifest", "", "JSON (*.json)")
         if path:
             self.open_case(path)
 
     def _refresh_case_list(self) -> None:
-        """Rebuild the case list under the active filter and search text."""
+        """Rebuild the drawer's grouped case rows under the filter and search text."""
         if not hasattr(self, "case_list"):
             return
         summary = self.logic.queue_summary
-        allowed = CASE_FILTER_STATUSES.get(self._case_filter, CASE_FILTER_STATUSES["all"])
         needle = str(self.case_search.text) if hasattr(self, "case_search") else ""
+        if summary is not None:
+            groups = case_groups(summary.entries, self._case_filter, needle)
+        else:
+            # A single-case manifest has no queue statuses; list it plainly.
+            groups = [("", [QueueEntry(case_id, None) for case_id in self.logic.available_case_ids
+                            if matches_case_search(case_id, needle)])]
+            groups = [group for group in groups if group[1]]
         current_row = -1
         self.case_list.blockSignals(True)
         try:
             self.case_list.clear()
-            for case_id in self.logic.available_case_ids:
-                entry = None if summary is None else summary.entry(case_id)
-                status = None if entry is None else entry.status
-                if status is not None and status not in allowed:
-                    continue
-                if not self._matches_case_search(case_id, needle):
-                    continue
-                title = "" if status is None else CASE_STATUS_TITLES[status]
-                item = qt.QListWidgetItem(f"{case_id}    {title}" if title else case_id)
-                item.setData(qt.Qt.UserRole, case_id)
-                if entry is not None and entry.diagnostic:
-                    item.setToolTip(entry.diagnostic)
-                if status is not None:
-                    # A PythonQt colour quirk must never cost us the list.
-                    try:
-                        item.setForeground(qt.QBrush(qt.QColor(CASE_STATUS_COLORS[status])))
-                    except Exception:
-                        traceback.print_exc()
-                self.case_list.addItem(item)
-                if case_id == self.logic.case_id:
-                    current_row = self.case_list.count - 1
+            for title, entries in groups:
+                if title:
+                    header = qt.QListWidgetItem(title)
+                    header.setFlags(qt.Qt.NoItemFlags)
+                    header.setData(theme.ROW_HEADER, True)
+                    header.setData(theme.ROW_TITLE, title)
+                    self.case_list.addItem(header)
+                for entry in entries:
+                    status = entry.status
+                    tag = "" if status is None else CASE_STATUS_TITLES[status]
+                    if entry.case_id == self.logic.case_id:
+                        tag = "open now"
+                    item = qt.QListWidgetItem(f"{entry.case_id}    {tag}" if tag else entry.case_id)
+                    item.setData(qt.Qt.UserRole, entry.case_id)
+                    item.setData(theme.ROW_TITLE, entry.case_id)
+                    item.setData(theme.ROW_TAG, tag)
+                    if status is not None:
+                        dot, tag_bg, tag_fg = theme.STATUS_COLOURS[status.value]
+                        item.setData(theme.ROW_COLOURS, [dot, tag_bg, tag_fg])
+                    if entry.diagnostic:
+                        item.setToolTip(entry.diagnostic)
+                        if status is QueueStatus.ATTENTION:
+                            item.setData(theme.ROW_SUBTITLE, entry.diagnostic)
+                    self.case_list.addItem(item)
+                    if entry.case_id == self.logic.case_id:
+                        current_row = self.case_list.count - 1
+            self.case_empty_label.visible = not groups and bool(self.logic.available_case_ids)
             if current_row >= 0:
                 self.case_list.setCurrentRow(current_row)
                 self.case_list.scrollToItem(self.case_list.item(current_row))
         finally:
             self.case_list.blockSignals(False)
         self._refresh_progress()
-
-    @staticmethod
-    def _matches_case_search(case_id: str, needle: str) -> bool:
-        """Match on the ID, or on the case number however it is typed."""
-        needle = (needle or "").strip().lower()
-        if not needle:
-            return True
-        if needle in case_id.lower():
-            return True
-        digits = "".join(character for character in needle if character.isdigit())
-        tail = "".join(character for character in case_id if character.isdigit())
-        if not digits or not tail:
-            return False
-        try:
-            return int(digits) == int(tail)
-        except ValueError:
-            return False
 
     def on_case_filter(self, name: str) -> None:
         self._case_filter = name if name in CASE_FILTER_STATUSES else "all"
@@ -1661,17 +2327,50 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def _refresh_progress(self) -> None:
         if not hasattr(self, "progress_label"):
             return
+        self._refresh_case_nav()
         summary = self.logic.queue_summary
         if summary is None:
             self.progress_label.text = ""
             return
         counts = summary.counts
-        self.progress_label.text = (
-            f"Complete {counts[QueueStatus.COMPLETE]} Â· "
-            f"In progress {counts[QueueStatus.IN_PROGRESS]} Â· "
-            f"New {counts[QueueStatus.NEW]} Â· "
-            f"Attention {counts[QueueStatus.ATTENTION]}"
-        )
+        self.progress_label.text = queue_strip_text(counts)
+        for status, segment in self.progress_segments.items():
+            count = counts[status]
+            segment.visible = count > 0
+            # Stretch factors make each segment's width its share of the cases.
+            self.progress_bar.layout().setStretchFactor(segment, count)
+        pill_counts = {
+            key: sum(counts[status] for status in statuses)
+            for key, statuses in CASE_FILTER_STATUSES.items()
+        }
+        for title, key in CASE_FILTERS:
+            self.filter_buttons[key].text = f"{title}  {pill_counts.get(key, 0)}"
+
+    def _refresh_case_nav(self) -> None:
+        """Enable previous / next only when an openable case lies that way."""
+        summary = self.logic.queue_summary
+        case_id = self.logic.case_id
+        for button, step in ((self.prev_case_button, -1), (self.next_case_button, +1)):
+            button.enabled = bool(summary is not None and case_id and summary.neighbour(case_id, step))
+
+    def on_previous_case(self) -> None:
+        self._open_neighbour(-1)
+
+    def on_next_case(self) -> None:
+        self._open_neighbour(+1)
+
+    def _open_neighbour(self, step: int) -> None:
+        if self.logic.manifest_source is None or not self.logic.case_id:
+            return
+        # Rescan first: a case may have turned finished or Attention meanwhile.
+        summary = self.logic.refresh_queue()
+        neighbour = None if summary is None else summary.neighbour(self.logic.case_id, step)
+        if neighbour is None:
+            self._refresh_case_nav()
+            return
+        # The same guarded path as picking from the list: unsaved work is
+        # saved, and an unfinished box edit blocks the switch.
+        self.open_case(self.logic.manifest_source, neighbour.case_id)
 
     def _no_reviewable_message(self) -> str:
         summary = self.logic.queue_summary
@@ -1687,7 +2386,8 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def on_case_chosen(self, item: Any) -> None:
         if item is None or self.logic.manifest_source is None:
             return
-        selected_case_id = str(item.data(qt.Qt.UserRole))
+        # Group headers carry no case.
+        selected_case_id = str(item.data(qt.Qt.UserRole) or "")
         # Re-opening the case already on screen would only cost a reload.
         if not selected_case_id or selected_case_id == self.logic.case_id:
             return
@@ -1728,18 +2428,26 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._refresh_case_list()
 
     def _load_case(self, manifest_path: Path, case_id: str | None) -> None:
-        self._boxing_stage_done = False
         self.logic.open_manifest(manifest_path, case_id=case_id)
+        self._load_case_comment()
         self.shutdown_saved = False
         self.save_coordinator.clear_dirty()
         self._refresh_case_list()
-        self.case_header.text = f"Reader {self.logic.manifest.reader_id} Â· Case {self.logic.case_id}"  # type: ignore[union-attr]
+        manifest = self.logic.manifest
+        self.study_label.text = self.logic.case_id
+        self.case_header.text = f"{manifest.study_id} · Reader {manifest.reader_id}"  # type: ignore[union-attr]
+        self.manifest_label.text = (
+            f"Manifest: {manifest.study_id} ({len(self.logic.available_case_ids)} cases)"  # type: ignore[union-attr]
+        )
+        self.manifest_button.text = "Change manifest"
         self.logic.load_registered_volumes()
         self.view_tools.refresh()
         self.roi_boxes_visible = True
+        self.box_page_boxes_shown = True
         self.rebuild_roi_nodes()
         if self.click_selector is not None:
             self.click_selector.bind_views()
+        self._bind_card_escape_shortcuts()
         self.page_stack.setCurrentIndex(0)
         if self.logic.read_only:
             if (self.logic.final_annotation or {}).get("status") == "complete":
@@ -1766,97 +2474,100 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.segment_editor_widget.setReadOnly(read_only)
             if read_only:
                 self.segment_editor_widget.setActiveEffectByName("")
-        self.undo_button.enabled = not read_only and state is not None
-        self.redo_button.enabled = not read_only and state is not None
-        self.correction_save_button.enabled = not read_only
-        self.ddx_edit.enabled = not read_only
+        self.correction_panel.set_read_only(read_only)
         self.correction_tools.refresh()
+        # Whether there is anything to box is settled once AI is shown.
+        self.nothing_to_box_section.visible = self.logic.segmentation_node is None
         if state is None:
             if not self.logic.read_only or self.logic.final_annotation is None:
                 return
+            # Filled on load; keeping the row here must not pull the views anywhere.
+            selected_id = self._selected_lesion_id()
+            self.lesion_list.blockSignals(True)
             self.lesion_list.clear()
-            self.figo_lesion_combo.blockSignals(True)
-            self.figo_lesion_combo.clear()
             for lesion in self.logic.final_annotation.get("lesions", []):
                 lesion_id = str(lesion.get("lesion_id", ""))
-                item = qt.QListWidgetItem(f"{lesion_id} Â· final")
+                item = qt.QListWidgetItem(f"{lesion_id} · {figo_label(lesion.get('figo'))}")
                 item.setData(qt.Qt.UserRole, lesion_id)
+                self._style_lesion_item(item, lesion_id, lesion.get("figo"))
                 self.lesion_list.addItem(item)
-                self.figo_lesion_combo.addItem(lesion_id, lesion_id)
-            self.figo_lesion_combo.blockSignals(False)
-            if self.lesion_list.count:
-                self.lesion_list.setCurrentRow(0)
+            self._refresh_myoma_count()
+            self.lesion_list.setCurrentRow(self._lesion_row(selected_id) if selected_id else -1)
+            self.lesion_list.blockSignals(False)
             for control in (
                 self.add_button,
-                self.redraw_button,
                 self.delete_button,
                 self.zero_check,
-                self.figo_lesion_combo,
-                self.figo_kind_combo,
-                self.apply_figo_button,
                 self.reveal_button,
                 self.save_draft_button,
                 self.complete_button,
                 *self.early_stop_buttons,
             ):
                 control.enabled = False
-            self.figo_lesion_combo.enabled = True
-            self.back_to_boxing_button.enabled = False
-            self.continue_to_figo_button.enabled = False
-            self.blind_stack.setCurrentIndex(1)
-            self.return_correction_button.visible = self.logic.segmentation_node is not None
-            self._load_selected_annotation()
+            self.reveal_button.toolTip = ""
             self._refresh_roi_arming()
             status = str(self.logic.final_annotation.get("status", "complete")).replace("_", " ")
-            self._set_status(f"Final outcome: {status}. This record is read-only.")
+            if status == "complete":
+                self._set_hint(
+                    "Reopening backs up the published results. You will have to complete the case again.",
+                    "muted",
+                )
+            else:
+                self._set_hint(f"Final outcome: {status}. This record is read-only.", "muted")
             self._refresh_progress()
+            self._refresh_action_bar()
             return
-        self.zero_check.blockSignals(True)
-        self.zero_check.checked = state.zero_myomas
-        self.zero_check.enabled = state.phase == ReviewPhase.BLIND.value and not state.lesions
-        self.zero_check.blockSignals(False)
         selected_id = self._selected_lesion_id()
         self.lesion_list.blockSignals(True)
-        self.figo_lesion_combo.blockSignals(True)
         self.lesion_list.clear()
-        self.figo_lesion_combo.clear()
         for lesion in state.active_lesions:
-            label = lesion.lesion_id + (" Â· FIGO pending" if lesion.figo is None else " Â· FIGO set")
-            item = qt.QListWidgetItem(label)
+            item = qt.QListWidgetItem(self.roi_label(lesion.lesion_id))
             item.setData(qt.Qt.UserRole, lesion.lesion_id)
+            self._style_lesion_item(item, lesion.lesion_id, lesion.to_dict().get("figo"))
             self.lesion_list.addItem(item)
-            self.figo_lesion_combo.addItem(label, lesion.lesion_id)
-        selected_index = self.figo_lesion_combo.findData(selected_id) if selected_id else 0
-        if self.figo_lesion_combo.count:
-            selected_index = max(0, selected_index)
-            self.figo_lesion_combo.setCurrentIndex(selected_index)
-            self.lesion_list.setCurrentRow(selected_index)
+        self._refresh_myoma_count()
+        # Nothing is picked for the reader: with no myoma selected every box shows.
+        self.lesion_list.setCurrentRow(self._lesion_row(selected_id) if selected_id else -1)
         self.lesion_list.blockSignals(False)
-        self.figo_lesion_combo.blockSignals(False)
         locked = read_only or state.phase not in (ReviewPhase.BLIND.value, ReviewPhase.AI_REVEALED.value)
-        # Boxing and FIGO typing are separate stages of the blind page: once
-        # the reader is past BLIND phase (or has explicitly moved on), the
-        # boxing controls stay locked and the FIGO sub-page is shown.
-        in_figo_stage = self._boxing_stage_done or state.phase != ReviewPhase.BLIND.value
-        self.blind_stack.setCurrentIndex(1 if in_figo_stage else 0)
-        for control in (self.add_button, self.redraw_button, self.delete_button, self.zero_check):
-            control.enabled = not locked and not in_figo_stage
-        for control in (self.figo_lesion_combo, self.figo_kind_combo, self.apply_figo_button):
+        # One page before and after reveal: boxes can still be added, redrawn
+        # or deleted once AI is shown; the blinded snapshot stays frozen.
+        for control in (self.add_button, self.delete_button):
             control.enabled = not locked
-        self.zero_check.enabled = not locked and not in_figo_stage and not state.lesions
-        self.continue_to_figo_button.enabled = not locked and not in_figo_stage and bool(state.zero_myomas or state.lesions)
-        self.back_to_boxing_button.enabled = not locked and in_figo_stage and state.phase == ReviewPhase.BLIND.value
+        self._refresh_empty_state()
+        self.zero_check.blockSignals(True)
+        self.zero_check.checked = state.zero_myomas
+        self.zero_check.enabled = not locked and not state.lesions
+        self.zero_check.blockSignals(False)
+        self._refresh_zero_text()
         self.reveal_button.enabled = bool(state.can_reveal)
-        self.reveal_button.visible = state.phase == ReviewPhase.BLIND.value
-        self.return_correction_button.visible = state.phase != ReviewPhase.BLIND.value
+        missing = missing_figo_ids(state)
+        self.reveal_button.toolTip = f"FIGO missing: {', '.join(missing)}" if missing else ""
         self.save_draft_button.enabled = not self.logic.read_only
         self.complete_button.enabled = state.phase == ReviewPhase.AI_REVEALED.value
         for button in self.early_stop_buttons:
-            button.enabled = state.phase == ReviewPhase.BLIND.value
-        self._load_selected_annotation()
+            button.enabled = not locked and state.phase == ReviewPhase.BLIND.value
+        if not self.early_stop_buttons[0].enabled:
+            self.cancel_early_stop()
         self._refresh_roi_arming()
-        self._set_status(f"Phase: {state.phase} Â· {state.lesion_count} myomas (no count limit)")
+        # A new case opens "Nothing to box?" when it has no boxes; after that
+        # it stays however the reader leaves it.
+        if self._nothing_to_box_case != state.case_id:
+            self._nothing_to_box_case = state.case_id
+            self._set_nothing_to_box_open(state.lesion_count == 0)
+        hint, tone = bottom_hint(state.phase, missing, state.lesion_count, state.zero_myomas)
+        self._set_hint(hint, tone)
         self._refresh_progress()
+        self._refresh_action_bar()
+        # Keep an open card's highlight in step with the saved FIGO (say, after
+        # an undo); opening/closing is not ours. Only a changed value is pushed,
+        # so a half-made 8/Hybrid choice on the card is not reset.
+        card = self.figo_card
+        if card is not None and card.is_open and card.lesion_id in state.lesions:
+            saved = state.lesions[card.lesion_id].to_dict().get("figo")
+            if saved != self._figo_card_figo:
+                card.set_figo(saved)
+                self._figo_card_figo = saved
 
     def _refresh_roi_arming(self) -> None:
         if self.roi_nodes:
@@ -1864,7 +2575,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
     def _set_status(self, text_value: str) -> None:
         if hasattr(self, "status_label"):
-            self.status_label.text = text_value
+            self._set_hint(text_value, "muted")
 
     def _show_error(self, message: str) -> None:
         self._set_status(message)
@@ -1875,62 +2586,139 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         item = self.lesion_list.currentItem()
         return str(item.data(qt.Qt.UserRole)) if item is not None else None
 
-    def _on_lesion_row_changed(self, index: int) -> None:
-        if not hasattr(self, "figo_lesion_combo"):
+    def _lesion_row(self, lesion_id: str | None) -> int:
+        for row in range(self.lesion_list.count):
+            if str(self.lesion_list.item(row).data(qt.Qt.UserRole)) == lesion_id:
+                return row
+        return -1
+
+    def _select_lesion_row(self, lesion_id: str) -> None:
+        """Make ``lesion_id`` the current row without re-running the row handler."""
+
+        row = self._lesion_row(lesion_id)
+        if row < 0:
             return
-        self.figo_lesion_combo.blockSignals(True)
-        self.figo_lesion_combo.setCurrentIndex(index)
-        self.figo_lesion_combo.blockSignals(False)
-        self._load_selected_annotation()
-
-    def _on_figo_lesion_changed(self, index: int) -> None:
         self.lesion_list.blockSignals(True)
-        self.lesion_list.setCurrentRow(index)
+        self.lesion_list.setCurrentRow(row)
         self.lesion_list.blockSignals(False)
-        self._load_selected_annotation()
 
-    def _load_selected_annotation(self) -> None:
-        if not hasattr(self, "ddx_edit"):
+    def clear_lesion_selection(self) -> None:
+        """Select no myoma: no row, no box in hand, no card; every box shows again."""
+
+        if self._has_unresolved_roi():
+            return
+        self.close_figo_card()
+        self.lesion_list.blockSignals(True)
+        self.lesion_list.setCurrentRow(-1)
+        self.lesion_list.clearSelection()
+        self.lesion_list.blockSignals(False)
+        self.set_active_roi(None)
+
+    def _make_lesion_list_filter(self) -> Any:
+        """Note, before Qt moves the current row, whether a press hit that row.
+
+        A click on the row that is already selected (with its card up), or on
+        the empty list below the rows, deselects. itemClicked alone cannot
+        tell a click on the current row from one that just made it current.
+        """
+
+        widget = self
+
+        class _LesionListFilter(qt.QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == qt.QEvent.MouseButtonPress:
+                    item = widget.lesion_list.itemAt(event.pos())
+                    widget._press_hit_current_row = (
+                        item is not None and widget.lesion_list.row(item) == widget.lesion_list.currentRow
+                    )
+                    if item is None and widget._lesions_pickable():
+                        widget.clear_lesion_selection()
+                        return True
+                return False
+
+        return _LesionListFilter()
+
+    def _lesions_pickable(self) -> bool:
+        """Whether a list pick may select a box: a case is open and no box is being placed."""
+
+        has_case = self.logic.state is not None or (
+            self.logic.read_only and self.logic.final_annotation is not None
+        )
+        return has_case and not self._has_unresolved_roi()
+
+    def _on_lesion_row_changed(self, _index: int) -> None:
+        # Picking a myoma from the list selects its box, brings it on screen
+        # and opens its card. Not while a box is being placed (every other box
+        # is hidden then).
+        if not self._lesions_pickable():
             return
         lesion_id = self._selected_lesion_id()
-        state = self.logic.state
-        lesion = state.lesions.get(lesion_id) if state is not None else None
-        payload = lesion.to_dict() if lesion is not None else next(
-            (item for item in (self.logic.final_annotation or {}).get("lesions", []) if item.get("lesion_id") == lesion_id), {}
-        )
-        figo = payload.get("figo") or {"kind": "standard", "type": 0}
-        self.figo_kind_combo.setCurrentIndex(max(0, self.figo_kind_combo.findData(figo["kind"])))
-        self.figo_type_combo.setCurrentIndex(max(0, self.figo_type_combo.findData(figo.get("type", 0))))
-        self.figo_location_combo.setCurrentIndex(max(0, self.figo_location_combo.findData(figo.get("location"))))
-        self.figo_endometrial_combo.setCurrentIndex(max(0, self.figo_endometrial_combo.findData(figo.get("endometrial", 0))))
-        self.figo_serosal_combo.setCurrentIndex(max(0, self.figo_serosal_combo.findData(figo.get("serosal", 0))))
-        self.figo_reason_combo.setCurrentIndex(max(0, self.figo_reason_combo.findData(figo.get("reason"))))
-        self.ddx_edit.text = payload.get("differential_diagnosis", "")
-        for control in (self.figo_kind_combo, self.figo_type_combo, self.figo_location_combo,
-                        self.figo_endometrial_combo, self.figo_serosal_combo, self.figo_reason_combo,
-                        self.ddx_edit, self.apply_figo_button):
-            control.enabled = bool(payload) and not self.logic.read_only
-        self._refresh_figo_controls()
+        self._reveal_lesion(lesion_id)
+        self.open_figo_card(lesion_id)
+
+    def _on_lesion_item_clicked(self, item: Any) -> None:
+        """A click on the row that was already current toggles it.
+
+        With its card up, the click deselects (every box shows again). With
+        the card closed by Esc it reopens the card: currentRowChanged does not
+        fire then, so the card could otherwise not be brought back.
+        """
+
+        hit_current = self._press_hit_current_row
+        self._press_hit_current_row = False
+        if item is None or not self._lesions_pickable():
+            return
+        lesion_id = str(item.data(qt.Qt.UserRole))
+        card = self.figo_card
+        if card is not None and card.is_open and card.lesion_id == lesion_id:
+            if hit_current:
+                self.clear_lesion_selection()
+            return
+        self._reveal_lesion(lesion_id)
+        self.open_figo_card(lesion_id)
+
+    def _reveal_lesion(self, lesion_id: str | None) -> None:
+        """Show one myoma's box: select it and centre the three T2 views on it.
+
+        A box is only visible on the slices it crosses, so without centring a
+        myoma picked from the list could leave its box off the current slice.
+        """
+
+        if not lesion_id or lesion_id not in self.roi_nodes:
+            return
+        self.set_active_roi(lesion_id)
+        node = self.roi_nodes[lesion_id]
+        if node.GetScene() is not slicer.mrmlScene:
+            return
+        center = [0.0, 0.0, 0.0]
+        node.GetCenterWorld(center)
+        manager = slicer.app.layoutManager()
+        for view_name in VIEW_NAMES.values():
+            view = manager.sliceWidget(view_name)
+            if view is not None:
+                view.mrmlSliceNode().JumpSliceByCentering(*center)
 
     def on_add_box(self) -> None:
         if self._has_unresolved_roi():
             self._show_error("Save or cancel the current myoma box first.")
             return
+        # Drawing needs the views, so the card goes before the drag starts.
+        self.close_figo_card()
+        if not self.box_page_boxes_shown:
+            # A new box is drawn among the others, so they come back first.
+            self.box_page_boxes_shown = True
+            self._set_roi_visibility(True)
         # An armed box would follow the drawing drag too, so disarm it first.
         self.set_active_roi(None)
         if self.draw_tool is not None:
             self.draw_tool.start()
-
-    def on_redraw_box(self) -> None:
-        if self._has_unresolved_roi():
-            self._show_error("Save or cancel the current myoma box first.")
-            return
-        lesion_id = self._selected_lesion_id()
-        self.set_active_roi(None)
-        if lesion_id and self.draw_tool is not None:
-            self.draw_tool.start(lesion_id)
+            # Hide every other box and swap in the placement cursor now that
+            # draw_tool.active is true, i.e. _has_unresolved_roi() flipped.
+            self._apply_roi_selection()
 
     def on_delete_box(self) -> None:
+        # Closing first banks the card's typed text as its own undo step.
+        self.close_figo_card()
         lesion_id = self._selected_lesion_id()
         if not lesion_id or self.logic.state is None:
             return
@@ -1942,32 +2730,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 self.active_roi_geometry = None
             node = self.roi_nodes.pop(lesion_id, None)
             if node is not None:
-                if self.roi_overlay is not None:
-                    self.roi_overlay.untrack(node)
                 slicer.mrmlScene.RemoveNode(node)
             self._remove_roi_outline(lesion_id)
             self._write_current_draft()
             self.refresh_ui()
         except Exception as exc:
             self._show_error(str(exc))
-
-    def on_continue_to_figo(self) -> None:
-        if self._has_unresolved_roi():
-            self._show_error("Save or cancel the current myoma box first.")
-            return
-        state = self.logic.state
-        if state is None or not (state.zero_myomas or state.lesions):
-            self._show_error("Add at least one myoma box, or confirm zero myomas, before continuing.")
-            return
-        self._boxing_stage_done = True
-        self.refresh_ui()
-
-    def on_back_to_boxing(self) -> None:
-        if self._has_unresolved_roi():
-            self._show_error("Save or cancel the current myoma box first.")
-            return
-        self._boxing_stage_done = False
-        self.refresh_ui()
 
     def on_zero_toggled(self, checked: bool) -> None:
         if self.logic.state is None:
@@ -1981,72 +2749,25 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.zero_check.blockSignals(True)
             self.zero_check.checked = False
             self.zero_check.blockSignals(False)
+            self._refresh_zero_text()
             self._show_error(str(exc))
 
-    def _refresh_figo_controls(self, _index: int = 0) -> None:
-        if not hasattr(self, "figo_kind_combo"):
-            return
-        kind = str(self.figo_kind_combo.itemData(self.figo_kind_combo.currentIndex))
-        standard_type = self.figo_type_combo.itemData(self.figo_type_combo.currentIndex)
-        self.figo_type_combo.visible = kind == FIGOKind.STANDARD.value
-        self.figo_location_combo.visible = kind == FIGOKind.STANDARD.value and standard_type == 8
-        self.figo_endometrial_combo.visible = kind == FIGOKind.HYBRID.value
-        self.figo_serosal_combo.visible = kind == FIGOKind.HYBRID.value
-        self.figo_reason_combo.visible = kind == FIGOKind.UNCERTAIN.value
-
-    def on_apply_figo(self) -> None:
-        state = self.logic.state
-        lesion_id = self._selected_lesion_id()
-        if state is None:
-            return
-        if lesion_id is None and self.figo_lesion_combo.currentIndex >= 0:
-            lesion_id = str(self.figo_lesion_combo.itemData(self.figo_lesion_combo.currentIndex))
-        if not lesion_id:
-            return
-        kind = str(self.figo_kind_combo.itemData(self.figo_kind_combo.currentIndex))
-        try:
-            if kind == FIGOKind.STANDARD.value:
-                standard_type = int(self.figo_type_combo.itemData(self.figo_type_combo.currentIndex))
-                value: dict[str, Any] = {"kind": kind, "type": standard_type}
-                if standard_type == 8:
-                    value["location"] = str(self.figo_location_combo.itemData(self.figo_location_combo.currentIndex))
-            elif kind == FIGOKind.HYBRID.value:
-                value = {
-                    "kind": kind,
-                    "endometrial": int(self.figo_endometrial_combo.itemData(self.figo_endometrial_combo.currentIndex)),
-                    "serosal": int(self.figo_serosal_combo.itemData(self.figo_serosal_combo.currentIndex)),
-                }
-            else:
-                value = {"kind": kind, "reason": str(self.figo_reason_combo.itemData(self.figo_reason_combo.currentIndex))}
-            FIGOClassification.from_dict(value)
-            self._remember_annotation()
-            state.set_figo(lesion_id, value)
-            state.set_differential_diagnosis(lesion_id, str(self.ddx_edit.text))
-            self._write_current_draft()
-            # Saving FIGO advances straight to the next myoma so the reader
-            # can page through the whole list without reselecting each one;
-            # saving the last myoma instead offers to move on to AI reveal.
-            ordered_ids = [lesion.lesion_id for lesion in state.active_lesions]
-            position = ordered_ids.index(lesion_id) if lesion_id in ordered_ids else -1
-            if 0 <= position < len(ordered_ids) - 1:
-                self.lesion_list.setCurrentRow(position + 1)
-            self.refresh_ui()
-            if position == len(ordered_ids) - 1:
-                self._offer_ai_reveal_after_last_figo()
-        except Exception as exc:
-            self._show_error(str(exc))
-
-    def _offer_ai_reveal_after_last_figo(self) -> None:
-        answer = qt.QMessageBox.question(
-            slicer.util.mainWindow(),
-            "FIGO saved",
-            "FIGO and Ddx saved for the last myoma. Reveal AI now?",
+    def _refresh_zero_text(self) -> None:
+        self.zero_check.text = (
+            "✓  No myomas in this case — confirmed" if self.zero_check.checked
+            else "No myomas in this case"
         )
-        if answer == qt.QMessageBox.Yes:
-            self.on_reveal_ai()
+
+    def on_show_myomas(self) -> None:
+        if self.logic.segmentation_node is None:
+            self._set_status("No segmentation is shown yet; reveal AI first.")
+            return
+        self.correction_tools.show_myomas()
 
     def on_save_draft(self) -> None:
         try:
+            # Text typed on the card lives only in the card until it closes.
+            self.close_figo_card()
             self._write_current_draft()
             self.save_coordinator.clear_dirty()
             self._set_status("Draft saved.")
@@ -2067,11 +2788,13 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             and not state.zero_myomas
             and not state.lesions
             and state.blinded_snapshot is None
+            and not state.comment
         )
 
     def _write_current_draft(self) -> None:
         # A box dragged by its handles lives only in the node until this runs.
         self._commit_active_roi_geometry()
+        self._commit_case_comment()
         if self.logic.state is None or self.logic.read_only:
             return
         if self._state_is_untouched(self.logic.state):
@@ -2092,10 +2815,58 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
         The blinded snapshot, the published annotation and the undo stack are
         all built from ``logic.state``, so a drag that still lives only in the
-        markups node has to land there first or it is silently dropped.
+        markups node has to land there first or it is silently dropped. The
+        same goes for Ddx/comment text still sitting in an open FIGO card, so
+        the card is closed (which saves that text) first.
         """
 
+        self.close_figo_card()
         self._commit_active_roi_geometry()
+        self._commit_case_comment()
+
+    def _commit_case_comment(self) -> None:
+        """Fold the typed case comment into the state; the editor is its source."""
+
+        state = self.logic.state
+        if state is None or self.logic.read_only or not hasattr(self, "case_comment_edit"):
+            return
+        text = str(self.case_comment_edit.plainText).strip()
+        if text != state.comment:
+            state.set_comment(text)
+
+    def _refresh_comment_toggle(self) -> None:
+        expanded = bool(self.comment_toggle.checked)
+        has_text = bool(str(self.case_comment_edit.plainText).strip())
+        self.comment_toggle.text = "Case comment" + (" (written)" if has_text and not expanded else "")
+        self.comment_toggle.toolTip = self.comment_toggle.text
+        self.comment_toggle.setIcon(qt.QIcon(str(ICON_DIR / ("comment-written.svg" if has_text else "comment.svg"))))
+
+    def on_comment_toggled(self, expanded: bool) -> None:
+        self.case_comment_box.visible = bool(expanded)
+        self.case_comment_edit.visible = bool(expanded)
+        self._set_comment_overlay_tracking(bool(expanded))
+        if expanded:
+            self._position_comment_overlay()
+            self.case_comment_edit.setFocus()
+        else:
+            try:
+                self._write_current_draft()
+            except Exception as exc:
+                self._show_error(f"Comment could not be saved: {exc}")
+        self._refresh_comment_toggle()
+
+    def _load_case_comment(self) -> None:
+        state = self.logic.state
+        text = state.comment if state is not None else str((self.logic.final_annotation or {}).get("comment", ""))
+        self.case_comment_edit.plainText = text
+        self.case_comment_edit.readOnly = bool(self.logic.read_only)
+        self.comment_toggle.blockSignals(True)
+        self.comment_toggle.checked = False
+        self.comment_toggle.blockSignals(False)
+        self.case_comment_box.visible = False
+        self.case_comment_edit.visible = False
+        self._set_comment_overlay_tracking(False)
+        self._refresh_comment_toggle()
 
     def _has_unresolved_roi(self) -> bool:
         return bool(
@@ -2143,14 +2914,32 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             pass
         self.segmentation_observer = None
 
+    def _active_effect_update_timer(self) -> Any:
+        """The delayed-update timer of the active auto-complete effect, if any."""
+        editor = self.segment_editor_widget
+        if editor is None:
+            return None
+        try:
+            effect = editor.activeEffect()
+            return getattr(effect.self(), "delayedAutoUpdateTimer", None) if effect else None
+        except Exception:
+            return None
+
     def _teardown_current_case(self) -> None:
+        # Before anything else, so typed card text still lands in this case.
+        self.close_figo_card()
+        self._unobserve_figo_card()
         self.annotation_undo.clear()
         self.annotation_redo.clear()
         if self.correction_tools is not None:
             self.correction_tools.cleanup()
         self._remove_segmentation_observer()
+        effect_timer = self._active_effect_update_timer()
+        if effect_timer is not None:
+            effect_timer.stop()
         if self.segment_editor_widget is not None:
             editor = self.segment_editor_widget
+            self.correction_panel.unbind()
             for method_name in (
                 "setSegmentationNode",
                 "setSourceVolumeNode",
@@ -2165,10 +2954,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             except Exception:
                 pass
             try:
-                self.segment_editor_host_layout.removeWidget(editor)
-            except Exception:
-                pass
-            try:
                 editor.close()
                 editor.deleteLater()
             except Exception:
@@ -2176,10 +2961,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self.segment_editor_widget = None
         if self.draw_tool is not None:
             self.draw_tool.cancel()
+        # The case's own boxes are about to be torn down below, but the
+        # cursor belongs to the slice views, which persist across cases, so
+        # it needs an explicit reset here too.
+        self._update_box_edit_cursor(False)
         if self.click_selector is not None:
             self.click_selector.unbind_views()
-        if self.roi_overlay is not None:
-            self.roi_overlay.clear()
         self.active_roi_id = None
         self.active_roi_geometry = None
         self.roi_click_baseline = None
@@ -2196,6 +2983,12 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.roi_draft_update_id = None
         self.roi_transaction.cancel()
         self.logic._clear_loaded_nodes()
+        # Removing the segmentation can re-arm an auto-complete effect's
+        # delayed update. Left running it fires while the next case loads (on
+        # a slower machine the loader's event loop outlasts the delay) and
+        # pops a modal "Segmentation operation failed" dialog.
+        if effect_timer is not None:
+            effect_timer.stop()
         if hasattr(self, "page_stack"):
             self.page_stack.setCurrentIndex(0)
 
@@ -2227,14 +3020,17 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._show_error(f"AI reveal failed: {exc}")
 
     def _open_correction_page(self) -> None:
+        # The card never shows on the correction page.
+        self.close_figo_card()
         if self.segment_editor_widget is not None:
             return
-        self.segment_editor_widget = self.logic.setup_segment_editor(self.segment_editor_host)
+        self.segment_editor_widget = self.logic.setup_segment_editor(self.correction_panel.editor_host)
         if self.segment_editor_widget is not None:
-            self.segment_editor_host_layout.addWidget(self.segment_editor_widget)
+            self.correction_panel.bind(
+                self.segment_editor_widget, self.logic.segment_editor_node, self.logic.segmentation_node
+            )
+            self.correction_panel.set_read_only(self.logic.read_only)
         self.view_tools.restore_views(reset_orientation=False, fit=False)
-        if self.roi_overlay is not None:
-            self.roi_overlay.bind_views()
         if self.click_selector is not None:
             self.click_selector.bind_views()
         self._set_roi_visibility(False)
@@ -2242,11 +3038,29 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self._observe_segmentation()
         self.correction_tools.refresh()
 
+    EARLY_STOP_TITLES = {"no_uterus": "No uterus", "wrong_image": "Wrong image", "cannot_assess": "Cannot assess"}
+
     def on_early_stop(self, status: str) -> None:
+        """Ask in the panel before an early stop ends the case."""
         if self.logic.state is None:
             return
-        answer = qt.QMessageBox.question(slicer.util.mainWindow(), "Confirm early stop", f"Save {status.replace('_', ' ')} as the final outcome?")
-        if answer != qt.QMessageBox.Yes:
+        self._pending_early_stop = status
+        self.early_stop_question.text = f"End this case as \u201c{self.EARLY_STOP_TITLES.get(status, status)}\u201d?"
+        self.early_stop_confirm_button.text = f"End case: {self.EARLY_STOP_TITLES.get(status, status)}"
+        self.early_stop_confirm.visible = True
+        for button, value in zip(self.early_stop_buttons, self.EARLY_STOP_TITLES):
+            self._set_role_state(button, "role", "primary" if value == status else "")
+
+    def cancel_early_stop(self) -> None:
+        self._pending_early_stop = None
+        self.early_stop_confirm.visible = False
+        for button in self.early_stop_buttons:
+            self._set_role_state(button, "role", "")
+
+    def on_confirm_early_stop(self) -> None:
+        status = self._pending_early_stop
+        self.cancel_early_stop()
+        if status is None or self.logic.state is None:
             return
         try:
             self._flush_pending_roi_drag()
@@ -2277,6 +3091,43 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._advance_after_finalization("Completed labels and annotations saved.")
         except Exception as exc:
             self._show_error(f"Completion failed: {exc}")
+        finally:
+            if source is not None:
+                try:
+                    source.unlink()
+                except OSError:
+                    pass
+
+    def on_reopen_case(self) -> None:
+        if not self.logic.read_only or self.logic.manifest_source is None:
+            return
+        answer = qt.QMessageBox.question(
+            slicer.util.mainWindow(),
+            "Reopen completed case",
+            "Reopen this case to edit myoma boxes, FIGO and labels? "
+            "The published results are backed up, and the case stays unfinished "
+            "until you complete it again.",
+        )
+        if answer != qt.QMessageBox.Yes:
+            return
+        source: Path | None = None
+        try:
+            # The read-only case shows the saved corrected labels; carrying them
+            # over as the draft segmentation keeps the earlier corrections.
+            if self.logic.segmentation_node is not None and self.logic.storage is not None:
+                source = self.logic.storage.case_directory / ".reopen.tmp.seg.nrrd"
+                if not slicer.util.saveNode(self.logic.segmentation_node, str(source)):
+                    raise RuntimeError("the saved labels could not be carried over")
+            self.logic.reopen_complete(source)
+            manifest_source = self.logic.manifest_source
+            case_id = self.logic.case_id
+            self._teardown_current_case()
+            self._load_case(manifest_source, case_id)
+            self._set_status("Case reopened. Complete it again when your edits are done.")
+        except Exception as exc:
+            traceback.print_exc()
+            self._show_error(f"Case could not be reopened: {exc}")
+            self._refresh_case_list()
         finally:
             if source is not None:
                 try:
@@ -2567,19 +3418,76 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         both shows and arms them, and ``SetLocked`` does not disable them. A box
         that must not move therefore gets no handles at all. This has to run
         again after a page change, because the page decides that.
+
+        While a box is being placed or redrawn (``_has_unresolved_roi``), every
+        *other* box is hidden outright regardless of selection, for a clear,
+        uncluttered view while the reader judges the new box's extent; see
+        _update_box_edit_cursor for the matching cursor swap.
+
+        The open FIGO card hides and returns with its box, so it is placed again.
         """
 
         draggable = self._roi_handles_draggable()
+        hide_all = self._has_unresolved_roi()
         for identifier, node in self.roi_nodes.items():
             selected = identifier == self.active_roi_id
             armed = selected and draggable
             node.SetLocked(not armed)
             self._style_roi_display(node, handles=armed, outline=False)
-            node.SetDisplayVisibility(bool(selected and self.roi_boxes_visible))
+            node.SetDisplayVisibility(bool(selected and self.roi_boxes_visible and not hide_all))
             outline = self.roi_outline_nodes.get(identifier)
             if outline is not None:
                 self._style_outline_display(outline, bold=selected)
-                outline.SetDisplayVisibility(bool(self.roi_boxes_visible))
+                outline.SetDisplayVisibility(
+                    bool(self.roi_boxes_visible and not hide_all and not self._roi_hidden_by_focus(identifier))
+                )
+        # The cursor is the corner-drag affordance, so it only holds for the
+        # initial drag; once the square is set and handle fine-tuning takes
+        # over (roi_draft_node exists, draw_tool is no longer active) the
+        # normal cursor comes back even though the other boxes stay hidden.
+        self._update_box_edit_cursor(bool(self.draw_tool is not None and self.draw_tool.active))
+        self._position_figo_card()
+
+    def _roi_hidden_by_focus(self, identifier: str) -> bool:
+        """On the FIGO page a selected myoma is shown alone; with none selected, all show."""
+
+        on_figo_page = hasattr(self, "page_stack") and self.page_stack.currentIndex == 0
+        return bool(on_figo_page and self.active_roi_id is not None and identifier != self.active_roi_id)
+
+    def _box_placement_cursor(self) -> Any:
+        """A small filled yellow dot: shown while placing or redrawing a box."""
+        if self._place_box_cursor is None:
+            diameter = 8
+            pixmap = qt.QPixmap(diameter, diameter)
+            pixmap.fill(qt.Qt.transparent)
+            painter = qt.QPainter(pixmap)
+            try:
+                painter.setRenderHint(qt.QPainter.Antialiasing, True)
+                painter.setPen(qt.QPen(qt.QColor(140, 105, 0), 1))
+                painter.setBrush(qt.QBrush(qt.QColor(255, 213, 0)))
+                painter.drawEllipse(1, 1, diameter - 2, diameter - 2)
+            finally:
+                painter.end()
+            self._place_box_cursor = qt.QCursor(pixmap, diameter // 2, diameter // 2)
+        return self._place_box_cursor
+
+    def _update_box_edit_cursor(self, active: bool) -> None:
+        """Swap the slice-view cursor for the yellow dot while placing/redrawing.
+
+        A plain ``view.setCursor(...)`` does not stick: the slice view's own
+        interactor style (crosshair/pan/zoom navigation) reasserts its own
+        cursor on practically every mouse event, so the widget-level cursor
+        gets overwritten within a frame. ``QApplication`` override cursors sit
+        above that and win regardless, which is the same mechanism Slicer's
+        own placement tools use for their cursors. The stack must be pushed
+        and popped in matching pairs, hence the ``_box_cursor_applied`` guard.
+        """
+        if active and not self._box_cursor_applied:
+            slicer.app.setOverrideCursor(self._box_placement_cursor())
+            self._box_cursor_applied = True
+        elif not active and self._box_cursor_applied:
+            slicer.app.restoreOverrideCursor()
+            self._box_cursor_applied = False
 
     def set_active_roi(self, lesion_id: str | None) -> None:
         """Reveal the handles of one myoma box and hide every other box's.
@@ -2683,9 +3591,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
 
         if not self.roi_boxes_visible or self._has_unresolved_roi():
             return
+        self._last_view_name = view_name
         candidates = []
         for lesion_id, node in self.roi_nodes.items():
             if node.GetScene() is not slicer.mrmlScene:
+                continue
+            # A box hidden behind the selected one cannot be clicked: a click
+            # beside the selected box deselects, and every box shows again.
+            if self._roi_hidden_by_focus(lesion_id):
                 continue
             geometry = self._roi_geometry_or_none(node)
             if geometry is not None:
@@ -2708,10 +3621,271 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 return
         self.set_active_roi(lesion_id)
         if lesion_id is None:
+            # Empty image: the deselected box takes its card and row with it.
+            self.clear_lesion_selection()
             return
-        index = self.figo_lesion_combo.findData(lesion_id)
-        if index >= 0:
-            self.figo_lesion_combo.setCurrentIndex(index)
+        self._select_lesion_row(lesion_id)
+        self.open_figo_card(lesion_id, view_name)
+
+    # -- on-image FIGO card ------------------------------------------------
+    def _card_payload(self, lesion_id: str) -> dict[str, Any] | None:
+        """The saved FIGO/Ddx/comment for one box; a completed case reads its record."""
+
+        state = self.logic.state
+        if self.logic.read_only or state is None:
+            return next(
+                (
+                    dict(item)
+                    for item in (self.logic.final_annotation or {}).get("lesions", [])
+                    if str(item.get("lesion_id")) == lesion_id
+                ),
+                None,
+            )
+        lesion = state.lesions.get(lesion_id)
+        return lesion.to_dict() if lesion is not None else None
+
+    def roi_label(self, lesion_id: str) -> str:
+        """A box's row text: its ID and FIGO status."""
+
+        figo = (self._card_payload(lesion_id) or {}).get("figo")
+        return f"{lesion_id} · {figo_label(figo)}"
+
+    def open_figo_card(self, lesion_id: str, view_name: str | None = None) -> None:
+        """Show one box's FIGO card beside it, in the view the reader is working in."""
+
+        card = self.figo_card
+        if card is None or not hasattr(self, "page_stack") or self.page_stack.currentIndex == 1:
+            return
+        if not lesion_id or lesion_id not in self.roi_nodes:
+            return
+        view_name = view_name or self._last_view_name or VIEW_NAMES["sagittal"]
+        if card.is_open and card.lesion_id == lesion_id and self._figo_card_view == view_name:
+            # Re-opening would throw away a half-made choice (8 without a
+            # location, Hybrid with one side) for nothing.
+            self._position_figo_card()
+            return
+        slice_widget = slicer.app.layoutManager().sliceWidget(view_name)
+        if slice_widget is None:
+            return
+        # Close first, so text typed on the old card is saved before this
+        # box's values are read (it may be the same box, in another view).
+        card.close()
+        payload = self._card_payload(lesion_id)
+        if payload is None:
+            return
+        card.open(
+            slice_widget.sliceView(),
+            lesion_id,
+            payload.get("figo"),
+            payload.get("differential_diagnosis", ""),
+            payload.get("comment", ""),
+            bool(self.logic.read_only),
+        )
+        self._figo_card_view = view_name
+        self._figo_card_figo = payload.get("figo")
+        self._bind_card_escape_shortcuts()
+        self._set_card_escape_enabled(True)
+        self._observe_figo_card(lesion_id)
+        self._position_figo_card()
+
+    def close_figo_card(self) -> None:
+        if self.figo_card is not None:
+            self.figo_card.close()
+
+    def _on_card_closed(self) -> None:
+        self._unobserve_figo_card()
+        self._set_card_escape_enabled(False)
+        self._figo_card_view = None
+
+    def _observe_figo_card(self, lesion_id: str) -> None:
+        """Follow pans, zooms, slice scrolls and box drags with the card."""
+
+        self._unobserve_figo_card()
+        nodes = []
+        manager = slicer.app.layoutManager()
+        for view_name in VIEW_NAMES.values():
+            slice_widget = manager.sliceWidget(view_name)
+            if slice_widget is not None:
+                nodes.append(slice_widget.mrmlSliceNode())
+        roi = self.roi_nodes.get(lesion_id)
+        if roi is not None:
+            nodes.append(roi)
+        for node in nodes:
+            tag = node.AddObserver(vtk.vtkCommand.ModifiedEvent, lambda *_: self._position_figo_card())
+            self._figo_card_observers.append((node, tag))
+
+    def _unobserve_figo_card(self) -> None:
+        for node, tag in self._figo_card_observers:
+            try:
+                node.RemoveObserver(tag)
+            except Exception:
+                pass
+        self._figo_card_observers = []
+
+    def _position_figo_card(self) -> None:
+        """Put the card clear of its box's projection, or where the reader dragged it.
+
+        The box is not drawn off its slices, while the boxes are hidden, or
+        while another box is being placed; the card then stays where it was
+        (top right of the view if it has not been placed yet) so the reader
+        keeps their FIGO choice in sight while scrolling.
+        """
+
+        card = self.figo_card
+        if card is None or not card.is_open:
+            return
+        node = self.roi_nodes.get(card.lesion_id) if card.lesion_id else None
+        slice_widget = (
+            slicer.app.layoutManager().sliceWidget(self._figo_card_view)
+            if self._figo_card_view
+            else None
+        )
+        if node is None or slice_widget is None:
+            card.widget.visible = False
+            return
+        outline = self.roi_outline_nodes.get(card.lesion_id)
+        drawn = bool(
+            self.roi_boxes_visible
+            and not self._has_unresolved_roi()
+            and (node.GetDisplayVisibility() or (outline is not None and outline.GetDisplayVisibility()))
+        )
+        if not drawn:
+            self._keep_figo_card_up(slice_widget)
+            return
+        bounds = [0.0] * 6
+        node.GetRASBounds(bounds)
+        slice_node = slice_widget.mrmlSliceNode()
+        # Only on slices that cut the box.
+        if not slice_cuts_bounds(slice_node, bounds):
+            self._keep_figo_card_up(slice_widget)
+            return
+        inverse = vtk.vtkMatrix4x4()
+        vtk.vtkMatrix4x4.Invert(slice_node.GetXYToRAS(), inverse)
+        xs: list[float] = []
+        ys: list[float] = []
+        for r in bounds[0:2]:
+            for a in bounds[2:4]:
+                for s in bounds[4:6]:
+                    point = inverse.MultiplyPoint([r, a, s, 1.0])
+                    xs.append(point[0])
+                    ys.append(point[1])
+        view = slice_widget.sliceView()
+        try:
+            ratio = float(view.devicePixelRatioF())
+        except Exception:
+            ratio = 1.0
+        x, y = card_position(
+            (min(xs), min(ys), max(xs), max(ys)),
+            card.size(),
+            (int(view.width), int(view.height)),
+            device_pixel_ratio=ratio or 1.0,
+        )
+        card.move_to(x, y)
+        if card.widget.isHidden():
+            card.widget.visible = True
+
+    def _keep_figo_card_up(self, slice_widget: Any) -> None:
+        """Leave the card where it is while its box is not drawn."""
+        card = self.figo_card
+        if not card.placed:
+            width, _height = card.size()
+            card.place_at(max(int(slice_widget.sliceView().width) - width - 8, 0), 8)
+        if card.widget.isHidden():
+            card.widget.visible = True
+
+    def _bind_card_escape_shortcuts(self) -> None:
+        """One Esc shortcut per T2 view; armed only while the card is open.
+
+        The card's own Esc only fires with focus inside the card, but the
+        reader is usually working in the view; disarmed, the views keep Esc.
+        """
+
+        manager = slicer.app.layoutManager()
+        if manager is None:
+            return
+        armed = self.figo_card is not None and self.figo_card.is_open
+        for view_name in VIEW_NAMES.values():
+            slice_widget = manager.sliceWidget(view_name)
+            if slice_widget is None:
+                continue
+            existing = self._card_escape_shortcuts.get(view_name)
+            if existing is not None:
+                try:
+                    if existing.parent() is not None:
+                        continue
+                except Exception:
+                    pass
+            shortcut = qt.QShortcut(qt.QKeySequence("Esc"), slice_widget)
+            shortcut.context = qt.Qt.WidgetWithChildrenShortcut
+            shortcut.connect("activated()", self.close_figo_card)
+            # With focus inside the card (a child of this view) the card's own
+            # Esc matches too; Qt then fires neither, only "ambiguously".
+            shortcut.connect("activatedAmbiguously()", self.close_figo_card)
+            shortcut.enabled = armed
+            self._card_escape_shortcuts[view_name] = shortcut
+
+    def _set_card_escape_enabled(self, enabled: bool) -> None:
+        for shortcut in self._card_escape_shortcuts.values():
+            try:
+                shortcut.enabled = bool(enabled)
+            except Exception:
+                pass
+
+    def _dispose_figo_card(self) -> None:
+        """Take the card and its Esc shortcuts off the views, which outlive this widget."""
+
+        self.close_figo_card()
+        self._unobserve_figo_card()
+        for shortcut in self._card_escape_shortcuts.values():
+            try:
+                shortcut.enabled = False
+                shortcut.deleteLater()
+            except Exception:
+                pass
+        self._card_escape_shortcuts = {}
+        if self.figo_card is not None:
+            # Unparent only: the Python wrapper owns the frame, and a
+            # deleteLater on top of that deletes it twice and crashes Slicer.
+            try:
+                self.figo_card.dispose()
+                self.figo_card.widget.hide()
+                self.figo_card.widget.setParent(None)
+            except Exception:
+                pass
+            self.figo_card = None
+
+    def _on_card_figo(self, lesion_id: str, figo: dict) -> None:
+        """Save one FIGO choice made on the card as its own undo step."""
+
+        state = self.logic.state
+        if state is None or self.logic.read_only or lesion_id not in state.lesions:
+            return
+        self._remember_annotation()
+        try:
+            state.set_figo(lesion_id, figo)
+        except Exception as exc:
+            self.annotation_undo.pop()
+            self._show_error(str(exc))
+            return
+        self._write_current_draft()
+        self.refresh_ui()
+
+    def _on_card_text(self, lesion_id: str, ddx: str, comment: str) -> None:
+        """Save the card's Ddx and comment together, as one undo step."""
+
+        state = self.logic.state
+        if state is None or self.logic.read_only or lesion_id not in state.lesions:
+            return
+        self._remember_annotation()
+        try:
+            state.set_differential_diagnosis(lesion_id, ddx)
+            state.set_lesion_comment(lesion_id, comment)
+        except Exception as exc:
+            self.logic.state = ReviewState.from_draft(self.annotation_undo.pop())
+            self._show_error(str(exc))
+            return
+        self._write_current_draft()
+        self.refresh_ui()
 
     def update_roi_preview(self, preview_node: Any, geometry: BoxGeometry, view_name: str) -> Any:
         node = self._update_outline_node(preview_node, geometry, "Lite ROI preview", bold=True)
@@ -2750,9 +3924,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         center = tuple(sum(point[index] for point in corners) / 4.0 for index in range(3))
         return BoxGeometry(center, tuple(extents))
 
-    def accept_rectangle(self, geometry: BoxGeometry, update_lesion_id: str | None) -> None:
+    def accept_rectangle(
+        self, geometry: BoxGeometry, update_lesion_id: str | None, view_name: str | None = None
+    ) -> None:
         if self.roi_draft_node is not None:
             raise ValidationError("save or cancel the current ROI edit first")
+        if view_name is not None:
+            # The saved box's card opens in the view it was drawn in.
+            self._last_view_name = view_name
         # The box being drawn owns the handles; drop any earlier reveal, which
         # also flushes a pending drag before the node it belongs to is replaced.
         self.set_active_roi(None)
@@ -2769,9 +3948,11 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.roi_draft_node = node
         self._sync_draft_outline()
         self._start_live_outline_sync(node, self._sync_draft_outline)
+        # roi_draft_node just went from None to set, i.e. _has_unresolved_roi()
+        # flipped true: hide the other boxes.
+        self._apply_roi_selection()
         if hasattr(self, "save_roi_button"):
-            self.save_roi_button.enabled = True
-            self.cancel_roi_button.enabled = True
+            self._set_roi_edit_buttons(True)
         self._set_status("Adjust the native 3-D handles, then choose Save ROI or Cancel ROI.")
 
     def save_roi_edit(self) -> None:
@@ -2795,8 +3976,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             node.SetLocked(True)
             old_node = self.roi_nodes.get(lesion_id)
             if old_node is not None and old_node is not node:
-                if self.roi_overlay is not None:
-                    self.roi_overlay.untrack(old_node)
                 slicer.mrmlScene.RemoveNode(old_node)
             self.roi_nodes[lesion_id] = node
             self._stop_live_outline_sync()
@@ -2806,17 +3985,17 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             self._sync_roi_outline(lesion_id, geometry).SetDisplayVisibility(self.roi_boxes_visible)
             self.roi_draft_node = None
             self.roi_draft_update_id = None
-            self.save_roi_button.enabled = False
-            self.cancel_roi_button.enabled = False
+            self._set_roi_edit_buttons(False)
             self.roi_transaction.save()
             self._write_current_draft()
-            if self.roi_overlay is not None:
-                self.roi_overlay.track(node, lesion_id)
             self.refresh_ui()
-            self.figo_lesion_combo.setCurrentIndex(self.figo_lesion_combo.findData(lesion_id))
+            self._select_lesion_row(lesion_id)
         except Exception:
             self.cancel_roi_edit()
             raise
+        if not self.logic.read_only:
+            self.set_active_roi(lesion_id)
+        self.open_figo_card(lesion_id)
 
     def cancel_roi_edit(self) -> None:
         self._stop_live_outline_sync()
@@ -2826,15 +4005,14 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         self.roi_draft_node = None
         self.roi_draft_update_id = None
         if hasattr(self, "save_roi_button"):
-            self.save_roi_button.enabled = False
-            self.cancel_roi_button.enabled = False
+            self._set_roi_edit_buttons(False)
         self.roi_transaction.cancel()
+        # roi_draft_node just cleared, i.e. _has_unresolved_roi() may have
+        # flipped false: restore the other boxes and the cursor.
+        self._apply_roi_selection()
 
     def rebuild_roi_nodes(self) -> None:
         self.cancel_roi_edit()
-        overlay_was_bound = bool(getattr(self.roi_overlay, "views", None))
-        if self.roi_overlay is not None:
-            self.roi_overlay.clear()
         self.active_roi_id = None
         self.active_roi_geometry = None
         self._stop_live_outline_sync()
@@ -2872,12 +4050,6 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
                 traceback.print_exc()
             else:
                 outline.SetDisplayVisibility(self.roi_boxes_visible)
-            if self.roi_overlay is not None:
-                self.roi_overlay.track(node, lesion_id)
-        # clear() dropped every renderer binding, so the labels tracked above
-        # would have no actors until the next case was opened.
-        if overlay_was_bound and self.roi_overlay is not None:
-            self.roi_overlay.bind_views()
         self._release_place_mode()
 
     def _set_roi_visibility(self, visible: bool) -> None:
@@ -2889,10 +4061,49 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             # box was still draggable before the new page re-locks it.
             self._commit_active_roi_geometry()
         self._apply_roi_selection()
-        if self.roi_overlay is not None:
-            self.roi_overlay.set_enabled(bool(visible))
         if self.roi_draft_node is not None:
             self.roi_draft_node.SetDisplayVisibility(True)
+
+    def on_toggle_roi_boxes(self) -> None:
+        """The "Show / hide boxes" key: every box on the box page (before or
+        after reveal), the "Show ROI boxes" switch on the correction page."""
+        if self.page_stack.currentIndex == BOX_PAGE:
+            has_case = self.logic.state is not None or self.logic.final_annotation is not None
+            # A box being drawn or redrawn stays on screen until it is saved.
+            if not has_case or self._has_unresolved_roi():
+                return
+            self.box_page_boxes_shown = not self.box_page_boxes_shown
+            self._set_roi_visibility(self.box_page_boxes_shown)
+            self._set_status("Boxes shown." if self.box_page_boxes_shown else "Boxes hidden. Press Q to show them.")
+            return
+        if not self.show_roi_check.enabled:
+            return
+        self.show_roi_check.checked = not self.show_roi_check.checked
+
+    def _pick_segment(self, label_value: int) -> None:
+        """Keys 1-4 pick a label by its value in the mask, on the correction page only."""
+        if self.page_stack.currentIndex != SEGMENT_PAGE or self.segment_editor_widget is None:
+            return
+        self.correction_panel.select_segment(FIXED_SEGMENT_IDS[label_value])
+
+    def on_pick_segment_1(self) -> None:
+        self._pick_segment(1)
+
+    def on_pick_segment_2(self) -> None:
+        self._pick_segment(2)
+
+    def on_pick_segment_3(self) -> None:
+        self._pick_segment(3)
+
+    def on_pick_segment_4(self) -> None:
+        self._pick_segment(4)
+
+    def on_toggle_ai_mask(self) -> None:
+        """The "Show / hide AI mask" key: once AI is revealed, on either page."""
+        if self.logic.segmentation_node is None:
+            return
+        shown = self.correction_tools.toggle_mask()
+        self._set_status("AI mask shown." if shown else "AI mask hidden. Press the key again to show it.")
 
     def on_show_roi_toggled(self, checked: bool) -> None:
         if self.logic.segmentation_node is not None:
@@ -2902,6 +4113,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
         if self.shutdown_saved:
             return
         try:
+            self.close_figo_card()
             self._write_current_draft()
             self.save_coordinator.clear_dirty()
             self.shutdown_saved = True
@@ -2911,9 +4123,19 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
     def cleanup(self) -> None:
         if SLICER_AVAILABLE:
             self.exit()
+            if hasattr(self, "comment_toggle"):
+                self._set_comment_overlay_tracking(False)
+            if hasattr(self, "_lesion_list_filter"):
+                try:
+                    self.lesion_list.viewport().removeEventFilter(self._lesion_list_filter)
+                except Exception:
+                    pass
             for shortcut in self.shortcuts:
                 shortcut.deleteLater()
             self.shortcuts = []
+            if self.mouse_button_dispatcher is not None:
+                self.mouse_button_dispatcher.uninstall()
+                self.mouse_button_dispatcher = None
             if self.shift_crosshair_toggle is not None:
                 self.shift_crosshair_toggle.uninstall()
                 self.shift_crosshair_toggle = None
@@ -2927,6 +4149,7 @@ class MyomaReviewLiteWidget(ScriptedLoadableModuleWidget):
             except Exception:
                 pass
             self._teardown_current_case()
+            self._dispose_figo_card()
         super().cleanup()
 
 

@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "hello",
+  "title": "Hello Studio",
+  "module_paths": ["HelloStudio"],
+  "start_module": "HelloStudio",
+  "uses_dataset": false,
+  "env": {"STUDIO_WORKSPACE": "{workspace}"}
+}
