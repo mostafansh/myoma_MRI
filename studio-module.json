@@ -9,5 +9,6 @@
     "MYOMA_REVIEW_LITE_CASE": "{workspace}/queue.json",
     "MYOMA_REVIEW_LITE_DATA_ROOT": "{dataset}"
   },
-  "workspace_requires": ["queue.json"]
+  "workspace_requires": ["queue.json"],
+  "voxlab": {"queue_tool": "reader_queue.py", "launcher": "Start-MyomaReviewLite.ps1"}
 }
