@@ -94,6 +94,7 @@ class FigoCard:
         on_text: Callable[[str, str, str], None],
         on_close: Callable[[], None],
         on_resize: Callable[[], None] | None = None,
+        on_question: Callable[[str, str | None], None] | None = None,
     ) -> None:
         import qt
 
@@ -102,6 +103,8 @@ class FigoCard:
         self._on_text = on_text
         self._on_close = on_close
         self._on_resize = on_resize
+        self._on_question = on_question
+        self._orig_question: str | None = None
         self.lesion_id: str | None = None
         self.is_open = False
         self._loading = False
@@ -190,6 +193,21 @@ class FigoCard:
         self._comment.maxLength = 4000
         layout.addWidget(self._ddx)
         layout.addWidget(self._comment)
+
+        # A question for the senior reviewer: a tag on this myoma, with optional text.
+        self._question_toggle = qt.QToolButton()
+        self._question_toggle.objectName = "figo_question"
+        self._question_toggle.text = "?  Question for senior reviewer"
+        self._question_toggle.checkable = True
+        self._question_toggle.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+        self._question_toggle.connect("toggled(bool)", self._question_toggled)
+        layout.addWidget(self._question_toggle)
+        self._question = qt.QLineEdit()
+        self._question.objectName = "figo_question_text"
+        self._question.placeholderText = "What to ask (optional)"
+        self._question.maxLength = 4000
+        self._question.visible = False
+        layout.addWidget(self._question)
 
         shortcut = qt.QShortcut(qt.QKeySequence("Esc"), widget)
         shortcut.context = qt.Qt.WidgetWithChildrenShortcut
@@ -373,7 +391,7 @@ class FigoCard:
             button.checked = True
 
     # -- lifecycle ---------------------------------------------------------
-    def open(self, parent, lesion_id, figo, ddx, comment, read_only) -> None:
+    def open(self, parent, lesion_id, figo, ddx, comment, read_only, question=None) -> None:
         if self.is_open:
             self.close()
         qt = self._qt
@@ -388,6 +406,14 @@ class FigoCard:
         self._comment.text = comment or ""
         self._orig_ddx = (ddx or "").strip()
         self._orig_comment = (comment or "").strip()
+        self._loading = True
+        try:
+            self._question_toggle.checked = question is not None
+            self._question.text = question or ""
+            self._question.visible = question is not None
+        finally:
+            self._loading = False
+        self._orig_question = None if question is None else question.strip()
         for cls in (qt.QAbstractButton, qt.QLineEdit):
             for control in self.widget.findChildren(cls):
                 # Closing, and unfolding the type row to look, stay possible.
@@ -406,20 +432,47 @@ class FigoCard:
             and (
                 self._ddx.text.strip() != self._orig_ddx
                 or self._comment.text.strip() != self._orig_comment
+                or self._question_changed()
             )
         )
 
     def close(self) -> None:
         if not self.is_open:
             return
-        unsaved = self.has_unsaved_text()
+        texts_changed = (
+            self._ddx.text.strip() != self._orig_ddx or self._comment.text.strip() != self._orig_comment
+        )
+        question_changed = self._question_changed()
         self.is_open = False
         try:
-            if unsaved:
+            if texts_changed:
                 self._on_text(self.lesion_id, self._ddx.text.strip(), self._comment.text.strip())
+            if question_changed and self._on_question is not None:
+                self._on_question(self.lesion_id, self._current_question())
         finally:
             self.widget.hide()
             self._on_close()
+
+    def _current_question(self) -> str | None:
+        return self._question.text.strip() if self._question_toggle.checked else None
+
+    def _question_changed(self) -> bool:
+        return self.is_open and self.lesion_id is not None and self._current_question() != self._orig_question
+
+    def _question_toggled(self, checked: bool) -> None:
+        """Tagging or untagging saves at once; typed text is saved on close."""
+        self._question.visible = bool(checked)
+        self.widget.adjustSize()
+        if self._on_resize is not None:
+            self._on_resize()
+        if self._loading or not self.is_open or self.lesion_id is None:
+            return
+        if checked:
+            self._question.setFocus()
+        question = self._current_question()
+        if self._on_question is not None and question != self._orig_question:
+            self._orig_question = question
+            self._on_question(self.lesion_id, question)
 
     def move_to(self, x: int, y: int) -> None:
         """Sit at (x, y) beside the box, shifted by wherever the reader dragged it."""

@@ -212,6 +212,33 @@ def test_extra_rows_grow_the_card_instead_of_squashing_the_buttons():
     assert card.widget.height == closed_height, "the card did not shrink back"
 
 
+def test_question_tag_saves_on_toggle_and_text_on_close() -> None:
+    questions = []
+    card = FigoCard(lambda *a: None, lambda *a: None, lambda: None, on_question=lambda lid, q: questions.append((lid, q)))
+    parent = qt.QWidget()
+    parent.resize(400, 300)
+    card.open(parent, "M01", None, "", "", False)
+    toggle = _child(card, qt.QToolButton, "figo_question")
+    text = _child(card, qt.QLineEdit, "figo_question_text")
+    assert not toggle.checked and not text.isVisibleTo(card.widget)
+    toggle.click()
+    assert questions == [("M01", "")], questions
+    assert text.isVisibleTo(card.widget)
+    text.text = "  Type 2 or 3?  "
+    card.close()
+    assert questions[-1] == ("M01", "Type 2 or 3?"), questions
+
+    # Reopened with its question, the tag is on; untagging removes it at once.
+    questions.clear()
+    card.open(parent, "M01", None, "", "", False, question="Type 2 or 3?")
+    assert toggle.checked and text.text == "Type 2 or 3?"
+    assert questions == [], "opening the card saved something"
+    toggle.click()
+    assert questions == [("M01", None)], questions
+    card.close()
+    assert questions == [("M01", None)], "closing saved the question again"
+
+
 TESTS = (
     test_extra_rows_grow_the_card_instead_of_squashing_the_buttons,
     test_no_dropdowns_remain,
@@ -225,6 +252,7 @@ TESTS = (
     test_text_is_flushed_on_close_only_when_changed,
     test_set_figo_updates_without_firing,
     test_read_only_disables_every_control,
+    test_question_tag_saves_on_toggle_and_text_on_close,
 )
 
 failures = 0

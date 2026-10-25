@@ -85,7 +85,7 @@ def test_panel_has_header_drawer_and_annotation() -> None:
     assert widget.content_stack.indexOf(widget.queue_drawer) == 1
     assert widget.annotation_tab.layout().indexOf(widget.page_stack) >= 0
     assert widget.manifest_button.text == "Open case manifest"
-    assert list(widget.filter_buttons) == ["todo", "finished", "attention", "all"]
+    assert list(widget.filter_buttons) == ["todo", "finished", "attention", "questions", "all"]
     assert widget.filter_buttons["todo"].checked
     assert widget.case_list.count == 0
     assert not widget.prev_case_button.enabled and not widget.next_case_button.enabled

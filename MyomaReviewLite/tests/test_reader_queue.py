@@ -44,6 +44,7 @@ class ReaderQueueCreationTests(unittest.TestCase):
         *,
         mask_values: tuple[int, ...] = (0, 1, 2, 3, 4),
         axial_shape: tuple[int, int, int] = (3, 4, 5),
+        mask_shape: tuple[int, int, int] = (3, 4, 5),
     ) -> None:
         directory = self.data_root / case_id
         directory.mkdir(parents=True)
@@ -59,7 +60,7 @@ class ReaderQueueCreationTests(unittest.TestCase):
                 nib.Nifti1Image(data, affine),
                 directory / f"{case_id}_{short_name}_t2.nii.gz",
             )
-        mask = np.resize(np.asarray(mask_values, dtype=np.int16), (3, 4, 5))
+        mask = np.resize(np.asarray(mask_values, dtype=np.int16), mask_shape)
         nib.save(
             nib.Nifti1Image(mask, affine),
             directory / f"{case_id}_mask_0.nii.gz",
@@ -119,6 +120,13 @@ class ReaderQueueCreationTests(unittest.TestCase):
         with self.assertRaisesRegex(QueueCreationError, "unknown"):
             self._create(case_list="sub-99999")
 
+    def test_accepts_axial_and_coronal_on_their_own_grids(self) -> None:
+        self._make_case("sub-00001", axial_shape=(6, 7, 2))
+
+        result = self._create()
+
+        self.assertEqual(result.case_ids, ("sub-00001",))
+
     def test_rejects_wrong_filename_geometry_and_mask_labels(self) -> None:
         self._make_case("sub-00001")
         expected = self.data_root / "sub-00001" / "sub-00001_cor_t2.nii.gz"
@@ -128,8 +136,8 @@ class ReaderQueueCreationTests(unittest.TestCase):
 
         self.temporary.cleanup()
         self.setUp()
-        self._make_case("sub-00001", axial_shape=(2, 4, 5))
-        with self.assertRaisesRegex(QueueCreationError, "geometry"):
+        self._make_case("sub-00001", mask_shape=(2, 4, 5))
+        with self.assertRaisesRegex(QueueCreationError, "mask geometry"):
             self._create()
 
         self.temporary.cleanup()

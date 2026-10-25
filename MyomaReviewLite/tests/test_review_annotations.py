@@ -313,5 +313,53 @@ class CommentTests(unittest.TestCase):
         self.assertEqual(state.early_stop("wrong_image", completed_at=LATER)["comment"], "Only a pelvic scout was sent")
 
 
+class QuestionTests(unittest.TestCase):
+    def test_case_and_myoma_questions_persist_into_the_final_record(self) -> None:
+        state = annotated_state()
+        self.assertFalse(state.has_questions)
+        state.set_question("  Is the left lesion subserosal or pedunculated?  ")
+        state.set_lesion_question("M01", " Type 2 or 3? ")
+        self.assertTrue(state.has_questions)
+        restored = ReviewState.from_draft(json.loads(json.dumps(state.to_draft())))
+        self.assertEqual(restored.question, "Is the left lesion subserosal or pedunculated?")
+        self.assertEqual(restored.lesions["M01"].question, "Type 2 or 3?")
+        restored.reveal(revealed_at=STAMP)
+        final = restored.complete(completed_at=LATER)
+        self.assertEqual(final["question"], "Is the left lesion subserosal or pedunculated?")
+        self.assertEqual(final["lesions"][0]["question"], "Type 2 or 3?")
+
+    def test_a_tag_without_text_still_counts_and_can_be_removed(self) -> None:
+        state = annotated_state()
+        state.set_lesion_question("M01", "")
+        self.assertTrue(state.has_questions)
+        self.assertEqual(state.to_draft()["lesions"][0]["question"], "")
+        state.set_lesion_question("M01", None)
+        self.assertFalse(state.has_questions)
+        self.assertIsNone(state.to_draft()["lesions"][0]["question"])
+
+    def test_old_files_without_questions_still_load(self) -> None:
+        payload = annotated_state().to_draft()
+        payload.pop("question")
+        payload["lesions"][0].pop("question")
+        restored = ReviewState.from_draft(payload)
+        self.assertEqual(restored.question, "")
+        self.assertIsNone(restored.lesions["M01"].question)
+        self.assertFalse(restored.has_questions)
+
+    def test_completed_case_questions_are_read_only(self) -> None:
+        state = annotated_state()
+        state.reveal(revealed_at=STAMP)
+        state.complete(completed_at=LATER)
+        with self.assertRaises(ValidationError):
+            state.set_question("late")
+        with self.assertRaises(ValidationError):
+            state.set_lesion_question("M01", "late")
+
+    def test_early_stop_keeps_the_case_question(self) -> None:
+        state = ReviewState.new("study", "reader", "case", started_at=STAMP)
+        state.set_question("Is this the right series?")
+        self.assertEqual(state.early_stop("wrong_image", completed_at=LATER)["question"], "Is this the right series?")
+
+
 if __name__ == "__main__":
     unittest.main()

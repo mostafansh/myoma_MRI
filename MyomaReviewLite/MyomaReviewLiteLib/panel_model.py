@@ -11,6 +11,7 @@ CASE_FILTERS = (
     ("To do", "todo"),
     ("Finished", "finished"),
     ("Attention", "attention"),
+    ("Questions", "questions"),
     ("All", "all"),
 )
 DEFAULT_CASE_FILTER = "todo"
@@ -18,6 +19,8 @@ CASE_FILTER_STATUSES: dict[str, frozenset[QueueStatus]] = {
     "todo": frozenset({QueueStatus.ATTENTION, QueueStatus.IN_PROGRESS, QueueStatus.NEW}),
     "finished": frozenset({QueueStatus.COMPLETE}),
     "attention": frozenset({QueueStatus.ATTENTION}),
+    # Any status; case_groups keeps only cases with a question.
+    "questions": frozenset(QueueStatus),
     "all": frozenset(QueueStatus),
 }
 CASE_GROUPS = (
@@ -75,11 +78,25 @@ def case_groups(
             continue
         members = [
             entry for entry in entries
-            if entry.status is status and matches_case_search(entry.case_id, needle)
+            if entry.status is status
+            and matches_case_search(entry.case_id, needle)
+            and (filter_key != "questions" or entry.has_question)
         ]
         if members:
             groups.append((title, members))
     return groups
+
+
+def case_filter_counts(entries: Sequence[QueueEntry]) -> dict[str, int]:
+    """How many cases each filter pill lists."""
+
+    return {
+        key: sum(
+            1 for entry in entries
+            if entry.status in statuses and (key != "questions" or entry.has_question)
+        )
+        for key, statuses in CASE_FILTER_STATUSES.items()
+    }
 
 
 def queue_strip_text(counts: Mapping[QueueStatus, int]) -> str:

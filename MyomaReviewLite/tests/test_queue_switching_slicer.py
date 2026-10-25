@@ -119,8 +119,11 @@ def test_queue_switching_and_corrected_restore() -> None:
                 segment_id,
                 widget.logic.volume_nodes["sagittal"],
             )
-            original = int(values[0, 0, 0])
-            values[0, 0, 0] = 0 if original else 1
+            # A corner and an interior voxel: on an oblique sagittal the draft
+            # save once resampled every edit away, not only edge voxels.
+            edited_voxels = [(0, 0, 0), tuple(size // 2 for size in values.shape)]
+            for voxel in edited_voxels:
+                values[voxel] = 0 if values[voxel] else 1
             slicer.util.updateSegmentBinaryLabelmapFromArray(
                 values,
                 widget.logic.segmentation_node,
@@ -140,7 +143,8 @@ def test_queue_switching_and_corrected_restore() -> None:
                 segment_id,
                 widget.logic.volume_nodes["sagittal"],
             )
-            assert int(restored[0, 0, 0]) == int(values[0, 0, 0])
+            for voxel in edited_voxels:
+                assert int(restored[voxel]) == int(values[voxel]), voxel
 
             widget.logic.validate_correction_segments()
             temporary_labels = widget._save_corrected_snapshot()
