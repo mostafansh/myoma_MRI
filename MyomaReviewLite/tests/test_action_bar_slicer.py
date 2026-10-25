@@ -3,6 +3,7 @@ pop-over, the folding "Nothing to box?" section and the read-only banner."""
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import tempfile
@@ -27,6 +28,7 @@ from MyomaReviewLite import (  # noqa: E402
     MyomaReviewLiteWidget,
 )
 from MyomaReviewLiteLib import CaseStorage, ReviewState  # noqa: E402
+from MyomaReviewLiteLib import theme  # noqa: E402
 
 assert Path(bundled_module.__file__).resolve().parent == MODULE_ROOT
 
@@ -172,8 +174,43 @@ def test_the_panel_is_painted_in_the_warm_background() -> None:
         widget.cleanup()
 
 
+def test_questions_for_the_senior_reviewer() -> None:
+    widget = _build_case("sub-00104", 2)
+    try:
+        first = sorted(widget.logic.state.lesions)[0]
+        # The case question opens in the comment's pop-over; one note at a time.
+        assert widget.action_bar.isAncestorOf(widget.question_toggle)
+        widget.question_toggle.checked = True
+        assert not widget.case_question_edit.isHidden() and widget.case_comment_edit.isHidden()
+        assert widget.case_note_title.text == "Question for the senior reviewer"
+        widget.case_question_edit.plainText = "  Is M01 submucosal?  "
+        widget.comment_toggle.checked = True
+        assert not widget.question_toggle.checked, "two notes are open at once"
+        assert widget.case_question_edit.isHidden() and not widget.case_comment_edit.isHidden()
+        widget.comment_toggle.checked = False
+        assert widget.logic.state.question == "Is M01 submucosal?"
+        draft = json.loads(widget.logic.storage.draft_path.read_text(encoding="utf-8"))
+        assert draft["question"] == "Is M01 submucosal?", draft.get("question")
+        assert "(written)" in widget.question_toggle.toolTip
+
+        # A myoma question shows as a "?" on its row and is saved with the box.
+        widget._on_card_question(first, "Type 2 or 3?")
+        row = next(
+            widget.lesion_list.item(i) for i in range(widget.lesion_list.count)
+            if widget.lesion_list.item(i).data(qt.Qt.UserRole) == first
+        )
+        assert row.data(theme.ROW_BADGE) == "?", row.data(theme.ROW_BADGE)
+        draft = json.loads(widget.logic.storage.draft_path.read_text(encoding="utf-8"))
+        assert next(item for item in draft["lesions"] if item["lesion_id"] == first)["question"] == "Type 2 or 3?"
+        widget._on_card_question(first, None)
+        assert not widget.logic.state.lesions[first].question
+    finally:
+        widget.cleanup()
+
+
 TESTS = (
     test_mode_switch_and_hint_follow_the_blind_read,
+    test_questions_for_the_senior_reviewer,
     test_comment_popover_sits_above_the_action_bar,
     test_nothing_to_box_opens_for_an_empty_case_and_stays_as_the_reader_leaves_it,
     test_a_completed_read_only_case_shows_the_banner_and_next_case,

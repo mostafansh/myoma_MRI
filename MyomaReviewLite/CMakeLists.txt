@@ -17,6 +17,8 @@ set(MODULE_PYTHON_RESOURCES
   Resources/Icons/chevron-down.svg
   Resources/Icons/comment.svg
   Resources/Icons/comment-written.svg
+  Resources/Icons/question.svg
+  Resources/Icons/question-written.svg
   Resources/Icons/tool-paint.svg
   Resources/Icons/tool-erase.svg
   Resources/Icons/tool-draw.svg

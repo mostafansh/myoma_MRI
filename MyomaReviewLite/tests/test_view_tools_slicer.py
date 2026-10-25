@@ -45,6 +45,10 @@ def test_true_planes_sources_and_contrast() -> None:
             # Slicer may show it again on layout changes; it stays zero-sized.
             assert not button.isVisible() or button.width == 0, f"{name} shows {part}"
         assert not bar.findChild(qt.QWidget, "SliceOffsetSlider").spinBoxVisible
+        # Ctrl + left-drag would rotate the slice to an oblique plane, which
+        # crashes Slicer; it is off as soon as the views exist.
+        style = slice_widget.sliceView().interactorObserver()
+        assert not style.GetActionEnabled(style.Rotate), f"{name} still rotates on Ctrl + drag"
 
     # Restore an incorrectly selected source and a genuinely oblique slice.
     for plane, name in VIEW_NAMES.items():

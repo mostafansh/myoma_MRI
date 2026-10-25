@@ -171,7 +171,10 @@ def validate_common_geometry(geometries: Iterable[Mapping[str, Any] | ImageGeome
     for index, item in enumerate(parsed[1:], start=1):
         if item.dimensions != reference.dimensions:
             raise ValidationError(f"image {index} dimensions do not match sagittal reference")
-        if any(abs(a - b) > 1e-5 for a, b in zip(item.ijk_to_ras, reference.ijk_to_ras)):
+        # NIfTI stores the header in float32, so an oblique native grid
+        # saved and reloaded by Slicer drifts by ~1e-5 mm; 1e-3 mm is still
+        # far below any voxel.
+        if any(abs(a - b) > 1e-3 for a, b in zip(item.ijk_to_ras, reference.ijk_to_ras)):
             raise ValidationError(f"image {index} IJK-to-RAS geometry does not match sagittal reference")
     return reference
 
@@ -475,6 +478,9 @@ class Lesion:
     figo: FIGOClassification | None = None
     differential_diagnosis: str = ""
     comment: str = ""
+    # A question for the senior reviewer: None is no question, "" a tag
+    # without text yet.
+    question: str | None = None
 
     def __post_init__(self) -> None:
         if not _LESION_RE.fullmatch(self.lesion_id):
@@ -491,6 +497,10 @@ class Lesion:
         if not isinstance(self.comment, str):
             raise ValidationError("comment must be text")
         self.comment = self.comment.strip()
+        if self.question is not None:
+            if not isinstance(self.question, str):
+                raise ValidationError("question must be text")
+            self.question = self.question.strip()
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "Lesion":
@@ -505,6 +515,7 @@ class Lesion:
             figo=None if figo is None else FIGOClassification.from_dict(figo),
             differential_diagnosis=value.get("differential_diagnosis", ""),
             comment=value.get("comment", ""),
+            question=value.get("question"),
         )
 
     def to_dict(self, *, require_figo: bool = False) -> dict[str, Any]:
@@ -517,6 +528,7 @@ class Lesion:
             "figo": None if self.figo is None else self.figo.to_dict(),
             "differential_diagnosis": self.differential_diagnosis,
             "comment": self.comment,
+            "question": self.question,
         }
 
 
@@ -534,6 +546,8 @@ class ReviewState:
     blinded_snapshot: dict[str, Any] | None = None
     next_lesion_number: int = 1
     comment: str = ""
+    # The reader's question on the whole case, for the senior reviewer.
+    question: str = ""
 
     @classmethod
     def new(cls, study_id: str, reader_id: str, case_id: str, *, started_at: str | None = None) -> "ReviewState":
@@ -568,6 +582,7 @@ class ReviewState:
             blinded_snapshot=deepcopy(value.get("blinded_snapshot")),
             next_lesion_number=value.get("next_lesion_number", 1),
             comment=value.get("comment", ""),
+            question=value.get("question") or "",
         )
         # Legacy revealed drafts were locked against annotation edits, so their
         # saved annotations are the original blinded record.
@@ -636,6 +651,9 @@ class ReviewState:
         if not isinstance(self.comment, str):
             raise ValidationError("comment must be text")
         self.comment = self.comment.strip()
+        if not isinstance(self.question, str):
+            raise ValidationError("question must be text")
+        self.question = self.question.strip()
         if isinstance(self.next_lesion_number, bool) or not isinstance(self.next_lesion_number, int) or self.next_lesion_number < 1:
             raise ValidationError("next_lesion_number must be a positive integer")
         if len(self.lesions) != len(set(self.lesions)):
@@ -735,6 +753,29 @@ class ReviewState:
             raise ValidationError("comment must be text")
         self.comment = text.strip()
 
+    def set_question(self, text: str) -> None:
+        """The reader's question on the whole case, for the senior reviewer."""
+
+        self._ensure_editable()
+        if not isinstance(text, str):
+            raise ValidationError("question must be text")
+        self.question = text.strip()
+
+    def set_lesion_question(self, lesion_id: str, text: str | None) -> None:
+        """Tag a myoma with a question (None removes the tag)."""
+
+        self._ensure_editable()
+        if lesion_id not in self.lesions:
+            raise ValidationError(f"unknown lesion: {lesion_id}")
+        self.lesions[lesion_id] = replace(self.lesions[lesion_id], question=text)
+        self.validate()
+
+    @property
+    def has_questions(self) -> bool:
+        """Whether the case or any of its myomas asks the senior reviewer something."""
+
+        return bool(self.question) or any(item.question is not None for item in self.active_lesions)
+
     def confirm_zero_myomas(self, confirmed: bool) -> None:
         self._ensure_editable()
         if confirmed and self.lesions:
@@ -788,6 +829,7 @@ class ReviewState:
             "blinded_snapshot": deepcopy(self.blinded_snapshot),
             "next_lesion_number": self.next_lesion_number,
             "comment": self.comment,
+            "question": self.question,
         }
 
     def to_annotation(self, module_version: str, *, status: str) -> dict[str, Any]:
@@ -822,4 +864,5 @@ class ReviewState:
             "label_names": dict(LABEL_NAMES),
             "corrected_labelmap": "corrected_labels.nii.gz" if status == "complete" else None,
             "comment": self.comment,
+            "question": self.question,
         }
